@@ -128,6 +128,32 @@ def assert_delete_actor(storage_case, entity_type, entity_key, actor="operator")
     assert event.payload["actor"] == actor
 
 
+def test_healthz_is_public_and_checks_selected_storage(
+    app_module, storage_case, monkeypatch
+):
+    monkeypatch.setattr(app_module, "store", storage_case.store)
+    monkeypatch.setattr(app_module, "IS_DESKTOP_APP", False)
+
+    with app_module.app.test_client() as anonymous_client:
+        response = anonymous_client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.get_json() == {"status": "ok", "storage": storage_case.name}
+
+
+def test_healthz_returns_503_when_storage_check_fails(app_module, monkeypatch):
+    class BrokenStore:
+        def load_entities(self, _kind):
+            raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(app_module, "store", BrokenStore())
+    with app_module.app.test_client() as anonymous_client:
+        response = anonymous_client.get("/healthz")
+
+    assert response.status_code == 503
+    assert response.get_json() == {"status": "error", "storage": "unavailable"}
+
+
 def test_delete_actor_falls_back_to_system_without_request_context(app_module):
     assert app_module._current_actor() == "system"
 

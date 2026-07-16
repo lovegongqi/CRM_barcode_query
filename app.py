@@ -6446,6 +6446,15 @@ def require_app_login():
 def inject_app_flags():
     return {'is_desktop_app': IS_DESKTOP_APP}
 
+@app.route("/healthz")
+def healthz():
+    try:
+        store.load_entities("runtime_setting")
+    except Exception:
+        return jsonify({'status': 'error', 'storage': 'unavailable'}), 503
+    storage_name = 'file' if isinstance(store, FileStore) else 'postgres'
+    return jsonify({'status': 'ok', 'storage': storage_name})
+
 @app.route("/api/logs")
 def api_operation_logs():
     category = str(request.args.get('category') or '').strip()

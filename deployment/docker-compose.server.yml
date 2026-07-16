@@ -1,0 +1,98 @@
+name: crm-barcode-query-server
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-crm}"
+      POSTGRES_USER: "${POSTGRES_USER:-crm}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      TZ: Asia/Shanghai
+    volumes:
+      - crm_app_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  migrate:
+    profiles: ["migration"]
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: crm-barcode-query:server
+    restart: "no"
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?set DATABASE_URL}"
+      CRM_CREDENTIALS_KEY: "${CRM_CREDENTIALS_KEY:?set CRM_CREDENTIALS_KEY}"
+      CRM_NODE_ID: "${CRM_NODE_ID:-hk}"
+      TZ: Asia/Shanghai
+    command:
+      - sh
+      - -c
+      - >-
+        exec python scripts/migrate_files_to_postgres.py
+        --data-dir /source-data
+        --database-url "$${DATABASE_URL}"
+        --node-id "$${CRM_NODE_ID}"
+        --verify
+    volumes:
+      - type: bind
+        source: "${MIGRATION_DATA_DIR:-../data}"
+        target: /source-data
+        read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  crm-barcode-query:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: crm-barcode-query:server
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?set DATABASE_URL}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      CRM_CREDENTIALS_KEY: "${CRM_CREDENTIALS_KEY:?set CRM_CREDENTIALS_KEY}"
+      FLASK_SECRET_KEY: "${FLASK_SECRET_KEY:?set FLASK_SECRET_KEY}"
+      CRM_NODE_ID: "${CRM_NODE_ID:-hk}"
+      CRM_QUERY_WORKERS: "${CRM_QUERY_WORKERS:-5}"
+      CRM_TRANSFER_WORKERS: "${CRM_TRANSFER_WORKERS:-2}"
+      CRM_DATA_DIR: /app/data
+      CRM_SESSION_BASE: /app/session
+      CRM_DISABLE_DATA_MIGRATION: "1"
+      TZ: Asia/Shanghai
+    ports:
+      - "${CRM_HTTP_PORT:-5001}:5001"
+    volumes:
+      - crm_app_runtime:/app/data
+      - crm_browser_session:/app/session
+    shm_size: "1gb"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:5001/healthz', timeout=5).read()
+      interval: 15s
+      timeout: 8s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  crm_app_postgres:
+    name: crm_app_postgres
+  crm_app_runtime:
+    name: crm_app_runtime
+  crm_browser_session:
+    name: crm_browser_session

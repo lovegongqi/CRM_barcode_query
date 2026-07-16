@@ -5,6 +5,11 @@ runtime_config.json
 crm_credentials.json
 config/
 .env
+deployment/server.env
+deployment/test.env
+backups/
+*.dump.age
+*.dump.age.sha256
 
 # Generated query output
 barcode/
