@@ -19,6 +19,7 @@ import shutil
 from collections import OrderedDict
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response, session, redirect
 from datetime import datetime
+from crm_storage.factory import get_store
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -78,6 +79,7 @@ except (TypeError, ValueError):
 
 RUNTIME_BASE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(__file__)
 RESOURCE_BASE_DIR = getattr(sys, "_MEIPASS", RUNTIME_BASE_DIR)
+store = get_store()
 CRM_CONFIG_PATH = os.path.join(RUNTIME_BASE_DIR, "config.json")
 IS_DESKTOP_APP = os.environ.get("CRM_DESKTOP_APP") == "1"
 STARTUP_LOGIN_AUTO_CHECK = os.environ.get("CRM_STARTUP_LOGIN_AUTO_CHECK", "1") != "0"
@@ -3406,17 +3408,12 @@ def _load_worker_count_config():
         "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 2),
         "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 2),
     }
-    config_path = _runtime_config_path()
     _migrate_root_config_file("runtime_config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                defaults["query_workers"] = _normalize_worker_count(data.get("query_workers"), defaults["query_workers"])
-                defaults["transfer_workers"] = _normalize_worker_count(data.get("transfer_workers"), defaults["transfer_workers"])
-        except Exception:
-            pass
+    row = store.get_entity("runtime_setting", "runtime")
+    if row and not row.deleted:
+        data = row.payload
+        defaults["query_workers"] = _normalize_worker_count(data.get("query_workers"), defaults["query_workers"])
+        defaults["transfer_workers"] = _normalize_worker_count(data.get("transfer_workers"), defaults["transfer_workers"])
     return defaults
 
 def _crm_session_base_dir():
@@ -4721,6 +4718,18 @@ def _migrate_config_files_from_barcode_dir():
 
 _migrate_config_files_from_barcode_dir()
 
+def _load_entity_mapping(kind):
+    return {row.key: row.payload for row in store.load_entities(kind)}
+
+def _replace_entities(kind, rows):
+    desired = OrderedDict((str(key), dict(payload)) for key, payload in rows)
+    existing = store.load_entities(kind, include_deleted=True)
+    for key, payload in desired.items():
+        store.put_entity(kind, key, payload)
+    for row in existing:
+        if not row.deleted and row.key not in desired:
+            store.delete_entity(kind, row.key)
+
 def _runtime_text_value(value, default):
     value = str(value or "").replace("\xa0", " ").strip()
     return value or default
@@ -4746,22 +4755,17 @@ def load_runtime_config():
         "frozen_warehouse_name": _runtime_text_value(os.environ.get("CRM_FROZEN_WAREHOUSE_NAME"), DEFAULT_FROZEN_WAREHOUSE_NAME),
         "frozen_warehouse_save_only": _runtime_bool_value(os.environ.get("CRM_FROZEN_WAREHOUSE_SAVE_ONLY"), True),
     }
-    if os.path.exists(RUNTIME_CONFIG_FILE):
-        try:
-            with open(RUNTIME_CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                defaults["query_workers"] = _normalize_worker_count(data.get("query_workers"), defaults["query_workers"])
-                defaults["transfer_workers"] = _normalize_worker_count(data.get("transfer_workers"), defaults["transfer_workers"])
-                defaults["own_dealer_name"] = _runtime_text_value(data.get("own_dealer_name"), defaults["own_dealer_name"])
-                defaults["frozen_warehouse_name"] = _runtime_text_value(data.get("frozen_warehouse_name"), defaults["frozen_warehouse_name"])
-                defaults["frozen_warehouse_save_only"] = _runtime_bool_value(data.get("frozen_warehouse_save_only"), defaults["frozen_warehouse_save_only"])
-        except Exception:
-            pass
+    row = store.get_entity("runtime_setting", "runtime")
+    if row and not row.deleted:
+        data = row.payload
+        defaults["query_workers"] = _normalize_worker_count(data.get("query_workers"), defaults["query_workers"])
+        defaults["transfer_workers"] = _normalize_worker_count(data.get("transfer_workers"), defaults["transfer_workers"])
+        defaults["own_dealer_name"] = _runtime_text_value(data.get("own_dealer_name"), defaults["own_dealer_name"])
+        defaults["frozen_warehouse_name"] = _runtime_text_value(data.get("frozen_warehouse_name"), defaults["frozen_warehouse_name"])
+        defaults["frozen_warehouse_save_only"] = _runtime_bool_value(data.get("frozen_warehouse_save_only"), defaults["frozen_warehouse_save_only"])
     return defaults
 
 def save_runtime_config(config):
-    os.makedirs(os.path.dirname(RUNTIME_CONFIG_FILE), exist_ok=True)
     current = load_runtime_config()
     payload = {
         "query_workers": _normalize_worker_count(config.get("query_workers"), current.get("query_workers", 2)),
@@ -4771,8 +4775,7 @@ def save_runtime_config(config):
         "frozen_warehouse_save_only": _runtime_bool_value(config.get("frozen_warehouse_save_only"), current.get("frozen_warehouse_save_only", True)),
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-    with open(RUNTIME_CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    store.put_entity("runtime_setting", "runtime", payload)
     return payload
 
 def business_config():
@@ -5176,19 +5179,10 @@ def product_prefix_from_barcode(barcode):
     return barcode[:2]
 
 def load_product_library():
-    if os.path.exists(PRODUCT_LIBRARY_FILE):
-        try:
-            with open(PRODUCT_LIBRARY_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            pass
-    return {}
+    return _load_entity_mapping("product_rule")
 
 def save_product_library(data):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(PRODUCT_LIBRARY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _replace_entities("product_rule", data.items())
 
 def upsert_product_library(prefix, product_code, product_name, source_barcode=""):
     prefix = _clean_export_value(prefix)
@@ -5891,38 +5885,22 @@ def queried_dealer_history():
 
 def load_distributor_history():
     own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    return [
+        _clean_export_value(row.payload.get("value"))
+        for row in store.load_entities("distributor")
+        if _clean_export_value(row.payload.get("value")) and _clean_export_value(row.payload.get("value")) != own_dealer
+    ]
 
 def _save_distributor_history_rows(rows):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(rows[:100], f, ensure_ascii=False, indent=2)
+    _replace_entities("distributor", ((row, {"value": row}) for row in rows[:100]))
 
 def load_deleted_distributor_history():
     own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_DELETED_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    return [
+        _clean_export_value(row.payload.get("value"))
+        for row in store.load_entities("distributor", include_deleted=True)
+        if row.deleted and _clean_export_value(row.payload.get("value")) and _clean_export_value(row.payload.get("value")) != own_dealer
+    ]
 
 def save_deleted_distributor_history(rows):
     clean_rows = []
@@ -5933,9 +5911,13 @@ def save_deleted_distributor_history(rows):
         if row and row != own_dealer and row not in seen:
             clean_rows.append(row)
             seen.add(row)
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clean_rows[:300], f, ensure_ascii=False, indent=2)
+    deleted = set(clean_rows[:300])
+    for row in store.load_entities("distributor", include_deleted=True):
+        value = _clean_export_value(row.payload.get("value"))
+        if value in deleted and not row.deleted:
+            store.delete_entity("distributor", row.key)
+        elif value not in deleted and row.deleted:
+            store.put_entity("distributor", row.key, row.payload)
 
 def restore_deleted_distributor_history(distributor):
     distributor = _clean_export_value(distributor)
@@ -6011,18 +5993,10 @@ def combined_distributor_history():
     return list(dealers.keys())
 
 def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return _load_entity_mapping("barcode_metadata")
 
 def save_data(data):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _replace_entities("barcode_metadata", data.items())
 
 def _barcode_result_paths(barcode):
     barcode = _clean_export_value(barcode)
@@ -6108,24 +6082,20 @@ def load_accounts():
         'permissions': ['crm', 'results', 'transfer', 'accounts', 'product-library'],
         'updated_at': '',
     }
-    if os.path.exists(ACCOUNTS_FILE):
-        try:
-            with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            accounts = data if isinstance(data, list) else []
-            if not any(row.get('username') == 'admin' for row in accounts):
-                accounts.insert(0, default_admin)
-                save_accounts(accounts)
-            return accounts
-        except Exception:
-            pass
+    accounts = [row.payload for row in store.load_entities("account")]
+    if accounts:
+        if not any(row.get('username') == 'admin' for row in accounts):
+            accounts.insert(0, default_admin)
+            save_accounts(accounts)
+        return accounts
     save_accounts([default_admin])
     return [default_admin]
 
 def save_accounts(accounts):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(accounts, f, ensure_ascii=False, indent=2)
+    _replace_entities(
+        "account",
+        ((row.get("id") or row.get("username") or index, row) for index, row in enumerate(accounts)),
+    )
 
 def account_public(row):
     return {
@@ -6168,20 +6138,11 @@ def crm_credentials_owner_key():
 
 def load_crm_credentials_store():
     with crm_credentials_lock:
-        try:
-            if not os.path.exists(CRM_CREDENTIALS_FILE):
-                return {}
-            with open(CRM_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
+        return _load_entity_mapping("crm_credentials")
 
 def save_crm_credentials_store(data):
     with crm_credentials_lock:
-        os.makedirs(os.path.dirname(CRM_CREDENTIALS_FILE), exist_ok=True)
-        with open(CRM_CREDENTIALS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        _replace_entities("crm_credentials", data.items())
 
 def get_remembered_crm_credentials():
     key = crm_credentials_owner_key()
