@@ -19,7 +19,14 @@ class CredentialCipher:
     def from_env(cls, require_key=None):
         text_key = os.environ.get("CRM_CREDENTIALS_KEY")
         if text_key:
-            return cls.from_text_key(text_key)
+            try:
+                key = text_key.encode("ascii")
+                decoded_key = base64.urlsafe_b64decode(key)
+                if len(decoded_key) != 32 or base64.urlsafe_b64encode(decoded_key) != key:
+                    raise ValueError
+                return cls(Fernet(key))
+            except (UnicodeEncodeError, ValueError):
+                raise ValueError("CRM_CREDENTIALS_KEY must be a 32-byte URL-safe base64 Fernet key") from None
         postgresql_mode = require_key if require_key is not None else bool(os.environ.get("DATABASE_URL"))
         if postgresql_mode:
             raise RuntimeError("CRM_CREDENTIALS_KEY is required in PostgreSQL mode")

@@ -14,11 +14,11 @@ class PostgresStore:
         self.pool = ConnectionPool(
             conninfo=database_url,
             min_size=1,
-            max_size=int(os.environ.get("DB_POOL_SIZE", "8")),
+            max_size=int(os.environ.get("DB_POOL_SIZE") or 8),
             open=False,
         )
-        self.pool.open(wait=True)
         try:
+            self.pool.open(wait=True)
             with self.pool.connection() as connection:
                 run_migrations(connection)
         except Exception:
