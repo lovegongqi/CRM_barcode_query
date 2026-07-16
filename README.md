@@ -230,6 +230,32 @@ crm_barcode_query_browser_session  -> /app/session
 
 不要执行 `docker compose down -v` 或删除这两个 Docker 卷，否则会清空持久化数据。
 
+## 文件数据迁移到 PostgreSQL
+
+服务器切换到 PostgreSQL 前，必须先完成一次只读迁移和校验。迁移程序不会删除、移动或改写原数据目录，也可以重复执行；源对象内容未变化时会按 SHA-256 跳过。
+
+1. 停止网站写入，避免迁移期间继续查询、移库或修改配置。
+2. 给 `crm_barcode_query_app_data` 数据卷创建快照或完整备份。
+3. 准备空的 PostgreSQL 数据库，并设置与正式服务相同的 `CRM_CREDENTIALS_KEY`。
+4. 执行迁移并校验：
+
+```bash
+export CRM_CREDENTIALS_KEY='你的32字节URL-safe-Base64-Fernet密钥'
+python scripts/migrate_files_to_postgres.py \
+  --data-dir /app/data \
+  --database-url 'postgresql://用户:密码@数据库地址:5432/数据库名' \
+  --node-id hk \
+  --verify
+```
+
+命令会分别显示源数据与 PostgreSQL 中的活动报告、归档报告、条码元数据、条码匹配规则、目标分销商、工具账号和 CRM 凭据数量，并逐项核对内容 SHA-256。退出码含义：
+
+- `0`：导入及校验成功。
+- `1`：源文件、数据库连接或导入失败。
+- `2`：数量或 SHA-256 校验不一致。
+
+只有命令返回 `0` 后才能给网站配置 `DATABASE_URL` 并启动 PostgreSQL 模式。原数据卷和迁移前快照至少保留 30 天；确认备份可恢复前，不要删除旧卷，也不要执行 `docker compose down -v`。
+
 ## 安全建议
 
 - 不要把自己的 `config.json` 上传到公开仓库。
