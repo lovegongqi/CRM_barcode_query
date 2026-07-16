@@ -380,3 +380,44 @@ def test_crm_credentials_api_preserves_payload_and_uses_default_postgres_entity(
     }
     assert storage_case.store.get_entity("crm_credentials", key).deleted is True
     assert_delete_actor(storage_case, "crm_credentials", key)
+
+
+def test_completed_job_logs_are_persisted_once_and_filtered_by_page(
+    app_module, client, storage_case, monkeypatch
+):
+    monkeypatch.setattr(app_module, "store", storage_case.store)
+    job = {
+        "job_id": f"query-{storage_case.name}",
+        "slot_id": "query-2",
+        "success": 1,
+        "failed": 0,
+        "started_at": UPDATED_AT,
+        "finished_at": "2026-07-16 10:01:00",
+        "logs": [
+            {"id": 1, "time": "10:00:00", "level": "info", "message": "start"},
+            {"id": 2, "time": "10:01:00", "level": "success", "message": "done"},
+        ],
+    }
+
+    app_module._persist_job_logs("crm", "query", job)
+    app_module._persist_job_logs("crm", "query", job)
+    storage_case.store.append_log("transfer", "info", "other page")
+
+    response = client.get("/api/logs?category=crm&limit=1")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["success"] is True
+    assert payload["category"] == "crm"
+    assert [row["message"] for row in payload["logs"]] == ["done"]
+    assert payload["logs"][0]["time"] == "10:01:00"
+    assert payload["logs"][0]["context"]["job_type"] == "query"
+    assert payload["logs"][0]["context"]["slot_id"] == "query-2"
+    assert len(storage_case.store.list_logs("crm", 10)) == 2
+
+
+def test_logs_api_rejects_unknown_page_category(client):
+    response = client.get("/api/logs?category=everything")
+
+    assert response.status_code == 400
+    assert response.get_json()["success"] is False

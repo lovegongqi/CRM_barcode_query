@@ -3616,6 +3616,7 @@ latest_batch_job_by_slot = {}
 
 library_query_lock = threading.Lock()
 library_query_job = {
+    'job_id': '',
     'running': False,
     'done': False,
     'success': False,
@@ -3643,6 +3644,10 @@ latest_summary_job_by_slot = {}
 bulk_login_job_lock = threading.Lock()
 bulk_login_jobs = {}
 latest_bulk_login_job_by_scope = {}
+
+LOG_CATEGORIES = {'results', 'crm', 'transfer', 'accounts', 'product-library'}
+persisted_log_jobs_lock = threading.Lock()
+persisted_log_jobs = set()
 
 def _empty_batch_job(slot_id=None, barcodes=None, retry_limit=DEFAULT_BATCH_RETRY_LIMIT):
     return {
@@ -3820,6 +3825,55 @@ def _service_close_job_log(job_id, message, level='dim'):
 def _bulk_login_job_log(job_id, message, level='dim'):
     _job_log(bulk_login_job_lock, bulk_login_jobs, job_id, message, level, 1000)
 
+def _persist_job_logs(category, job_type, job):
+    if category not in LOG_CATEGORIES or not isinstance(job, dict):
+        return False
+    job_id = str(job.get('job_id') or f"{job_type}:{job.get('started_at') or job.get('barcode') or 'unknown'}")
+    persistence_key = (category, job_type, job_id)
+    with persisted_log_jobs_lock:
+        if persistence_key in persisted_log_jobs:
+            return False
+        persisted_log_jobs.add(persistence_key)
+
+    common_context = {
+        'job_id': job_id,
+        'job_type': job_type,
+        'slot_id': str(job.get('slot_id') or ''),
+        'started_at': str(job.get('started_at') or ''),
+        'finished_at': str(job.get('finished_at') or ''),
+        'success': bool(job.get('success')),
+    }
+    try:
+        for row in list(job.get('logs') or []):
+            if not isinstance(row, dict):
+                continue
+            context = dict(common_context)
+            context.update({
+                'log_id': row.get('id'),
+                'time': str(row.get('time') or ''),
+            })
+            store.append_log(
+                category,
+                str(row.get('level') or 'dim'),
+                _safe_log_text(row.get('message')),
+                context,
+            )
+        return True
+    except Exception as error:
+        with persisted_log_jobs_lock:
+            persisted_log_jobs.discard(persistence_key)
+        print(f"  [日志] 持久化 {job_type} 任务失败: {error}")
+        return False
+
+def _persist_registered_job(lock, jobs, job_id, category, job_type):
+    with lock:
+        job = jobs.get(job_id)
+        if not job or job.get('running') or not job.get('finished_at'):
+            return False
+        snapshot = dict(job)
+        snapshot['logs'] = [dict(row) for row in job.get('logs') or [] if isinstance(row, dict)]
+    return _persist_job_logs(category, job_type, snapshot)
+
 def _slot_logged_in_message(message):
     return message in {'已登录（会话有效）', '登录成功', '登录成功（页面已跳转）'}
 
@@ -3843,6 +3897,7 @@ def _bulk_login_slot_snapshot(job):
     return slots, waiting, active, success_count, failed_count
 
 def _finalize_bulk_login_job_if_ready(job_id):
+    completed = False
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
@@ -3863,6 +3918,9 @@ def _finalize_bulk_login_job_if_ready(job_id):
                 'success' if failed_count == 0 else 'warn',
                 1000,
             )
+            completed = True
+    if completed:
+        _persist_registered_job(bulk_login_job_lock, bulk_login_jobs, job_id, 'accounts', 'bulk-login')
 
 def _update_bulk_login_slot(job_id, slot_id, status, message=''):
     with bulk_login_job_lock:
@@ -3992,6 +4050,7 @@ def _run_bulk_login_job(job_id, username, password):
                 _append_job_log_unlocked(job, '批量登录已取消', 'warn', 1000)
     _submit_bulk_login_pending(job_id)
     _finalize_bulk_login_job_if_ready(job_id)
+    _persist_registered_job(bulk_login_job_lock, bulk_login_jobs, job_id, 'accounts', 'bulk-login')
 
 def _library_query_log(message, level='dim'):
     with library_query_lock:
@@ -4002,7 +4061,7 @@ def _library_query_log(message, level='dim'):
         })
         library_query_job['logs'] = library_query_job['logs'][-300:]
 
-def _run_library_query_job(barcode, worker=None, slot_id='', slot_label=''):
+def _run_library_query_job_inner(barcode, worker=None, slot_id='', slot_label=''):
     if is_disassembly_barcode(barcode):
         _library_query_log(f"已跳过拆机条码：{barcode}，CRM 不查询", 'warn')
         with library_query_lock:
@@ -4086,6 +4145,18 @@ def _run_library_query_job(barcode, worker=None, slot_id='', slot_label=''):
         library_query_job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     _library_query_log(f"条码查询失败：{last_error or '未找到可用查询通道'}", 'error')
 
+def _run_library_query_job(barcode, worker=None, slot_id='', slot_label=''):
+    try:
+        _run_library_query_job_inner(barcode, worker, slot_id, slot_label)
+    finally:
+        snapshot = None
+        with library_query_lock:
+            if not library_query_job.get('running') and library_query_job.get('finished_at'):
+                snapshot = dict(library_query_job)
+                snapshot['logs'] = [dict(row) for row in library_query_job.get('logs') or [] if isinstance(row, dict)]
+        if snapshot:
+            _persist_job_logs('product-library', 'product-library-query', snapshot)
+
 def _transfer_log(message, level='dim'):
     with transfer_job_lock:
         transfer_job['logs'].append({
@@ -4164,7 +4235,7 @@ def _log_transfer_summary_products(log, summary):
             'success'
         )
 
-def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, excluded=None):
+def _run_summary_job_inner(job_id, worker, barcodes, transfer_type, distributor, excluded=None):
     def log(message, level='dim'):
         _summary_job_log(job_id, message, level)
 
@@ -4241,7 +4312,13 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
         log(f"汇总预览出错：{error}", 'error')
         finish(False, error)
 
-def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remark):
+def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, excluded=None):
+    try:
+        _run_summary_job_inner(job_id, worker, barcodes, transfer_type, distributor, excluded)
+    finally:
+        _persist_registered_job(summary_job_lock, summary_jobs, job_id, 'transfer', 'transfer-summary')
+
+def _run_transfer_job_inner(job_id, worker, summary, distributor, transfer_type, remark):
     def log(message, level='dim'):
         _transfer_job_log(job_id, message, level)
 
@@ -4282,7 +4359,13 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"移库出错：{e}", 'error')
 
-def _run_service_close_job(job_id, workers, orders):
+def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remark):
+    try:
+        _run_transfer_job_inner(job_id, worker, summary, distributor, transfer_type, remark)
+    finally:
+        _persist_registered_job(transfer_job_lock, transfer_jobs, job_id, 'transfer', 'transfer')
+
+def _run_service_close_job_inner(job_id, workers, orders):
     def log(message, level='dim'):
         _service_close_job_log(job_id, message, level)
 
@@ -4433,6 +4516,12 @@ def _run_service_close_job(job_id, workers, orders):
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"批量结单出错：{error}", "error")
 
+def _run_service_close_job(job_id, workers, orders):
+    try:
+        _run_service_close_job_inner(job_id, workers, orders)
+    finally:
+        _persist_registered_job(service_close_job_lock, service_close_jobs, job_id, 'results', 'service-close')
+
 def _batch_stop_requested(job_id, idx):
     with batch_job_lock:
         job = batch_jobs.get(job_id)
@@ -4444,7 +4533,7 @@ def _batch_stop_requested(job_id, idx):
     _batch_job_log(job_id, f"已停止，停在第 {idx} 个条码", 'warn')
     return True
 
-def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIMIT, excluded=None):
+def _run_batch_job_inner(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIMIT, excluded=None):
     retry_limit = _normalize_retry_limit(retry_limit)
     barcodes, filtered = filter_disassembly_barcodes(barcodes)
     excluded = list(excluded or []) + filtered
@@ -4590,6 +4679,12 @@ def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIM
         f"批量查询完成，成功 {success_count} 个，失败 {failed_count} 个",
         'success'
     )
+
+def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIMIT, excluded=None):
+    try:
+        _run_batch_job_inner(job_id, worker, barcodes, retry_limit, excluded)
+    finally:
+        _persist_registered_job(batch_job_lock, batch_jobs, job_id, 'crm', 'query')
 
 try:
     from openpyxl import Workbook
@@ -6319,6 +6414,43 @@ def require_app_login():
 def inject_app_flags():
     return {'is_desktop_app': IS_DESKTOP_APP}
 
+@app.route("/api/logs")
+def api_operation_logs():
+    category = str(request.args.get('category') or '').strip()
+    if category not in LOG_CATEGORIES:
+        return jsonify({'success': False, 'error': '日志分类无效'}), 400
+    permission_by_category = {
+        'results': 'results',
+        'crm': 'crm',
+        'transfer': 'transfer',
+        'accounts': 'account-self',
+        'product-library': 'product-library',
+    }
+    permission = permission_by_category[category]
+    if not IS_DESKTOP_APP and category != 'product-library':
+        if not current_account():
+            return jsonify({'success': False, 'error': '请先登录工具账号'}), 401
+        if permission != 'account-self' and not account_has_permission(permission):
+            return jsonify({'success': False, 'error': '当前账号无权查看该页面日志'}), 403
+    try:
+        limit = int(request.args.get('limit') or 500)
+    except (TypeError, ValueError):
+        limit = 500
+    limit = max(1, min(limit, 1000))
+    logs = []
+    for row in store.list_logs(category, limit):
+        context = row.get('context') if isinstance(row.get('context'), dict) else {}
+        created_at = str(row.get('created_at') or '')
+        logs.append({
+            'id': str(row.get('event_id') or row.get('id') or ''),
+            'time': str(context.get('time') or (created_at[11:19] if len(created_at) >= 19 else created_at)),
+            'created_at': created_at,
+            'level': str(row.get('level') or 'dim'),
+            'message': _safe_log_text(row.get('message')),
+            'context': context,
+        })
+    return jsonify({'success': True, 'category': category, 'logs': logs})
+
 def _report_time(record):
     time_str = str(record.updated_at or '')
     if time_str:
@@ -7067,6 +7199,7 @@ def api_product_library_query_start():
         if library_query_job['running']:
             return jsonify({'success': False, 'error': '已有条码匹配查询正在执行'})
         library_query_job.update({
+            'job_id': uuid.uuid4().hex,
             'running': True,
             'done': False,
             'success': False,

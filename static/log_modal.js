@@ -5,6 +5,8 @@
     let overlay = null;
     let body = null;
     let historyLoaded = false;
+    let serverHistoryLoaded = false;
+    let serverHistoryPromise = null;
     let logHistory = [];
     let seenKeys = new Set();
 
@@ -16,6 +18,17 @@
 
     function storageKey() {
         return `${STORAGE_KEY_PREFIX}:${currentLogScope()}`;
+    }
+
+    function currentLogCategory() {
+        const categories = {
+            '/': 'results',
+            '/crm': 'crm',
+            '/transfer': 'transfer',
+            '/accounts': 'accounts',
+            '/product-library': 'product-library',
+        };
+        return categories[currentLogScope()] || '';
     }
 
     function ensureLogModal() {
@@ -51,11 +64,13 @@
         document.body.appendChild(overlay);
         loadHistory();
         renderHistory();
+        loadServerHistory();
     }
 
     function openGlobalLogModal() {
         ensureLogModal();
         overlay.classList.add('show');
+        loadServerHistory();
     }
 
     function closeGlobalLogModal() {
@@ -90,6 +105,27 @@
         try {
             sessionStorage.setItem(storageKey(), JSON.stringify(logHistory.slice(-MAX_HISTORY)));
         } catch (e) {}
+    }
+
+    function loadServerHistory() {
+        const category = currentLogCategory();
+        if (!category || serverHistoryLoaded) return serverHistoryPromise;
+        if (serverHistoryPromise) return serverHistoryPromise;
+        serverHistoryPromise = fetch(`/api/logs?category=${encodeURIComponent(category)}&limit=500`, {
+            credentials: 'same-origin',
+        })
+            .then(response => response.ok ? response.json() : null)
+            .then(payload => {
+                if (payload && payload.success && Array.isArray(payload.logs)) {
+                    payload.logs.forEach(appendGlobalLogRow);
+                }
+                serverHistoryLoaded = true;
+            })
+            .catch(() => {})
+            .finally(() => {
+                serverHistoryPromise = null;
+            });
+        return serverHistoryPromise;
     }
 
     function renderHistory() {
