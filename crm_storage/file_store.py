@@ -58,12 +58,6 @@ class FileStore:
 
     def put_report(self, record):
         with self._lock:
-            path = self._report_path(record.barcode, record.archived)
-            self._write_bytes(path, record.html)
-            opposite_path = self._report_path(record.barcode, not record.archived)
-            if os.path.exists(opposite_path):
-                os.unlink(opposite_path)
-            self._clear_tombstone("report", record.barcode)
             metadata = self._entity_payloads("barcode_metadata")
             row = dict(metadata.get(record.barcode, {}))
             row.update({
@@ -71,14 +65,61 @@ class FileStore:
                 "querySlotId": record.query_slot,
                 "queryUpdatedAt": record.updated_at,
             })
-            metadata[record.barcode] = row
-            self._write_entity_payloads("barcode_metadata", metadata)
+            self._put_report_bundle(record, row)
+
+    def put_report_bundle(self, record, metadata, actor="system"):
+        with self._lock:
+            row = dict(metadata)
+            row["archived"] = record.archived
+            self._put_report_bundle(record, row)
+
+    def _put_report_bundle(self, record, metadata):
+        active_path = self._report_path(record.barcode, False)
+        archived_path = self._report_path(record.barcode, True)
+        snapshots = self._snapshot_files([
+            active_path,
+            archived_path,
+            self._entity_path("barcode_metadata"),
+            self._tombstone_path(),
+        ])
+        try:
+            path = self._report_path(record.barcode, record.archived)
+            self._write_bytes(path, record.html)
+            opposite_path = self._report_path(record.barcode, not record.archived)
+            if os.path.exists(opposite_path):
+                os.unlink(opposite_path)
+            self._clear_tombstone("report", record.barcode)
+            payloads = self._entity_payloads("barcode_metadata")
+            payloads[record.barcode] = dict(metadata)
+            self._write_entity_payloads("barcode_metadata", payloads)
+            self._clear_tombstone("barcode_metadata", record.barcode)
+        except Exception:
+            self._restore_files(snapshots)
+            raise
 
     def delete_report(self, barcode, actor="system"):
         with self._lock:
             if self.get_report(barcode) is None:
                 return False
             self._set_tombstone("report", barcode, actor)
+            return True
+
+    def delete_report_bundle(self, barcode, actor="system"):
+        with self._lock:
+            report_exists = self.get_report(barcode) is not None
+            metadata = self.get_entity("barcode_metadata", barcode)
+            metadata_exists = bool(metadata and not metadata.deleted)
+            if not report_exists and not metadata_exists:
+                return False
+            snapshots = self._snapshot_files([self._tombstone_path()])
+            try:
+                if report_exists:
+                    self._set_tombstone("report", barcode, actor)
+                if metadata_exists:
+                    self._set_tombstone("barcode_metadata", barcode, actor)
+            except Exception:
+                self._restore_files(snapshots)
+                raise
             return True
 
     def load_entities(self, kind, include_deleted=False):
@@ -119,12 +160,14 @@ class FileStore:
             self._set_tombstone(kind, key, actor)
             return True
 
-    def append_log(self, category, level, message, context=None):
+    def append_log(self, category, level, message, context=None, event_id=None):
         with self._lock:
-            event_id = str(uuid.uuid4())
+            event_id = str(event_id or uuid.uuid4())
             rows = self._read_json(self._log_path(category), [])
             if not isinstance(rows, list):
                 rows = []
+            if any(str(row.get("event_id")) == event_id for row in rows if isinstance(row, dict)):
+                return event_id
             rows.append({
                 "event_id": event_id,
                 "level": level,
@@ -302,6 +345,20 @@ class FileStore:
                 except OSError:
                     pass
                 raise
+
+    def _snapshot_files(self, paths):
+        return {
+            path: self._read_bytes(path) if os.path.isfile(path) else None
+            for path in paths
+        }
+
+    def _restore_files(self, snapshots):
+        for path, value in snapshots.items():
+            if value is None:
+                if os.path.exists(path):
+                    os.unlink(path)
+            else:
+                self._write_bytes(path, value)
 
     def _now(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")

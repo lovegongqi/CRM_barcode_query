@@ -99,63 +99,29 @@ class PostgresStore:
         return ReportRecord(row[0], gzip.decompress(row[1]), row[2], row[3], row[4])
 
     def put_report(self, record):
-        blob_gzip = gzip.compress(record.html, compresslevel=6)
-        payload = {
-            "archived": record.archived,
-            "query_slot": record.query_slot,
-            "updated_at": record.updated_at,
-        }
         with self.transaction() as connection:
-            connection.execute(
-                "insert into barcode_reports "
-                "(barcode, html_gzip, archived, query_slot, origin_node, updated_at) "
-                "values (%s, %s, %s, %s, %s, %s) "
-                "on conflict (barcode) do update set "
-                "html_gzip = excluded.html_gzip, archived = excluded.archived, "
-                "query_slot = excluded.query_slot, origin_node = excluded.origin_node, "
-                "updated_at = excluded.updated_at, deleted_at = null, delete_event_id = null",
-                (
-                    record.barcode,
-                    blob_gzip,
-                    record.archived,
-                    record.query_slot,
-                    self.node_id,
-                    record.updated_at,
-                ),
-            )
-            self._insert_event(
-                connection,
-                entity_type="barcode_report",
-                entity_key=record.barcode,
-                operation="upsert",
-                payload=payload,
-                blob_gzip=blob_gzip,
+            self._put_report(connection, record)
+
+    def put_report_bundle(self, record, metadata, actor="system"):
+        metadata = dict(metadata)
+        metadata["archived"] = record.archived
+        with self.transaction() as connection:
+            self._put_report(connection, record)
+            self._put_entity(
+                connection, "barcode_metadata", record.barcode, metadata
             )
 
     def delete_report(self, barcode, actor="system"):
-        event_id = uuid.uuid4()
         with self.transaction() as connection:
-            row = connection.execute(
-                "update barcode_reports set deleted_at = now(), delete_event_id = %s, "
-                "origin_node = %s where barcode = %s and deleted_at is null "
-                "returning deleted_at",
-                (event_id, self.node_id, barcode),
-            ).fetchone()
-            if row is None:
-                return False
-            deleted_at = row[0]
-            self._upsert_tombstone(
-                connection, "barcode_report", barcode, event_id, deleted_at
+            return self._delete_report(connection, barcode, actor)
+
+    def delete_report_bundle(self, barcode, actor="system"):
+        with self.transaction() as connection:
+            report_deleted = self._delete_report(connection, barcode, actor)
+            metadata_deleted = self._delete_entity(
+                connection, "barcode_metadata", barcode, actor
             )
-            self._insert_event(
-                connection,
-                entity_type="barcode_report",
-                entity_key=barcode,
-                operation="delete",
-                payload={"actor": actor, "deleted_at": deleted_at.isoformat()},
-                event_id=event_id,
-            )
-        return True
+            return report_deleted or metadata_deleted
 
     def load_entities(self, kind, include_deleted=False):
         self._validate_entity_kind(kind)
@@ -171,7 +137,6 @@ class PostgresStore:
 
     def get_entity(self, kind, key):
         self._validate_entity_kind(kind)
-        self._validate_entity_key(kind, key)
         with self.pool.connection() as connection:
             row = connection.execute(
                 "select entity_key, payload, deleted_at is not null, "
@@ -183,50 +148,113 @@ class PostgresStore:
 
     def put_entity(self, kind, key, payload, actor="system"):
         self._validate_entity_kind(kind)
-        self._validate_entity_key(kind, key)
-        stored_payload = self._stored_entity_payload(kind, key, payload)
-        updated_at = payload.get("updated_at")
         with self.transaction() as connection:
-            connection.execute(
-                "insert into app_entities "
-                "(kind, entity_key, payload, origin_node, updated_at) "
-                "values (%s, %s, %s, %s, coalesce(%s::timestamptz, now())) "
-                "on conflict (kind, entity_key) do update set "
-                "payload = excluded.payload, origin_node = excluded.origin_node, "
-                "updated_at = excluded.updated_at, deleted_at = null, delete_event_id = null",
-                (kind, key, Jsonb(stored_payload), self.node_id, updated_at),
-            )
-            self._insert_event(
-                connection,
-                entity_type=kind,
-                entity_key=key,
-                operation="upsert",
-                payload=stored_payload,
-            )
+            self._put_entity(connection, kind, key, payload)
 
     def delete_entity(self, kind, key, actor="system"):
         self._validate_entity_kind(kind)
-        self._validate_entity_key(kind, key)
-        event_id = uuid.uuid4()
         with self.transaction() as connection:
-            row = connection.execute(
-                "update app_entities set deleted_at = now(), delete_event_id = %s, "
-                "origin_node = %s where kind = %s and entity_key = %s "
-                "and deleted_at is null returning deleted_at",
-                (event_id, self.node_id, kind, key),
-            ).fetchone()
-            if row is None:
-                return False
-            deleted_at = row[0]
-            self._upsert_tombstone(connection, kind, key, event_id, deleted_at)
-            self._insert_event(
-                connection,
-                entity_type=kind,
-                entity_key=key,
-                operation="delete",
-                payload={"actor": actor, "deleted_at": deleted_at.isoformat()},
-                event_id=event_id,
-            )
+            return self._delete_entity(connection, kind, key, actor)
+
+    def _put_report(self, connection, record):
+        blob_gzip = gzip.compress(record.html, compresslevel=6)
+        payload = {
+            "archived": record.archived,
+            "query_slot": record.query_slot,
+            "updated_at": record.updated_at,
+        }
+        connection.execute(
+            "insert into barcode_reports "
+            "(barcode, html_gzip, archived, query_slot, origin_node, updated_at) "
+            "values (%s, %s, %s, %s, %s, %s) "
+            "on conflict (barcode) do update set "
+            "html_gzip = excluded.html_gzip, archived = excluded.archived, "
+            "query_slot = excluded.query_slot, origin_node = excluded.origin_node, "
+            "updated_at = excluded.updated_at, deleted_at = null, delete_event_id = null",
+            (
+                record.barcode,
+                blob_gzip,
+                record.archived,
+                record.query_slot,
+                self.node_id,
+                record.updated_at,
+            ),
+        )
+        self._insert_event(
+            connection,
+            entity_type="barcode_report",
+            entity_key=record.barcode,
+            operation="upsert",
+            payload=payload,
+            blob_gzip=blob_gzip,
+        )
+
+    def _delete_report(self, connection, barcode, actor):
+        event_id = uuid.uuid4()
+        row = connection.execute(
+            "update barcode_reports set deleted_at = now(), delete_event_id = %s, "
+            "origin_node = %s where barcode = %s and deleted_at is null "
+            "returning deleted_at",
+            (event_id, self.node_id, barcode),
+        ).fetchone()
+        if row is None:
+            return False
+        deleted_at = row[0]
+        self._upsert_tombstone(
+            connection, "barcode_report", barcode, event_id, deleted_at
+        )
+        self._insert_event(
+            connection,
+            entity_type="barcode_report",
+            entity_key=barcode,
+            operation="delete",
+            payload={"actor": actor, "deleted_at": deleted_at.isoformat()},
+            event_id=event_id,
+        )
+        return True
+
+    def _put_entity(self, connection, kind, key, payload):
+        self._validate_entity_kind(kind)
+        stored_payload = self._stored_entity_payload(kind, key, payload)
+        updated_at = payload.get("updated_at") or None
+        connection.execute(
+            "insert into app_entities "
+            "(kind, entity_key, payload, origin_node, updated_at) "
+            "values (%s, %s, %s, %s, coalesce(%s::timestamptz, now())) "
+            "on conflict (kind, entity_key) do update set "
+            "payload = excluded.payload, origin_node = excluded.origin_node, "
+            "updated_at = excluded.updated_at, deleted_at = null, delete_event_id = null",
+            (kind, key, Jsonb(stored_payload), self.node_id, updated_at),
+        )
+        self._insert_event(
+            connection,
+            entity_type=kind,
+            entity_key=key,
+            operation="upsert",
+            payload=stored_payload,
+        )
+
+    def _delete_entity(self, connection, kind, key, actor):
+        self._validate_entity_kind(kind)
+        event_id = uuid.uuid4()
+        row = connection.execute(
+            "update app_entities set deleted_at = now(), delete_event_id = %s, "
+            "origin_node = %s where kind = %s and entity_key = %s "
+            "and deleted_at is null returning deleted_at",
+            (event_id, self.node_id, kind, key),
+        ).fetchone()
+        if row is None:
+            return False
+        deleted_at = row[0]
+        self._upsert_tombstone(connection, kind, key, event_id, deleted_at)
+        self._insert_event(
+            connection,
+            entity_type=kind,
+            entity_key=key,
+            operation="delete",
+            payload={"actor": actor, "deleted_at": deleted_at.isoformat()},
+            event_id=event_id,
+        )
         return True
 
     def get_tombstone(self, entity_type, entity_key):
@@ -272,16 +300,20 @@ class PostgresStore:
             )
             return cursor.rowcount
 
-    def append_log(self, category, level, message, context=None):
-        event_id = uuid.uuid4()
+    def append_log(self, category, level, message, context=None, event_id=None):
+        event_id = uuid.UUID(str(event_id)) if event_id else uuid.uuid4()
         context = dict(context or {})
         with self.transaction() as connection:
-            created_at = connection.execute(
+            row = connection.execute(
                 "insert into operation_logs "
                 "(id, category, level, message, context, origin_node) "
-                "values (%s, %s, %s, %s, %s, %s) returning created_at",
+                "values (%s, %s, %s, %s, %s, %s) "
+                "on conflict (id) do nothing returning created_at",
                 (event_id, category, level, message, Jsonb(context), self.node_id),
-            ).fetchone()[0]
+            ).fetchone()
+            if row is None:
+                return str(event_id)
+            created_at = row[0]
             self._insert_event(
                 connection,
                 entity_type="operation_log",
@@ -401,19 +433,14 @@ class PostgresStore:
         if kind not in ENTITY_KINDS:
             raise ValueError(f"Unsupported entity kind: {kind}")
 
-    def _validate_entity_key(self, kind, key):
-        if kind == "crm_credentials" and key != "default":
-            raise ValueError("crm_credentials entity_key must be default")
-
     def _stored_entity_payload(self, kind, key, payload):
-        if kind == "crm_credentials" and key == "default":
+        if kind == "crm_credentials":
             token = self.cipher.encrypt(payload).decode("ascii")
             return {"encrypted_token": token}
         return dict(payload)
 
     def _entity_record(self, kind, row):
-        self._validate_entity_key(kind, row[0])
         payload = row[1]
-        if kind == "crm_credentials" and row[0] == "default":
+        if kind == "crm_credentials":
             payload = self.cipher.decrypt(payload["encrypted_token"].encode("ascii"))
         return EntityRecord(row[0], payload, row[2], row[3])

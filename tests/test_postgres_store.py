@@ -179,51 +179,60 @@ def test_unknown_entity_kinds_fail(pg_store):
             call()
 
 
-def test_default_crm_credentials_are_encrypted_in_entity_and_event(pg_store, pg_connection):
-    credentials = {"username": "gongqi", "password": "plain-secret"}
-
-    pg_store.put_entity("crm_credentials", "default", credentials)
-
-    assert pg_store.get_entity("crm_credentials", "default").payload == credentials
-    entity_payload = pg_connection.execute(
-        "select payload from app_entities "
-        "where kind = 'crm_credentials' and entity_key = 'default'"
-    ).fetchone()[0]
-    event_payload = pg_connection.execute(
-        "select payload from sync_events where entity_type = 'crm_credentials'"
-    ).fetchone()[0]
-    assert set(entity_payload) == {"encrypted_token"}
-    assert entity_payload == event_payload
-    entity_payload["encrypted_token"].encode("ascii")
-    assert "plain-secret" not in json.dumps(entity_payload)
-    assert "plain-secret" not in json.dumps(event_payload)
-
-
-def test_crm_credentials_reject_non_default_key_before_database_access(
-    pg_store, pg_connection, monkeypatch
+def test_all_crm_credential_owner_rows_are_encrypted_in_entities_and_events(
+    pg_store, pg_connection
 ):
-    def fail_if_connection_requested():
-        raise AssertionError("database access must not occur")
+    owners = {
+        "operator": {"username": "gongqi", "password": "operator-secret"},
+        "secondary": {"username": "other", "password": "secondary-secret"},
+    }
+    barrier = threading.Barrier(len(owners))
+    errors = []
 
-    monkeypatch.setattr(pg_store.pool, "connection", fail_if_connection_requested)
-    calls = [
-        lambda: pg_store.get_entity("crm_credentials", "secondary"),
-        lambda: pg_store.put_entity(
-            "crm_credentials", "secondary", {"password": "plain-secret"}
-        ),
-        lambda: pg_store.delete_entity("crm_credentials", "secondary"),
+    def save_owner(owner, credentials):
+        try:
+            barrier.wait(timeout=2)
+            pg_store.put_entity("crm_credentials", owner, credentials)
+        except Exception as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=save_owner, args=(owner, credentials))
+        for owner, credentials in owners.items()
     ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
 
-    for call in calls:
-        with pytest.raises(ValueError, match="entity_key must be default"):
-            call()
-
-    assert pg_connection.execute(
-        "select count(*) from app_entities where kind = 'crm_credentials'"
-    ).fetchone()[0] == 0
-    assert pg_connection.execute(
-        "select count(*) from sync_events where entity_type = 'crm_credentials'"
-    ).fetchone()[0] == 0
+    assert not errors
+    assert all(not thread.is_alive() for thread in threads)
+    assert {
+        row.key: row.payload for row in pg_store.load_entities("crm_credentials")
+    } == owners
+    entity_rows = list(
+        pg_connection.execute(
+            "select entity_key, payload from app_entities "
+            "where kind = 'crm_credentials' order by entity_key"
+        )
+    )
+    event_rows = list(
+        pg_connection.execute(
+            "select entity_key, payload from sync_events "
+            "where entity_type = 'crm_credentials' order by entity_key"
+        )
+    )
+    assert [row[0] for row in entity_rows] == ["operator", "secondary"]
+    assert [row[0] for row in event_rows] == ["operator", "secondary"]
+    for (_entity_key, entity_payload), (_event_key, event_payload) in zip(
+        entity_rows, event_rows
+    ):
+        assert set(entity_payload) == {"encrypted_token"}
+        assert entity_payload == event_payload
+        entity_payload["encrypted_token"].encode("ascii")
+    serialized = json.dumps([*entity_rows, *event_rows])
+    assert "operator-secret" not in serialized
+    assert "secondary-secret" not in serialized
 
 
 def test_report_delete_is_idempotent_and_creates_tombstone(pg_store):
@@ -384,6 +393,102 @@ def test_report_archive_transition_and_reactivation_survive_stale_tombstone(pg_s
     assert pg_store.get_report("transition").html == b"restored"
 
 
+def test_report_bundle_archive_rolls_back_when_metadata_step_fails(
+    pg_store, pg_connection
+):
+    active = ReportRecord(
+        "bundle-archive", b"active", False, "query-1", "2026-07-16 10:00:00"
+    )
+    active_metadata = {
+        "archived": False,
+        "remark": "keep",
+        "querySlotId": "query-1",
+        "queryUpdatedAt": "2026-07-16 10:00:00",
+    }
+    pg_store.put_report_bundle(active, active_metadata)
+    event_count = pg_connection.execute("select count(*) from sync_events").fetchone()[0]
+    pg_connection.execute(
+        "create function reject_bundle_metadata() returns trigger language plpgsql as $$ "
+        "begin if new.kind = 'barcode_metadata' then "
+        "raise exception 'forced bundle metadata failure'; end if; return new; end $$"
+    )
+    pg_connection.execute(
+        "create trigger reject_bundle_metadata before insert or update on app_entities "
+        "for each row execute function reject_bundle_metadata()"
+    )
+    try:
+        with pytest.raises(
+            psycopg.errors.RaiseException, match="forced bundle metadata failure"
+        ):
+            pg_store.put_report_bundle(
+                ReportRecord(
+                    "bundle-archive",
+                    b"archived",
+                    True,
+                    "query-1",
+                    "2026-07-16 11:00:00",
+                ),
+                {
+                    "archived": True,
+                    "remark": "changed",
+                    "querySlotId": "query-1",
+                    "queryUpdatedAt": "2026-07-16 11:00:00",
+                },
+            )
+    finally:
+        pg_connection.execute("drop trigger reject_bundle_metadata on app_entities")
+        pg_connection.execute("drop function reject_bundle_metadata()")
+
+    assert pg_store.get_report("bundle-archive") == active
+    assert pg_store.get_entity(
+        "barcode_metadata", "bundle-archive"
+    ).payload == active_metadata
+    assert pg_connection.execute("select count(*) from sync_events").fetchone()[0] == event_count
+
+
+def test_report_bundle_delete_rolls_back_when_metadata_step_fails(
+    pg_store, pg_connection
+):
+    record = ReportRecord(
+        "bundle-delete", b"active", False, "query-1", "2026-07-16 10:00:00"
+    )
+    pg_store.put_report_bundle(
+        record,
+        {
+            "archived": False,
+            "querySlotId": "query-1",
+            "queryUpdatedAt": "2026-07-16 10:00:00",
+        },
+    )
+    event_count = pg_connection.execute("select count(*) from sync_events").fetchone()[0]
+    pg_connection.execute(
+        "create function reject_bundle_metadata_delete() returns trigger language plpgsql as $$ "
+        "begin if old.kind = 'barcode_metadata' then "
+        "raise exception 'forced bundle metadata delete failure'; end if; return new; end $$"
+    )
+    pg_connection.execute(
+        "create trigger reject_bundle_metadata_delete before update on app_entities "
+        "for each row execute function reject_bundle_metadata_delete()"
+    )
+    try:
+        with pytest.raises(
+            psycopg.errors.RaiseException,
+            match="forced bundle metadata delete failure",
+        ):
+            pg_store.delete_report_bundle("bundle-delete", "operator")
+    finally:
+        pg_connection.execute(
+            "drop trigger reject_bundle_metadata_delete on app_entities"
+        )
+        pg_connection.execute("drop function reject_bundle_metadata_delete()")
+
+    assert pg_store.get_report("bundle-delete") == record
+    assert pg_store.get_entity("barcode_metadata", "bundle-delete").deleted is False
+    assert pg_store.get_tombstone("barcode_report", "bundle-delete") is None
+    assert pg_store.get_tombstone("barcode_metadata", "bundle-delete") is None
+    assert pg_connection.execute("select count(*) from sync_events").fetchone()[0] == event_count
+
+
 def test_entity_upsert_reactivates_deleted_key(pg_store):
     pg_store.put_entity("runtime_setting", "runtime", {"mode": "old"})
     pg_store.delete_entity("runtime_setting", "runtime")
@@ -417,6 +522,26 @@ def test_append_and_list_logs_emit_transactional_events(pg_store):
     assert (event.entity_type, event.operation) == ("operation_log", "upsert")
     assert event.payload["category"] == "query"
     assert event.payload["context"] == {"barcode": "845"}
+
+
+def test_append_log_with_stable_event_id_is_idempotent(pg_store, pg_connection):
+    event_id = "1f40c2ca-047c-5d50-95ca-7d3894b849f1"
+
+    assert pg_store.append_log(
+        "query", "INFO", "once", {"job_id": "job-1"}, event_id=event_id
+    ) == event_id
+    restarted_store = PostgresStore(pg_store.database_url, node_id="hk")
+    try:
+        assert restarted_store.append_log(
+            "query", "INFO", "once", {"job_id": "job-1"}, event_id=event_id
+        ) == event_id
+    finally:
+        restarted_store.close()
+
+    assert len(pg_store.list_logs("query")) == 1
+    assert pg_connection.execute(
+        "select count(*) from sync_events where event_id = %s", (event_id,)
+    ).fetchone()[0] == 1
 
 
 def test_log_and_event_roll_back_when_outbox_insert_fails(pg_store, pg_connection):

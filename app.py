@@ -12,12 +12,13 @@ import json
 import time
 import builtins
 import html as html_mod
+import io
 import threading
 import queue
 import uuid
 import shutil
 from collections import OrderedDict
-from flask import Flask, render_template, request, jsonify, Response, session, redirect, abort, has_request_context
+from flask import Flask, render_template, request, jsonify, Response, session, redirect, abort, has_request_context, send_file
 from datetime import datetime
 from crm_storage.base import ReportRecord
 from crm_storage.factory import get_store
@@ -3383,6 +3384,8 @@ def _runtime_config_path():
 def _migrate_root_config_file(filename):
     source = os.path.join(_runtime_data_base_dir(), filename)
     target = os.path.join(_runtime_config_dir(), filename)
+    if not isinstance(store, FileStore):
+        return target
     if os.path.abspath(source) == os.path.abspath(target) or not os.path.exists(source):
         return target
     try:
@@ -3646,8 +3649,6 @@ bulk_login_jobs = {}
 latest_bulk_login_job_by_scope = {}
 
 LOG_CATEGORIES = {'results', 'crm', 'transfer', 'accounts', 'product-library'}
-persisted_log_jobs_lock = threading.Lock()
-persisted_log_jobs = set()
 
 def _empty_batch_job(slot_id=None, barcodes=None, retry_limit=DEFAULT_BATCH_RETRY_LIMIT):
     return {
@@ -3739,6 +3740,7 @@ def _empty_bulk_login_job(scope, slots=None):
         'stop_requested': False,
         'captcha': '',
         'step1_done': False,
+        'finalized': False,
         'log_seq': 0,
         'logs': [],
         'slots': [
@@ -3789,9 +3791,15 @@ def format_duration_seconds(seconds):
 
 def _append_job_log_unlocked(job, message, level='dim', limit=300):
     job['log_seq'] = int(job.get('log_seq') or 0) + 1
+    created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    job_id = str(job.get('job_id') or '')
+    log_id = job['log_seq']
     job['logs'].append({
-        'id': job['log_seq'],
-        'time': datetime.now().strftime('%H:%M:%S'),
+        'id': log_id,
+        'job_id': job_id,
+        'key': f'job:{job_id}:{log_id}' if job_id else '',
+        'time': created_at[11:19],
+        'created_at': created_at,
         'message': _safe_log_text(message),
         'level': level,
     })
@@ -3823,18 +3831,15 @@ def _service_close_job_log(job_id, message, level='dim'):
     _job_log(service_close_job_lock, service_close_jobs, job_id, message, level, 1000)
 
 def _bulk_login_job_log(job_id, message, level='dim'):
-    _job_log(bulk_login_job_lock, bulk_login_jobs, job_id, message, level, 1000)
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        if job and not job.get('finalized'):
+            _append_job_log_unlocked(job, message, level, 1000)
 
 def _persist_job_logs(category, job_type, job):
     if category not in LOG_CATEGORIES or not isinstance(job, dict):
         return False
     job_id = str(job.get('job_id') or f"{job_type}:{job.get('started_at') or job.get('barcode') or 'unknown'}")
-    persistence_key = (category, job_type, job_id)
-    with persisted_log_jobs_lock:
-        if persistence_key in persisted_log_jobs:
-            return False
-        persisted_log_jobs.add(persistence_key)
-
     common_context = {
         'job_id': job_id,
         'job_type': job_type,
@@ -3844,24 +3849,31 @@ def _persist_job_logs(category, job_type, job):
         'success': bool(job.get('success')),
     }
     try:
-        for row in list(job.get('logs') or []):
+        for index, row in enumerate(list(job.get('logs') or []), 1):
             if not isinstance(row, dict):
                 continue
+            log_id = row.get('id') if row.get('id') is not None else index
+            log_key = str(row.get('key') or f"job:{job_id}:{log_id}")
+            event_id = str(uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"crm-operation-log:{category}:{job_type}:{job_id}:{log_id}",
+            ))
             context = dict(common_context)
             context.update({
-                'log_id': row.get('id'),
+                'log_id': log_id,
+                'log_key': log_key,
                 'time': str(row.get('time') or ''),
+                'created_at': str(row.get('created_at') or ''),
             })
             store.append_log(
                 category,
                 str(row.get('level') or 'dim'),
                 _safe_log_text(row.get('message')),
                 context,
+                event_id=event_id,
             )
         return True
     except Exception as error:
-        with persisted_log_jobs_lock:
-            persisted_log_jobs.discard(persistence_key)
         print(f"  [日志] 持久化 {job_type} 任务失败: {error}")
         return False
 
@@ -3888,6 +3900,9 @@ def _bulk_login_slots_for_scope(scope):
         slots = [*(payload.get("query", [])), *(payload.get("transfer", []))]
     return scope, [slot for slot in slots if not slot.get("logged_in")]
 
+def _bulk_login_log_category(scope):
+    return {'query': 'crm', 'transfer': 'transfer'}.get(scope, 'accounts')
+
 def _bulk_login_slot_snapshot(job):
     slots = list(job.get('slots') or [])
     waiting = [slot for slot in slots if slot.get('status') == 'waiting_captcha']
@@ -3896,36 +3911,47 @@ def _bulk_login_slot_snapshot(job):
     failed_count = sum(1 for slot in slots if slot.get('status') == 'failed')
     return slots, waiting, active, success_count, failed_count
 
-def _finalize_bulk_login_job_if_ready(job_id):
-    completed = False
+def _finalize_bulk_login_job(job_id, cancelled=False, completion_message=''):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
-            return
-        if job.get('done'):
-            return
-        slots, waiting, active, success_count, failed_count = _bulk_login_slot_snapshot(job)
-        if job.get('step1_done') and not waiting and not active:
+            return False
+        if not job.get('finalized'):
+            slots, waiting, active, success_count, failed_count = _bulk_login_slot_snapshot(job)
+            if not cancelled and (not job.get('step1_done') or waiting or active):
+                return False
+            if cancelled:
+                job['stop_requested'] = True
+                for slot in slots:
+                    if slot.get('status') not in {'logged_in', 'failed'}:
+                        slot['status'] = 'failed'
+                        slot['message'] = '批量登录已取消'
+                job['success'] = False
+                job['error'] = '批量登录已取消'
+                terminal_message = '批量登录已取消'
+                terminal_level = 'warn'
+            else:
+                job['success'] = failed_count == 0
+                job['error'] = f'仍有 {failed_count} 个通道未登录' if failed_count else ''
+                terminal_message = completion_message or f"批量登录完成，成功 {success_count} 个，失败 {failed_count} 个"
+                terminal_level = 'success' if failed_count == 0 else 'warn'
             job['running'] = False
             job['done'] = True
-            job['success'] = failed_count == 0
             job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            if failed_count:
-                job['error'] = f'仍有 {failed_count} 个通道未登录'
-            _append_job_log_unlocked(
-                job,
-                f"批量登录完成，成功 {success_count} 个，失败 {failed_count} 个",
-                'success' if failed_count == 0 else 'warn',
-                1000,
-            )
-            completed = True
-    if completed:
-        _persist_registered_job(bulk_login_job_lock, bulk_login_jobs, job_id, 'accounts', 'bulk-login')
+            job['finalized'] = True
+            _append_job_log_unlocked(job, terminal_message, terminal_level, 1000)
+        category = _bulk_login_log_category(job.get('scope'))
+    return _persist_registered_job(
+        bulk_login_job_lock, bulk_login_jobs, job_id, category, 'bulk-login'
+    )
+
+def _finalize_bulk_login_job_if_ready(job_id):
+    return _finalize_bulk_login_job(job_id)
 
 def _update_bulk_login_slot(job_id, slot_id, status, message=''):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
-        if not job:
+        if not job or job.get('finalized'):
             return None
         for slot in job.get('slots') or []:
             if slot.get('id') == slot_id:
@@ -3984,7 +4010,7 @@ def _submit_bulk_login_pending(job_id):
     while True:
         with bulk_login_job_lock:
             job = bulk_login_jobs.get(job_id)
-            if not job or not job.get('captcha'):
+            if not job or job.get('finalized') or not job.get('captcha'):
                 return
             captcha = job['captcha']
             pending = [dict(slot) for slot in job.get('slots') or [] if slot.get('status') == 'waiting_captcha']
@@ -4040,26 +4066,18 @@ def _run_bulk_login_job(job_id, username, password):
 
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
-        if job:
+        stopped = bool(job and job.get('stop_requested'))
+        if job and not job.get('finalized'):
             job['step1_done'] = True
-            if job.get('stop_requested'):
-                job['running'] = False
-                job['done'] = True
-                job['error'] = '批量登录已取消'
-                job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                _append_job_log_unlocked(job, '批量登录已取消', 'warn', 1000)
+    if stopped:
+        _finalize_bulk_login_job(job_id, cancelled=True)
+        return
     _submit_bulk_login_pending(job_id)
     _finalize_bulk_login_job_if_ready(job_id)
-    _persist_registered_job(bulk_login_job_lock, bulk_login_jobs, job_id, 'accounts', 'bulk-login')
 
 def _library_query_log(message, level='dim'):
     with library_query_lock:
-        library_query_job['logs'].append({
-            'time': datetime.now().strftime('%H:%M:%S'),
-            'message': message,
-            'level': level,
-        })
-        library_query_job['logs'] = library_query_job['logs'][-300:]
+        _append_job_log_unlocked(library_query_job, message, level, 300)
 
 def _run_library_query_job_inner(barcode, worker=None, slot_id='', slot_label=''):
     if is_disassembly_barcode(barcode):
@@ -4712,10 +4730,11 @@ ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
 RESULTS_DIR = os.path.join(DATA_BASE_DIR, "results")
+EXPORT_DIR = os.path.join(RESULTS_DIR, "exports")
 TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
 CRM_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "crm_credentials.json")
-crm_credentials_lock = threading.Lock()
+crm_credentials_lock = threading.RLock()
 DEFAULT_OWN_DEALER_NAME = "江西省天麓工贸有限公司"
 DEFAULT_FROZEN_WAREHOUSE_NAME = "江西天麓冻结仓库"
 OWN_DEALER_NAME = DEFAULT_OWN_DEALER_NAME
@@ -4745,6 +4764,8 @@ def _copy_missing_tree(source, target):
     return copied
 
 def _migrate_legacy_runtime_data():
+    if not isinstance(store, FileStore):
+        return
     if os.environ.get("CRM_DISABLE_DATA_MIGRATION") in ("1", "true", "yes"):
         return
     legacy_pairs = [
@@ -4781,6 +4802,8 @@ def _migrate_legacy_runtime_data():
 _migrate_legacy_runtime_data()
 
 def _migrate_config_files_from_barcode_dir():
+    if not isinstance(store, FileStore):
+        return
     os.makedirs(CONFIG_DIR, exist_ok=True)
     for filename in (
         "runtime_config.json",
@@ -4818,17 +4841,13 @@ _migrate_config_files_from_barcode_dir()
 def _load_entity_mapping(kind):
     return {row.key: row.payload for row in store.load_entities(kind)}
 
-def _replace_entities(kind, rows):
-    desired = OrderedDict((str(key), dict(payload)) for key, payload in rows)
-    existing = store.load_entities(kind, include_deleted=True)
-    for key, payload in desired.items():
+def _upsert_entities(kind, rows):
+    for key, payload in rows:
+        key = str(key)
         stored_payload = dict(payload)
         if not isinstance(store, FileStore) and not stored_payload.get("updated_at"):
             stored_payload.pop("updated_at", None)
         store.put_entity(kind, key, stored_payload)
-    for row in existing:
-        if not row.deleted and row.key not in desired:
-            store.delete_entity(kind, row.key)
 
 def _runtime_text_value(value, default):
     value = str(value or "").replace("\xa0", " ").strip()
@@ -5302,7 +5321,7 @@ def load_product_library():
     return _load_entity_mapping("product_rule")
 
 def save_product_library(data):
-    _replace_entities("product_rule", data.items())
+    _upsert_entities("product_rule", data.items())
 
 def upsert_product_library(prefix, product_code, product_name, source_barcode=""):
     prefix = _clean_export_value(prefix)
@@ -5310,15 +5329,14 @@ def upsert_product_library(prefix, product_code, product_name, source_barcode=""
     product_name = _clean_export_value(product_name)
     if not prefix or not product_code or not product_name:
         return False
-    data = load_product_library()
-    data[prefix] = {
+    payload = {
         'prefix': prefix,
         'product_code': product_code,
         'product_name': product_name,
         'source_barcode': _clean_export_value(source_barcode),
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     }
-    save_product_library(data)
+    store.put_entity("product_rule", prefix, payload)
     return True
 
 def update_product_library_from_info(info):
@@ -5788,20 +5806,17 @@ def _record_service_closed_for_barcodes(service_no, barcodes):
     if not service_no:
         return 0
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data = load_data()
     changed = 0
     for barcode in normalize_input_barcodes(barcodes):
-        info = data.get(barcode, {'remark': '', 'archived': False, 'archiveTime': '', 'archivedBy': ''})
+        info = get_barcode_info(barcode)
         closed_map = info.get("closedServiceNos")
         if not isinstance(closed_map, dict):
             closed_map = {}
         closed_map[service_no] = now
         info["closedServiceNos"] = closed_map
         info["serviceCloseUpdatedAt"] = now
-        data[barcode] = info
+        update_barcode_info(barcode, info)
         changed += 1
-    if changed:
-        save_data(data)
     return changed
 
 def _sync_barcode_html_dealer(barcode, dealer):
@@ -5832,19 +5847,17 @@ def _apply_transfer_local_dealer(summary, transfer_type, distributor):
     if not new_dealer:
         return
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    data = load_data()
     for detail in summary.get('details', []):
         barcode = _clean_export_value(detail.get('barcode'))
         if not barcode:
             continue
-        info = data.get(barcode, {'remark': '', 'archived': False, 'archiveTime': '', 'archivedBy': ''})
+        info = get_barcode_info(barcode)
         info['currentDealerOverride'] = new_dealer
         info['transferUpdatedAt'] = now
         info['transferType'] = transfer_type
         info['transferDistributor'] = distributor
-        data[barcode] = info
+        update_barcode_info(barcode, info)
         _sync_barcode_html_dealer(barcode, new_dealer)
-    save_data(data)
 
 def build_transfer_summary(selected_barcodes, transfer_type="移出", distributor=""):
     own_dealer = own_dealer_name()
@@ -6006,7 +6019,7 @@ def load_distributor_history():
     ]
 
 def _save_distributor_history_rows(rows):
-    _replace_entities("distributor", ((row, {"value": row}) for row in rows[:100]))
+    _upsert_entities("distributor", ((row, {"value": row}) for row in rows[:100]))
 
 def load_deleted_distributor_history():
     own_dealer = own_dealer_name()
@@ -6109,7 +6122,7 @@ def load_data():
     return _load_entity_mapping("barcode_metadata")
 
 def save_data(data):
-    _replace_entities("barcode_metadata", data.items())
+    _upsert_entities("barcode_metadata", data.items())
 
 def _barcode_result_paths(barcode):
     barcode = _clean_export_value(barcode)
@@ -6153,11 +6166,10 @@ def delete_temporary_query_result(barcode, log=None, keep_paths=None, keep_metad
         except Exception as e:
             if log:
                 log(f"临时查询文件删除失败：{os.path.basename(path)}，{e}", "warn")
-    data = load_data()
-    removed_meta = bool(not keep_metadata and barcode in data)
+    metadata = store.get_entity("barcode_metadata", barcode)
+    removed_meta = bool(not keep_metadata and metadata and not metadata.deleted)
     if removed_meta:
-        data.pop(barcode, None)
-        save_data(data)
+        store.delete_entity("barcode_metadata", barcode, _current_actor())
     if log and (removed_file or removed_meta):
         log(f"已删除临时查询结果：{barcode}，不加入结果管理", "dim")
     return removed_file or removed_meta
@@ -6171,9 +6183,7 @@ def get_barcode_info(barcode):
     return data.get(barcode, {'remark': '', 'archived': False, 'archiveTime': '', 'archivedBy': ''})
 
 def update_barcode_info(barcode, info):
-    data = load_data()
-    data[barcode] = info
-    save_data(data)
+    store.put_entity("barcode_metadata", barcode, dict(info))
 
 def update_barcode_query_slot(barcode, slot_id):
     barcode = _clean_export_value(barcode)
@@ -6199,13 +6209,13 @@ def load_accounts():
     if accounts:
         if not any(row.get('username') == 'admin' for row in accounts):
             accounts.insert(0, default_admin)
-            save_accounts(accounts)
+            store.put_entity("account", "admin", default_admin)
         return accounts
-    save_accounts([default_admin])
+    store.put_entity("account", "admin", default_admin)
     return [default_admin]
 
 def save_accounts(accounts):
-    _replace_entities(
+    _upsert_entities(
         "account",
         ((row.get("id") or row.get("username") or index, row) for index, row in enumerate(accounts)),
     )
@@ -6257,35 +6267,51 @@ def crm_credentials_owner_key():
 
 def load_crm_credentials_store():
     with crm_credentials_lock:
-        if isinstance(store, FileStore):
-            return _load_entity_mapping("crm_credentials")
-        row = store.get_entity("crm_credentials", "default")
-        if not row or row.deleted or not isinstance(row.payload, dict):
-            return {}
-        return dict(row.payload)
+        result = OrderedDict()
+        rows = store.load_entities("crm_credentials")
+        legacy = next((row for row in rows if row.key == "default"), None)
+        if legacy and isinstance(legacy.payload, dict):
+            for owner, payload in legacy.payload.items():
+                if isinstance(payload, dict):
+                    result[str(owner)] = dict(payload)
+        for row in rows:
+            if row.key != "default" and isinstance(row.payload, dict):
+                result[row.key] = dict(row.payload)
+        return result
 
 def save_crm_credentials_store(data):
     with crm_credentials_lock:
-        if isinstance(store, FileStore):
-            desired = OrderedDict((str(key), dict(payload)) for key, payload in data.items())
-            existing = store.load_entities("crm_credentials", include_deleted=True)
-            for key, payload in desired.items():
-                store.put_entity("crm_credentials", key, payload)
-            for row in existing:
-                if not row.deleted and row.key not in desired:
-                    store.delete_entity("crm_credentials", row.key, _current_actor())
-            return
-        if data:
-            store.put_entity("crm_credentials", "default", dict(data))
-        else:
-            store.delete_entity("crm_credentials", "default", _current_actor())
+        for key, payload in data.items():
+            if isinstance(payload, dict):
+                store.put_entity("crm_credentials", str(key), dict(payload))
+
+def _legacy_crm_credentials_for_owner(owner):
+    if owner == "default":
+        return None
+    legacy = store.get_entity("crm_credentials", "default")
+    if not legacy or legacy.deleted or not isinstance(legacy.payload, dict):
+        return None
+    payload = legacy.payload.get(owner)
+    return dict(payload) if isinstance(payload, dict) else None
+
+def _crm_credentials_for_owner(owner, migrate_legacy=True):
+    row = store.get_entity("crm_credentials", owner)
+    if row is not None:
+        if row.deleted or not isinstance(row.payload, dict):
+            return None
+        return dict(row.payload)
+    legacy = _legacy_crm_credentials_for_owner(owner)
+    if legacy and migrate_legacy:
+        store.put_entity("crm_credentials", owner, legacy)
+    return legacy
 
 def get_remembered_crm_credentials():
     key = crm_credentials_owner_key()
     if not key:
         return {"remember": False, "username": "", "password": ""}
-    row = load_crm_credentials_store().get(key) or {}
-    if not isinstance(row, dict) or not row.get("remember"):
+    with crm_credentials_lock:
+        row = _crm_credentials_for_owner(key) or {}
+    if not row.get("remember"):
         return {"remember": False, "username": "", "password": ""}
     return {
         "remember": True,
@@ -6297,17 +6323,23 @@ def save_remembered_crm_credentials(remember, username="", password=""):
     key = crm_credentials_owner_key()
     if not key:
         return False
-    data = load_crm_credentials_store()
-    if remember:
-        data[key] = {
-            "remember": True,
-            "username": str(username or "").strip(),
-            "password": str(password or ""),
-            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        }
-    else:
-        data.pop(key, None)
-    save_crm_credentials_store(data)
+    with crm_credentials_lock:
+        if remember:
+            store.put_entity("crm_credentials", key, {
+                "remember": True,
+                "username": str(username or "").strip(),
+                "password": str(password or ""),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        else:
+            row = store.get_entity("crm_credentials", key)
+            if row is None:
+                legacy = _legacy_crm_credentials_for_owner(key)
+                if legacy:
+                    store.put_entity("crm_credentials", key, legacy)
+                    row = store.get_entity("crm_credentials", key)
+            if row and not row.deleted:
+                store.delete_entity("crm_credentials", key, _current_actor())
     return True
 
 PAGE_LINKS = [
@@ -6440,15 +6472,22 @@ def api_operation_logs():
     logs = []
     for row in store.list_logs(category, limit):
         context = row.get('context') if isinstance(row.get('context'), dict) else {}
-        created_at = str(row.get('created_at') or '')
+        created_at = str(context.get('created_at') or row.get('created_at') or '')
+        job_id = str(context.get('job_id') or '')
+        log_id = context.get('log_id')
+        log_key = str(context.get('log_key') or '')
+        if not log_key and job_id and log_id is not None:
+            log_key = f'job:{job_id}:{log_id}'
         logs.append({
             'id': str(row.get('event_id') or row.get('id') or ''),
+            'key': log_key,
             'time': str(context.get('time') or (created_at[11:19] if len(created_at) >= 19 else created_at)),
             'created_at': created_at,
             'level': str(row.get('level') or 'dim'),
             'message': _safe_log_text(row.get('message')),
             'context': context,
         })
+    logs.sort(key=lambda row: row.get('created_at') or '', reverse=True)
     return jsonify({'success': True, 'category': category, 'logs': logs})
 
 def _report_time(record):
@@ -6471,17 +6510,16 @@ def archive_barcode(barcode):
     if not record or record.archived:
         return False, '文件不存在'
     try:
-        store.put_report(ReportRecord(
+        info = get_barcode_info(barcode)
+        info['archived'] = True
+        info['archiveTime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        store.put_report_bundle(ReportRecord(
             barcode=record.barcode,
             html=record.html,
             archived=True,
             query_slot=record.query_slot,
             updated_at=record.updated_at,
-        ))
-        info = get_barcode_info(barcode)
-        info['archived'] = True
-        info['archiveTime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        update_barcode_info(barcode, info)
+        ), info, _current_actor())
         return True, '归档成功'
     except Exception as e:
         return False, str(e)
@@ -6491,17 +6529,16 @@ def unarchive_barcode(barcode):
     if not record or not record.archived:
         return False, '归档文件不存在'
     try:
-        store.put_report(ReportRecord(
+        info = get_barcode_info(barcode)
+        info['archived'] = False
+        info['archiveTime'] = ''
+        store.put_report_bundle(ReportRecord(
             barcode=record.barcode,
             html=record.html,
             archived=False,
             query_slot=record.query_slot,
             updated_at=record.updated_at,
-        ))
-        info = get_barcode_info(barcode)
-        info['archived'] = False
-        info['archiveTime'] = ''
-        update_barcode_info(barcode, info)
+        ), info, _current_actor())
         return True, '取消归档成功'
     except Exception as e:
         return False, str(e)
@@ -6714,13 +6751,25 @@ def api_export_xlsx():
     if columns:
         ws.auto_filter.ref = f"A2:{get_column_letter(len(columns))}{len(export_rows) + 2}"
 
-    output_path = os.path.join(BARCODE_DIR, 'export_result.xlsx')
+    os.makedirs(EXPORT_DIR, exist_ok=True)
+    for entry in os.scandir(EXPORT_DIR):
+        try:
+            if (
+                entry.is_file()
+                and entry.name.endswith('.xlsx')
+                and time.time() - entry.stat().st_mtime > 3600
+            ):
+                os.remove(entry.path)
+        except OSError:
+            pass
+    export_id = uuid.uuid4().hex
+    output_path = os.path.join(EXPORT_DIR, export_id + '.xlsx')
     wb.save(output_path)
 
     return jsonify({
         'success': True,
         'message': f'已导出 {len(selected_barcodes)} 条记录',
-        'filename': 'export_result.xlsx'
+        'filename': f'exports/{export_id}.xlsx'
     })
 
 @app.route("/api/service-close/start", methods=["POST"])
@@ -7077,6 +7126,32 @@ def api_crm_transfer_status():
             'finished_at': job['finished_at'],
         })
 
+@app.route("/barcode/exports/<export_id>.xlsx")
+def download_xlsx_export(export_id):
+    if not re.fullmatch(r'[0-9a-f]{32}', export_id):
+        abort(404)
+    path = os.path.join(EXPORT_DIR, export_id + '.xlsx')
+    claimed_path = path + f'.{uuid.uuid4().hex}.download'
+    try:
+        os.replace(path, claimed_path)
+    except FileNotFoundError:
+        abort(404)
+    try:
+        with open(claimed_path, 'rb') as handle:
+            content = handle.read()
+    finally:
+        try:
+            os.remove(claimed_path)
+        except OSError:
+            pass
+    return send_file(
+        io.BytesIO(content),
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name='export_result.xlsx',
+        max_age=0,
+    )
+
 @app.route("/barcode/<filename>")
 def serve_barcode(filename):
     barcode = filename.rsplit('.', 1)[0]
@@ -7106,8 +7181,7 @@ def api_delete_barcode(barcode):
 
     try:
         actor = _current_actor()
-        store.delete_report(barcode, actor)
-        store.delete_entity("barcode_metadata", barcode, actor)
+        store.delete_report_bundle(barcode, actor)
         return jsonify({'success': True, 'message': f'已删除 {barcode}'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -7205,6 +7279,7 @@ def api_product_library_query_start():
             'success': False,
             'barcode': barcode,
             'error': '',
+            'log_seq': 0,
             'logs': [],
             'slot_id': slot_id,
             'slot_label': slot_label,
@@ -7290,19 +7365,19 @@ def api_accounts_save():
                 })
                 if password:
                     row['password'] = password
-                save_accounts(accounts)
+                store.put_entity("account", account_id, row)
                 return jsonify({'success': True})
     if any(row.get('username') == username for row in accounts):
         return jsonify({'success': False, 'error': '账号已存在'})
-    accounts.append({
-        'id': uuid.uuid4().hex,
+    account_id = uuid.uuid4().hex
+    store.put_entity("account", account_id, {
+        'id': account_id,
         'username': username,
         'display_name': display_name,
         'password': password,
         'permissions': permissions,
         'updated_at': now,
     })
-    save_accounts(accounts)
     return jsonify({'success': True})
 
 @app.route("/api/accounts/<account_id>", methods=["DELETE"])
@@ -7535,20 +7610,24 @@ def api_crm_bulk_login_start():
         job = _empty_bulk_login_job(scope, slots)
         job.update({
             'running': bool(slots),
-            'done': not bool(slots),
-            'success': not bool(slots),
+            'done': False,
+            'success': False,
             'username': username,
             'password': password,
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'finished_at': '' if slots else datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'finished_at': '',
+            'step1_done': not bool(slots),
         })
-        if not slots:
-            _append_job_log_unlocked(job, '所有 CRM 通道都已登录', 'success', 1000)
         bulk_login_jobs[job['job_id']] = job
         latest_bulk_login_job_by_scope[scope] = job['job_id']
-        payload = _bulk_login_status_payload(job)
     if slots:
         threading.Thread(target=_run_bulk_login_job, args=(job['job_id'], username, password), daemon=True).start()
+    else:
+        _finalize_bulk_login_job(
+            job['job_id'], completion_message='所有 CRM 通道都已登录'
+        )
+    with bulk_login_job_lock:
+        payload = _bulk_login_status_payload(bulk_login_jobs[job['job_id']])
     return jsonify(payload)
 
 @app.route("/api/crm/bulk-login/status")
@@ -7588,13 +7667,9 @@ def api_crm_bulk_login_cancel():
         job = bulk_login_jobs.get(job_id)
         if not job:
             return jsonify({'success': True})
-        job['stop_requested'] = True
-        job['running'] = False
-        job['done'] = True
-        job['error'] = '批量登录已取消'
-        job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        _append_job_log_unlocked(job, '批量登录已取消', 'warn', 1000)
-        return jsonify(_bulk_login_status_payload(job))
+    _finalize_bulk_login_job(job_id, cancelled=True)
+    with bulk_login_job_lock:
+        return jsonify(_bulk_login_status_payload(bulk_login_jobs[job_id]))
 
 @app.route("/api/crm/logout", methods=["POST"])
 def api_crm_logout():

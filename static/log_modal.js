@@ -10,6 +10,87 @@
     let logHistory = [];
     let seenKeys = new Set();
 
+    function canonicalLogKey(key) {
+        const value = String(key || '');
+        const bulkLogin = /^bulk-login-(?:query|transfer|all):([^:]+):(.+)$/.exec(value);
+        return bulkLogin ? `job:${bulkLogin[1]}:${bulkLogin[2]}` : value;
+    }
+
+    function stableLogKey(row) {
+        if (!row) return '';
+        const context = row.context && typeof row.context === 'object' ? row.context : {};
+        const explicit = canonicalLogKey(row.key || context.log_key);
+        if (explicit) return explicit;
+        const jobId = row.job_id || context.job_id;
+        const logId = row.log_id !== undefined ? row.log_id : context.log_id;
+        if (jobId && logId !== undefined && logId !== null) {
+            return `job:${jobId}:${logId}`;
+        }
+        return row.id ? `event:${row.id}` : '';
+    }
+
+    function logTimestamp(row) {
+        const context = row && row.context && typeof row.context === 'object' ? row.context : {};
+        const value = String((row && row.created_at) || context.created_at || '');
+        if (!value) return 0;
+        const parsed = Date.parse(value.includes('T') ? value : value.replace(' ', 'T'));
+        return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function normalizeLogRow(row) {
+        const context = row && row.context && typeof row.context === 'object' ? row.context : {};
+        const createdAt = String((row && row.created_at) || context.created_at || '');
+        const normalized = {
+            ...(row || {}),
+            time: String((row && row.time) || (createdAt.length >= 19 ? createdAt.slice(11, 19) : '')),
+            created_at: createdAt,
+            message: String((row && row.message) || ''),
+            level: normalizeLevel((row && row.level) || 'dim'),
+        };
+        normalized.key = stableLogKey(normalized);
+        return normalized;
+    }
+
+    function sameVisibleLog(left, right) {
+        if (left.message !== right.message || left.level !== right.level) return false;
+        if (left.time === right.time) return true;
+        const leftTimestamp = logTimestamp(left);
+        const rightTimestamp = logTimestamp(right);
+        return leftTimestamp > 0
+            && rightTimestamp > 0
+            && Math.abs(leftTimestamp - rightTimestamp) <= 5000;
+    }
+
+    function mergeLogRows(existingRows, incomingRows) {
+        const merged = [];
+        const indexes = new Map();
+
+        function mergeOne(value, preferIncoming) {
+            const row = normalizeLogRow(value);
+            const key = stableLogKey(row);
+            if (key && indexes.has(key)) {
+                const index = indexes.get(key);
+                merged[index] = preferIncoming ? {...merged[index], ...row, key} : merged[index];
+                return;
+            }
+            if (key && key.startsWith('job:')) {
+                const fallbackIndex = merged.findIndex(item => !stableLogKey(item) && sameVisibleLog(item, row));
+                if (fallbackIndex >= 0) {
+                    merged[fallbackIndex] = {...merged[fallbackIndex], ...row, key};
+                    indexes.set(key, fallbackIndex);
+                    return;
+                }
+            }
+            if (key) indexes.set(key, merged.length);
+            merged.push(row);
+        }
+
+        (existingRows || []).forEach(row => mergeOne(row, false));
+        (incomingRows || []).forEach(row => mergeOne(row, true));
+        merged.sort((left, right) => logTimestamp(right) - logTimestamp(left));
+        return merged;
+    }
+
     function currentLogScope() {
         const path = window.location.pathname || '/';
         if (path === '/' || path === '/index.html') return '/';
@@ -94,16 +175,16 @@
         historyLoaded = true;
         try {
             const rows = JSON.parse(sessionStorage.getItem(storageKey()) || '[]');
-            logHistory = Array.isArray(rows) ? rows.slice(-MAX_HISTORY) : [];
+            logHistory = Array.isArray(rows) ? mergeLogRows([], rows).slice(0, MAX_HISTORY) : [];
         } catch (e) {
             logHistory = [];
         }
-        seenKeys = new Set(logHistory.map(row => row.key).filter(Boolean));
+        seenKeys = new Set(logHistory.map(stableLogKey).filter(Boolean));
     }
 
     function persistHistory() {
         try {
-            sessionStorage.setItem(storageKey(), JSON.stringify(logHistory.slice(-MAX_HISTORY)));
+            sessionStorage.setItem(storageKey(), JSON.stringify(logHistory.slice(0, MAX_HISTORY)));
         } catch (e) {}
     }
 
@@ -117,7 +198,7 @@
             .then(response => response.ok ? response.json() : null)
             .then(payload => {
                 if (payload && payload.success && Array.isArray(payload.logs)) {
-                    payload.logs.forEach(appendGlobalLogRow);
+                    replaceGlobalLogRows(payload.logs);
                 }
                 serverHistoryLoaded = true;
             })
@@ -135,72 +216,77 @@
             body.innerHTML = '<div class="dim">等待操作...</div>';
             return;
         }
-        for (const row of [...logHistory].reverse()) {
-            appendLogLine(row.message, row.level, row.time);
+        for (const row of logHistory) {
+            appendLogLine(row.message, row.level, row.time, false);
         }
         body.scrollTop = 0;
     }
 
-    function appendLogLine(message, level, time) {
+    function appendLogLine(message, level, time, prepend=true) {
         if (body.textContent.trim() === '等待操作...') body.innerHTML = '';
         const line = document.createElement('div');
         line.className = normalizeLevel(level || 'dim');
         line.textContent = `[${time || new Date().toLocaleTimeString()}] ${message || ''}`;
-        body.insertBefore(line, body.firstChild);
+        if (prepend) body.insertBefore(line, body.firstChild);
+        else body.appendChild(line);
         while (body.children.length > 8000) {
             body.removeChild(body.lastChild);
         }
         body.scrollTop = 0;
     }
 
-    function appendGlobalLog(message, level, time, key) {
+    function appendGlobalLog(message, level, time, key, createdAt) {
         ensureLogModal();
         loadHistory();
         const stamp = time || new Date().toLocaleTimeString();
         const normalizedLevel = normalizeLevel(level || 'dim');
-        const dedupeKey = key || '';
+        const dedupeKey = canonicalLogKey(key);
         if (dedupeKey && seenKeys.has(dedupeKey)) return;
-        if (dedupeKey) seenKeys.add(dedupeKey);
         const entry = {
             time: stamp,
+            created_at: createdAt || new Date().toISOString(),
             message: String(message || ''),
             level: normalizedLevel,
             key: dedupeKey,
         };
-        logHistory.push(entry);
-        if (logHistory.length > MAX_HISTORY) {
-            const removed = logHistory.splice(0, logHistory.length - MAX_HISTORY);
-            for (const row of removed) {
-                if (row.key) seenKeys.delete(row.key);
-            }
-        }
+        logHistory = mergeLogRows(logHistory, [entry]).slice(0, MAX_HISTORY);
+        seenKeys = new Set(logHistory.map(stableLogKey).filter(Boolean));
         persistHistory();
-        appendLogLine(entry.message, entry.level, entry.time);
+        renderHistory();
     }
 
     function appendGlobalLogRow(row) {
         if (!row) return;
-        const key = row.id
-            ? `row:${row.id}:${row.time || ''}:${row.message || ''}`
-            : `row:${row.time || ''}:${row.level || 'dim'}:${row.message || ''}`;
-        appendGlobalLog(row.message || '', row.level || 'dim', row.time || '', key);
+        replaceGlobalLogRows([row]);
     }
 
     function replaceGlobalLogRows(rows) {
         ensureLogModal();
         if (!rows || !rows.length) return;
-        rows.forEach(appendGlobalLogRow);
+        loadHistory();
+        logHistory = mergeLogRows(logHistory, rows).slice(0, MAX_HISTORY);
+        seenKeys = new Set(logHistory.map(stableLogKey).filter(Boolean));
+        persistHistory();
+        renderHistory();
     }
 
-    window.globalLogAppend = appendGlobalLog;
-    window.globalLogAppendRow = appendGlobalLogRow;
-    window.globalLogReplaceRows = replaceGlobalLogRows;
-    window.globalLogClear = clearGlobalLog;
-    window.openGlobalLogModal = openGlobalLogModal;
-    window.closeGlobalLogModal = closeGlobalLogModal;
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = {stableLogKey, mergeLogRows};
+    }
 
-    document.addEventListener('DOMContentLoaded', ensureLogModal);
-    document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') closeGlobalLogModal();
-    });
+    if (typeof window !== 'undefined') {
+        window.globalLogAppend = appendGlobalLog;
+        window.globalLogAppendRow = appendGlobalLogRow;
+        window.globalLogReplaceRows = replaceGlobalLogRows;
+        window.globalLogClear = clearGlobalLog;
+        window.openGlobalLogModal = openGlobalLogModal;
+        window.closeGlobalLogModal = closeGlobalLogModal;
+    }
+
+    if (typeof document !== 'undefined') {
+        document.addEventListener('DOMContentLoaded', ensureLogModal);
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape') closeGlobalLogModal();
+        });
+    }
 })();

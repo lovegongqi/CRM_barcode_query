@@ -3,6 +3,7 @@ from crm_storage.file_store import FileStore
 import os
 import subprocess
 import sys
+import pytest
 
 
 def test_report_round_trip_and_soft_delete(tmp_path):
@@ -84,3 +85,61 @@ def test_put_report_replaces_archived_report_when_restoring(tmp_path):
     assert not (tmp_path / "barcode" / "archived" / "845.html").exists()
     assert (tmp_path / "barcode" / "845.html").read_bytes() == b"active"
     assert store.get_report("845").archived is False
+
+
+def test_append_log_with_stable_event_id_is_idempotent(tmp_path):
+    store = FileStore(str(tmp_path))
+    event_id = "1f40c2ca-047c-5d50-95ca-7d3894b849f1"
+
+    assert store.append_log(
+        "crm", "info", "once", {"job_id": "job-1"}, event_id=event_id
+    ) == event_id
+    restarted_store = FileStore(str(tmp_path))
+    assert restarted_store.append_log(
+        "crm", "info", "once", {"job_id": "job-1"}, event_id=event_id
+    ) == event_id
+
+    rows = restarted_store.list_logs("crm")
+    assert len(rows) == 1
+    assert rows[0]["event_id"] == event_id
+
+
+def test_report_bundle_rolls_back_when_metadata_write_fails(tmp_path, monkeypatch):
+    store = FileStore(str(tmp_path))
+    active = ReportRecord(
+        "845", b"active", False, "query-1", "2026-07-16 10:00:00"
+    )
+    store.put_report_bundle(
+        active,
+        {
+            "archived": False,
+            "remark": "keep",
+            "querySlotId": "query-1",
+            "queryUpdatedAt": "2026-07-16 10:00:00",
+        },
+    )
+    original_write = store._write_entity_payloads
+
+    def reject_metadata(kind, payloads):
+        if kind == "barcode_metadata":
+            raise RuntimeError("forced metadata failure")
+        return original_write(kind, payloads)
+
+    monkeypatch.setattr(store, "_write_entity_payloads", reject_metadata)
+    archived = ReportRecord(
+        "845", b"archived", True, "query-1", "2026-07-16 11:00:00"
+    )
+
+    with pytest.raises(RuntimeError, match="forced metadata failure"):
+        store.put_report_bundle(
+            archived,
+            {
+                "archived": True,
+                "remark": "changed",
+                "querySlotId": "query-1",
+                "queryUpdatedAt": "2026-07-16 11:00:00",
+            },
+        )
+
+    assert store.get_report("845") == active
+    assert store.get_entity("barcode_metadata", "845").payload["remark"] == "keep"
