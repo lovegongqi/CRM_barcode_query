@@ -17,9 +17,11 @@ import queue
 import uuid
 import shutil
 from collections import OrderedDict
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, session, redirect
+from flask import Flask, render_template, request, jsonify, Response, session, redirect, abort, has_request_context
 from datetime import datetime
+from crm_storage.base import ReportRecord
 from crm_storage.factory import get_store
+from crm_storage.file_store import FileStore
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -1506,8 +1508,8 @@ class CRMSession:
                     output_file = os.path.join(html_dir, f"{barcode}.html")
                     with open(output_file, "w", encoding="utf-8") as f:
                         f.write(html_content)
+                    fields = _ingest_query_result(barcode, output_file, is_temporary)
                     try:
-                        fields = extract_fields_from_html(output_file)
                         refresh_product_library_from_query_fields(barcode, fields, emit)
                     except Exception as e:
                         emit(f"条码匹配自动更新失败：{e}", "warn")
@@ -4725,7 +4727,10 @@ def _replace_entities(kind, rows):
     desired = OrderedDict((str(key), dict(payload)) for key, payload in rows)
     existing = store.load_entities(kind, include_deleted=True)
     for key, payload in desired.items():
-        store.put_entity(kind, key, payload)
+        stored_payload = dict(payload)
+        if not isinstance(store, FileStore) and not stored_payload.get("updated_at"):
+            stored_payload.pop("updated_at", None)
+        store.put_entity(kind, key, stored_payload)
     for row in existing:
         if not row.deleted and row.key not in desired:
             store.delete_entity(kind, row.key)
@@ -4910,12 +4915,9 @@ SUBREPORT_FIELD_MAP = {
          'statuscode1', 'dealername1', 'newdeposit1'],
 }
 
-def extract_fields_from_html(filepath):
+def _extract_fields_from_html(html):
     result = {}
     try:
-        with open(filepath, 'r', encoding='utf-8') as f:
-            html = f.read()
-
         sr_pattern = re.compile(r'<div id="Subreport(\d+)"')
         sr_matches = list(sr_pattern.finditer(html))
 
@@ -4965,6 +4967,29 @@ def extract_fields_from_html(filepath):
         pass
 
     return result
+
+def extract_fields_from_html(filepath):
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return _extract_fields_from_html(f.read())
+    except Exception:
+        return {}
+
+def _ingest_query_result(barcode, filepath, is_temporary=False):
+    with open(filepath, 'rb') as f:
+        report_html = f.read()
+    fields = _extract_fields_from_html(report_html.decode('utf-8'))
+    if not is_temporary:
+        store.put_report(ReportRecord(
+            barcode=barcode,
+            html=report_html,
+            archived=False,
+            query_slot='',
+            updated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        ))
+    if not isinstance(store, FileStore):
+        os.remove(filepath)
+    return fields
 
 def _get_field(fields, field_id):
     import re as re_mod
@@ -5684,31 +5709,25 @@ def _record_service_closed_for_barcodes(service_no, barcodes):
         save_data(data)
     return changed
 
-def _barcode_html_path(barcode):
-    filename = barcode + '.html'
-    for directory in (BARCODE_DIR, ARCHIVE_DIR):
-        filepath = os.path.join(directory, filename)
-        if os.path.exists(filepath):
-            return filepath
-    return ''
-
 def _sync_barcode_html_dealer(barcode, dealer):
-    filepath = _barcode_html_path(barcode)
-    if not filepath:
+    record = store.get_report(barcode)
+    if not record:
         return False
     try:
-        original_mtime = os.path.getmtime(filepath)
-        with open(filepath, 'r', encoding='utf-8') as f:
-            html = f.read()
+        html = record.html.decode('utf-8')
         updated_html, changed = _replace_html_field_values(
             html,
             ["myproductdealer1", "dealername1"],
             dealer
         )
         if changed:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(updated_html)
-            os.utime(filepath, (original_mtime, original_mtime))
+            store.put_report(ReportRecord(
+                barcode=record.barcode,
+                html=updated_html.encode('utf-8'),
+                archived=record.archived,
+                query_slot=record.query_slot,
+                updated_at=record.updated_at,
+            ))
         return changed
     except Exception:
         return False
@@ -5975,10 +5994,9 @@ def delete_distributor_history(distributor):
     distributor = _clean_export_value(distributor)
     if not distributor or distributor == own_dealer:
         return False
-    rows = [row for row in load_distributor_history() if row != distributor]
-    _save_distributor_history_rows(rows)
-    deleted = [distributor] + [row for row in load_deleted_distributor_history() if row != distributor]
-    save_deleted_distributor_history(deleted)
+    row = store.get_entity("distributor", distributor)
+    if row and not row.deleted:
+        store.delete_entity("distributor", distributor, _current_actor())
     return True
 
 def combined_distributor_history():
@@ -6130,6 +6148,12 @@ def current_account_public():
     row = current_account()
     return account_public(row) if row else None
 
+def _current_actor():
+    if not has_request_context():
+        return 'system'
+    account = current_account_public() or {}
+    return account.get('username') or 'system'
+
 def crm_credentials_owner_key():
     row = current_account()
     if row and row.get("username"):
@@ -6138,11 +6162,28 @@ def crm_credentials_owner_key():
 
 def load_crm_credentials_store():
     with crm_credentials_lock:
-        return _load_entity_mapping("crm_credentials")
+        if isinstance(store, FileStore):
+            return _load_entity_mapping("crm_credentials")
+        row = store.get_entity("crm_credentials", "default")
+        if not row or row.deleted or not isinstance(row.payload, dict):
+            return {}
+        return dict(row.payload)
 
 def save_crm_credentials_store(data):
     with crm_credentials_lock:
-        _replace_entities("crm_credentials", data.items())
+        if isinstance(store, FileStore):
+            desired = OrderedDict((str(key), dict(payload)) for key, payload in data.items())
+            existing = store.load_entities("crm_credentials", include_deleted=True)
+            for key, payload in desired.items():
+                store.put_entity("crm_credentials", key, payload)
+            for row in existing:
+                if not row.deleted and row.key not in desired:
+                    store.delete_entity("crm_credentials", row.key, _current_actor())
+            return
+        if data:
+            store.put_entity("crm_credentials", "default", dict(data))
+        else:
+            store.delete_entity("crm_credentials", "default", _current_actor())
 
 def get_remembered_crm_credentials():
     key = crm_credentials_owner_key()
@@ -6278,14 +6319,33 @@ def require_app_login():
 def inject_app_flags():
     return {'is_desktop_app': IS_DESKTOP_APP}
 
+def _report_time(record):
+    time_str = str(record.updated_at or '')
+    if time_str:
+        try:
+            return time_str, datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S').timestamp()
+        except ValueError:
+            pass
+    if isinstance(store, FileStore):
+        directory = os.path.join(store.barcode_dir, 'archived') if record.archived else store.barcode_dir
+        filepath = os.path.join(directory, record.barcode + '.html')
+        if os.path.exists(filepath):
+            mtime = os.path.getmtime(filepath)
+            return datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S'), mtime
+    return time_str, 0
+
 def archive_barcode(barcode):
-    src = os.path.join(BARCODE_DIR, barcode + '.html')
-    if not os.path.exists(src):
+    record = store.get_report(barcode)
+    if not record or record.archived:
         return False, '文件不存在'
-    os.makedirs(ARCHIVE_DIR, exist_ok=True)
-    dst = os.path.join(ARCHIVE_DIR, barcode + '.html')
     try:
-        os.rename(src, dst)
+        store.put_report(ReportRecord(
+            barcode=record.barcode,
+            html=record.html,
+            archived=True,
+            query_slot=record.query_slot,
+            updated_at=record.updated_at,
+        ))
         info = get_barcode_info(barcode)
         info['archived'] = True
         info['archiveTime'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -6295,12 +6355,17 @@ def archive_barcode(barcode):
         return False, str(e)
 
 def unarchive_barcode(barcode):
-    src = os.path.join(ARCHIVE_DIR, barcode + '.html')
-    if not os.path.exists(src):
+    record = store.get_report(barcode)
+    if not record or not record.archived:
         return False, '归档文件不存在'
-    dst = os.path.join(BARCODE_DIR, barcode + '.html')
     try:
-        os.rename(src, dst)
+        store.put_report(ReportRecord(
+            barcode=record.barcode,
+            html=record.html,
+            archived=False,
+            query_slot=record.query_slot,
+            updated_at=record.updated_at,
+        ))
         info = get_barcode_info(barcode)
         info['archived'] = False
         info['archiveTime'] = ''
@@ -6313,70 +6378,64 @@ def scan_barcodes():
     barcodes = []
     seen = set()
 
-    def add_barcode_file(filepath, filename):
-        barcode = filename.replace('.html', '')
+    def add_barcode_record(barcode):
         if barcode in seen:
             return
+        record = store.get_report(barcode)
+        if not record:
+            return
         seen.add(barcode)
-        mtime = os.path.getmtime(filepath)
-        time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-        fields = extract_fields_from_html(filepath)
+        time_str, mtime = _report_time(record)
+        fields = _extract_fields_from_html(record.html.decode('utf-8'))
         info = get_barcode_info(barcode)
         fields = _apply_dealer_to_fields(fields, info.get('currentDealerOverride', ''))
         fields = _apply_service_close_overrides(fields, info)
         barcodes.append({
             'barcode': barcode,
-            'filename': filename,
+            'filename': barcode + '.html',
             'time': time_str,
             'mtime': mtime,
             'fields': fields,
             'currentDealerOverride': info.get('currentDealerOverride', ''),
             'transferUpdatedAt': info.get('transferUpdatedAt', ''),
-            'querySlotId': info.get('querySlotId', ''),
-            'querySlotLabel': info.get('querySlotLabel', ''),
-            'queryUpdatedAt': info.get('queryUpdatedAt', ''),
+            'querySlotId': info.get('querySlotId', '') or record.query_slot,
+            'querySlotLabel': info.get('querySlotLabel', '') or (_query_slot_label(record.query_slot) if record.query_slot else ''),
+            'queryUpdatedAt': info.get('queryUpdatedAt', '') or record.updated_at,
             'remark': info.get('remark', ''),
         })
 
-    for filename in os.listdir(BARCODE_DIR):
-        if filename.endswith('.html'):
-            add_barcode_file(os.path.join(BARCODE_DIR, filename), filename)
-
-    if os.path.exists(ARCHIVE_DIR):
-        for filename in os.listdir(ARCHIVE_DIR):
-            if filename.endswith('.html'):
-                add_barcode_file(os.path.join(ARCHIVE_DIR, filename), filename)
+    for barcode in store.list_reports(False):
+        add_barcode_record(barcode)
+    for barcode in store.list_reports(True):
+        add_barcode_record(barcode)
 
     barcodes.sort(key=lambda x: x['mtime'], reverse=True)
     return barcodes
 
 def scan_archived():
     barcodes = []
-    if not os.path.exists(ARCHIVE_DIR):
-        return barcodes
-    for filename in os.listdir(ARCHIVE_DIR):
-        if filename.endswith('.html'):
-            barcode = filename.replace('.html', '')
-            filepath = os.path.join(ARCHIVE_DIR, filename)
-            mtime = os.path.getmtime(filepath)
-            time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-            fields = extract_fields_from_html(filepath)
-            info = get_barcode_info(barcode)
-            fields = _apply_service_close_overrides(fields, info)
-            barcodes.append({
-                'barcode': barcode,
-                'filename': filename,
-                'time': time_str,
-                'mtime': mtime,
-                'fields': fields,
-                'currentDealerOverride': info.get('currentDealerOverride', ''),
-                'transferUpdatedAt': info.get('transferUpdatedAt', ''),
-                'querySlotId': info.get('querySlotId', ''),
-                'querySlotLabel': info.get('querySlotLabel', ''),
-                'queryUpdatedAt': info.get('queryUpdatedAt', ''),
-                'remark': info.get('remark', ''),
-                'archiveTime': info.get('archiveTime', ''),
-            })
+    for barcode in store.list_reports(True):
+        record = store.get_report(barcode)
+        if not record:
+            continue
+        time_str, mtime = _report_time(record)
+        fields = _extract_fields_from_html(record.html.decode('utf-8'))
+        info = get_barcode_info(barcode)
+        fields = _apply_service_close_overrides(fields, info)
+        barcodes.append({
+            'barcode': barcode,
+            'filename': barcode + '.html',
+            'time': time_str,
+            'mtime': mtime,
+            'fields': fields,
+            'currentDealerOverride': info.get('currentDealerOverride', ''),
+            'transferUpdatedAt': info.get('transferUpdatedAt', ''),
+            'querySlotId': info.get('querySlotId', '') or record.query_slot,
+            'querySlotLabel': info.get('querySlotLabel', '') or (_query_slot_label(record.query_slot) if record.query_slot else ''),
+            'queryUpdatedAt': info.get('queryUpdatedAt', '') or record.updated_at,
+            'remark': info.get('remark', ''),
+            'archiveTime': info.get('archiveTime', ''),
+        })
     barcodes.sort(key=lambda x: x['mtime'], reverse=True)
     return barcodes
 
@@ -6437,18 +6496,17 @@ def api_get_filter_options():
 
 @app.route("/api/barcodes/<barcode>", methods=["GET"])
 def api_get_barcode_detail(barcode):
-    filepath = _barcode_html_path(barcode)
-    if not os.path.exists(filepath):
+    record = store.get_report(barcode)
+    if not record:
         return jsonify({'success': False, 'error': '文件不存在'})
-    
-    fields = extract_fields_from_html(filepath)
+
+    fields = _extract_fields_from_html(record.html.decode('utf-8'))
     info = get_barcode_info(barcode)
     fields = _apply_dealer_to_fields(fields, info.get('currentDealerOverride', ''))
     fields = _apply_service_close_overrides(fields, info)
-    
-    mtime = os.path.getmtime(filepath)
-    time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-    
+
+    time_str, _mtime = _report_time(record)
+
     return jsonify({
         'success': True,
         'barcode': barcode,
@@ -6890,54 +6948,34 @@ def api_crm_transfer_status():
 @app.route("/barcode/<filename>")
 def serve_barcode(filename):
     barcode = filename.rsplit('.', 1)[0]
+    record = store.get_report(barcode)
+    if not record:
+        abort(404)
     info = get_barcode_info(barcode)
-    filepath = os.path.join(BARCODE_DIR, filename)
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            html = f.read()
-        html, changed = _apply_barcode_html_overrides(html, info)
-        if changed:
-            return Response(html, mimetype='text/html')
-        return send_from_directory(BARCODE_DIR, filename)
-    filepath = os.path.join(ARCHIVE_DIR, filename)
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            html = f.read()
-        html, changed = _apply_barcode_html_overrides(html, info)
-        if not changed:
-            return send_from_directory(ARCHIVE_DIR, filename)
-        return Response(html, mimetype='text/html')
-    return send_from_directory(ARCHIVE_DIR, filename)
+    html, changed = _apply_barcode_html_overrides(record.html.decode('utf-8'), info)
+    body = html if changed else record.html
+    return Response(body, content_type='text/html; charset=utf-8')
 
 @app.route("/barcode/archived/<filename>")
 def serve_archived(filename):
     barcode = filename.rsplit('.', 1)[0]
+    record = store.get_report(barcode)
+    if not record or not record.archived:
+        abort(404)
     info = get_barcode_info(barcode)
-    filepath = os.path.join(ARCHIVE_DIR, filename)
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            html = f.read()
-        html, changed = _apply_barcode_html_overrides(html, info)
-        if not changed:
-            return send_from_directory(ARCHIVE_DIR, filename)
-        return Response(html, mimetype='text/html')
-    return send_from_directory(ARCHIVE_DIR, filename)
+    html, changed = _apply_barcode_html_overrides(record.html.decode('utf-8'), info)
+    body = html if changed else record.html
+    return Response(body, content_type='text/html; charset=utf-8')
 
 @app.route("/api/barcodes/<barcode>", methods=["DELETE"])
 def api_delete_barcode(barcode):
-    filepath = os.path.join(BARCODE_DIR, barcode + '.html')
-    if not os.path.exists(filepath):
-        filepath = os.path.join(ARCHIVE_DIR, barcode + '.html')
-
-    if not os.path.exists(filepath):
+    if not store.get_report(barcode):
         return jsonify({'success': False, 'error': '文件不存在'})
 
     try:
-        os.remove(filepath)
-        data = load_data()
-        if barcode in data:
-            del data[barcode]
-            save_data(data)
+        actor = _current_actor()
+        store.delete_report(barcode, actor)
+        store.delete_entity("barcode_metadata", barcode, actor)
         return jsonify({'success': True, 'message': f'已删除 {barcode}'})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
@@ -7079,10 +7117,9 @@ def api_product_library_save():
 def api_product_library_delete(prefix):
     if not is_admin_account():
         return jsonify({'success': False, 'error': '只有管理员可以删除条码匹配规则'})
-    data = load_product_library()
-    if prefix in data:
-        del data[prefix]
-        save_product_library(data)
+    row = store.get_entity("product_rule", prefix)
+    if row and not row.deleted:
+        store.delete_entity("product_rule", prefix, _current_actor())
     return jsonify({'success': True})
 
 @app.route("/api/accounts", methods=["GET"])
@@ -7141,8 +7178,9 @@ def api_accounts_delete(account_id):
         return jsonify({'success': False, 'error': '只有管理员可以删除账号'})
     if account_id == 'admin':
         return jsonify({'success': False, 'error': '默认管理员账号不能删除'})
-    accounts = [row for row in load_accounts() if row.get('id') != account_id]
-    save_accounts(accounts)
+    row = store.get_entity("account", account_id)
+    if row and not row.deleted:
+        store.delete_entity("account", account_id, _current_actor())
     return jsonify({'success': True})
 
 @app.route("/api/app-auth/status")
