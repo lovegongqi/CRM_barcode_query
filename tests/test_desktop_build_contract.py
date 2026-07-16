@@ -28,3 +28,19 @@ def test_desktop_workflows_watch_storage_and_desktop_dependencies():
         assert '"crm_storage/**"' in workflow
         assert '"requirements-desktop.txt"' in workflow
         assert '"scripts/install_packaged_chromium.py"' in workflow
+
+
+def test_windows_arm_runner_builds_x64_compatible_package():
+    workflow = (ROOT / ".github" / "workflows" / "windows-exe.yml").read_text(
+        encoding="utf-8"
+    )
+
+    arm_job = workflow.split("- arch: arm64", 1)[1]
+    assert "runner: windows-11-arm" in arm_job
+    assert "python-architecture: x64" in arm_job
+
+
+def test_windows_build_stops_when_native_dependency_install_fails():
+    windows = (ROOT / "build_windows.ps1").read_text(encoding="utf-8")
+
+    assert '$PSNativeCommandUseErrorActionPreference = $true' in windows

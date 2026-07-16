@@ -34,7 +34,9 @@ jobs:
             python-architecture: x64
           - arch: arm64
             runner: windows-11-arm
-            python-architecture: arm64
+            # Windows 11 ARM runs x64 apps through its supported compatibility layer.
+            # Native ARM64 wheels are not available for all desktop dependencies.
+            python-architecture: x64
 
     steps:
       - name: Checkout
