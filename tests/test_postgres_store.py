@@ -1,6 +1,10 @@
 import base64
 import gzip
 import json
+import threading
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -11,6 +15,23 @@ from crm_storage.postgres_store import PostgresStore
 
 
 VALID_FERNET_KEY = base64.urlsafe_b64encode(b"p" * 32).decode("ascii")
+
+
+@contextmanager
+def rejecting_sync_events(pg_connection):
+    pg_connection.execute(
+        "create function reject_all_sync_events() returns trigger language plpgsql as $$ "
+        "begin raise exception 'forced outbox failure'; end $$"
+    )
+    pg_connection.execute(
+        "create trigger reject_all_sync_events before insert on sync_events "
+        "for each row execute function reject_all_sync_events()"
+    )
+    try:
+        yield
+    finally:
+        pg_connection.execute("drop trigger reject_all_sync_events on sync_events")
+        pg_connection.execute("drop function reject_all_sync_events()")
 
 
 @pytest.fixture
@@ -125,6 +146,26 @@ def test_entity_round_trip_and_upsert_event(pg_store):
     assert event.payload == payload
 
 
+def test_entity_upsert_rolls_back_when_outbox_insert_fails(pg_store, pg_connection):
+    original = {"mode": "old", "updated_at": "2026-07-16 11:00:00"}
+    pg_store.put_entity("runtime_setting", "runtime", original)
+    pg_connection.execute("truncate sync_events")
+
+    with rejecting_sync_events(pg_connection):
+        with pytest.raises(psycopg.errors.RaiseException, match="forced outbox failure"):
+            pg_store.put_entity(
+                "runtime_setting",
+                "runtime",
+                {"mode": "new", "updated_at": "2026-07-16 12:00:00"},
+            )
+
+    assert pg_store.get_entity("runtime_setting", "runtime") == EntityRecord(
+        "runtime", original, False, "2026-07-16 11:00:00"
+    )
+    assert pg_store.get_tombstone("runtime_setting", "runtime") is None
+    assert pg_connection.execute("select count(*) from sync_events").fetchone()[0] == 0
+
+
 def test_unknown_entity_kinds_fail(pg_store):
     calls = [
         lambda: pg_store.load_entities("unknown"),
@@ -158,6 +199,33 @@ def test_default_crm_credentials_are_encrypted_in_entity_and_event(pg_store, pg_
     assert "plain-secret" not in json.dumps(event_payload)
 
 
+def test_crm_credentials_reject_non_default_key_before_database_access(
+    pg_store, pg_connection, monkeypatch
+):
+    def fail_if_connection_requested():
+        raise AssertionError("database access must not occur")
+
+    monkeypatch.setattr(pg_store.pool, "connection", fail_if_connection_requested)
+    calls = [
+        lambda: pg_store.get_entity("crm_credentials", "secondary"),
+        lambda: pg_store.put_entity(
+            "crm_credentials", "secondary", {"password": "plain-secret"}
+        ),
+        lambda: pg_store.delete_entity("crm_credentials", "secondary"),
+    ]
+
+    for call in calls:
+        with pytest.raises(ValueError, match="entity_key must be default"):
+            call()
+
+    assert pg_connection.execute(
+        "select count(*) from app_entities where kind = 'crm_credentials'"
+    ).fetchone()[0] == 0
+    assert pg_connection.execute(
+        "select count(*) from sync_events where entity_type = 'crm_credentials'"
+    ).fetchone()[0] == 0
+
+
 def test_report_delete_is_idempotent_and_creates_tombstone(pg_store):
     barcode = "5312503010858"
     pg_store.put_report(
@@ -181,6 +249,26 @@ def test_report_delete_is_idempotent_and_creates_tombstone(pg_store):
     assert events[-1].payload["actor"] == "admin"
 
 
+def test_report_delete_rolls_back_when_outbox_insert_fails(pg_store, pg_connection):
+    original = ReportRecord(
+        "delete-report", b"original", False, "query-1", "2026-07-16 10:00:00"
+    )
+    pg_store.put_report(original)
+    pg_connection.execute("truncate sync_events")
+
+    with rejecting_sync_events(pg_connection):
+        with pytest.raises(psycopg.errors.RaiseException, match="forced outbox failure"):
+            pg_store.delete_report(original.barcode, "admin")
+
+    assert pg_store.get_report(original.barcode) == original
+    assert pg_store.get_tombstone("barcode_report", original.barcode) is None
+    assert pg_connection.execute(
+        "select deleted_at, delete_event_id from barcode_reports where barcode = %s",
+        (original.barcode,),
+    ).fetchone() == (None, None)
+    assert pg_connection.execute("select count(*) from sync_events").fetchone()[0] == 0
+
+
 def test_entity_delete_keeps_key_and_filters_default_listing(pg_store):
     payload = {"value": "旧分销商", "updated_at": "2026-07-16 11:00:00"}
     pg_store.put_entity("distributor", "旧分销商", payload)
@@ -193,6 +281,26 @@ def test_entity_delete_keeps_key_and_filters_default_listing(pg_store):
     assert pg_store.load_entities("distributor", include_deleted=True) == [deleted]
     tombstone = pg_store.get_tombstone("distributor", "旧分销商")
     assert tombstone.delete_event_id == pg_store.fetch_events("hk", 0, 10)[-1].event_id
+
+
+def test_entity_delete_rolls_back_when_outbox_insert_fails(pg_store, pg_connection):
+    original = {"value": "保留", "updated_at": "2026-07-16 11:00:00"}
+    pg_store.put_entity("distributor", "保留", original)
+    pg_connection.execute("truncate sync_events")
+
+    with rejecting_sync_events(pg_connection):
+        with pytest.raises(psycopg.errors.RaiseException, match="forced outbox failure"):
+            pg_store.delete_entity("distributor", "保留", "admin")
+
+    assert pg_store.get_entity("distributor", "保留") == EntityRecord(
+        "保留", original, False, "2026-07-16 11:00:00"
+    )
+    assert pg_store.get_tombstone("distributor", "保留") is None
+    assert pg_connection.execute(
+        "select deleted_at, delete_event_id from app_entities "
+        "where kind = 'distributor' and entity_key = '保留'"
+    ).fetchone() == (None, None)
+    assert pg_connection.execute("select count(*) from sync_events").fetchone()[0] == 0
 
 
 def test_tombstone_acknowledgement_validates_node_and_is_idempotent(pg_store):
@@ -209,6 +317,23 @@ def test_tombstone_acknowledgement_validates_node_and_is_idempotent(pg_store):
     first_ack = pg_store.get_tombstone("barcode_report", "ack").hk_ack_at
     assert pg_store.ack_tombstone(event_id, "hk") is True
     assert pg_store.get_tombstone("barcode_report", "ack").hk_ack_at == first_ack
+
+
+@pytest.mark.parametrize("malformed_event_id", ["not-a-uuid", "", None, 7])
+def test_tombstone_acknowledgement_rejects_malformed_uuid_before_database_access(
+    pg_store, monkeypatch, malformed_event_id
+):
+    def fail_if_connection_requested():
+        raise AssertionError("database access must not occur")
+
+    monkeypatch.setattr(pg_store.pool, "connection", fail_if_connection_requested)
+
+    with pytest.raises(ValueError, match="valid UUID"):
+        pg_store.ack_tombstone(malformed_event_id, "hk")
+
+
+def test_tombstone_acknowledgement_returns_false_for_valid_unknown_uuid(pg_store):
+    assert pg_store.ack_tombstone(uuid.uuid4(), "sg") is False
 
 
 def test_purge_requires_cutoff_and_both_acks_but_preserves_keys(pg_store, pg_connection):
@@ -330,6 +455,68 @@ def test_fetch_events_filters_origin_sequence_and_limit(pg_store, pg_database_ur
     assert [event.payload["message"] for event in pg_store.fetch_events("sg", 0, 10)] == [
         "sg-1"
     ]
+
+
+def test_same_origin_sequences_cannot_commit_out_of_order(pg_store, pg_connection):
+    second_started = threading.Event()
+    second_finished = threading.Event()
+    second_pid = []
+    errors = []
+
+    def insert_second_event():
+        try:
+            with pg_store.transaction() as connection:
+                second_pid.append(connection.info.backend_pid)
+                second_started.set()
+                pg_store._insert_event(
+                    connection,
+                    entity_type="operation_log",
+                    entity_key="second",
+                    operation="upsert",
+                    payload={"message": "second"},
+                )
+        except Exception as error:
+            errors.append(error)
+        finally:
+            second_finished.set()
+
+    with pg_store.transaction() as first_connection:
+        pg_store._insert_event(
+            first_connection,
+            entity_type="operation_log",
+            entity_key="first",
+            operation="upsert",
+            payload={"message": "first"},
+        )
+        thread = threading.Thread(target=insert_second_event)
+        thread.start()
+        assert second_started.wait(timeout=5)
+
+        waiting_on_advisory_lock = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not second_finished.is_set():
+            wait_state = pg_connection.execute(
+                "select wait_event_type, wait_event from pg_stat_activity where pid = %s",
+                (second_pid[0],),
+            ).fetchone()
+            if wait_state == ("Lock", "advisory"):
+                waiting_on_advisory_lock = True
+                break
+            time.sleep(0.01)
+
+        second_finished_while_first_uncommitted = second_finished.is_set()
+        visible_while_first_uncommitted = [
+            event.local_sequence for event in pg_store.fetch_events("hk", 0, 10)
+        ]
+
+    thread.join(timeout=5)
+
+    assert not errors
+    assert not thread.is_alive()
+    assert waiting_on_advisory_lock is True
+    assert second_finished_while_first_uncommitted is False
+    assert visible_while_first_uncommitted == []
+    assert [event.local_sequence for event in pg_store.fetch_events("hk", 0, 10)] == [1, 2]
 
 
 def test_node_id_defaults_to_local(pg_database_url, pg_connection, monkeypatch):

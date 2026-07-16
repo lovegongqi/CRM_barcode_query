@@ -171,6 +171,7 @@ class PostgresStore:
 
     def get_entity(self, kind, key):
         self._validate_entity_kind(kind)
+        self._validate_entity_key(kind, key)
         with self.pool.connection() as connection:
             row = connection.execute(
                 "select entity_key, payload, deleted_at is not null, "
@@ -182,6 +183,7 @@ class PostgresStore:
 
     def put_entity(self, kind, key, payload, actor="system"):
         self._validate_entity_kind(kind)
+        self._validate_entity_key(kind, key)
         stored_payload = self._stored_entity_payload(kind, key, payload)
         updated_at = payload.get("updated_at")
         with self.transaction() as connection:
@@ -204,6 +206,7 @@ class PostgresStore:
 
     def delete_entity(self, kind, key, actor="system"):
         self._validate_entity_kind(kind)
+        self._validate_entity_key(kind, key)
         event_id = uuid.uuid4()
         with self.transaction() as connection:
             row = connection.execute(
@@ -241,6 +244,10 @@ class PostgresStore:
     def ack_tombstone(self, delete_event_id, node_id):
         if node_id not in {"hk", "sg"}:
             raise ValueError("Tombstone acknowledgement node must be hk or sg")
+        try:
+            delete_event_id = uuid.UUID(str(delete_event_id))
+        except (AttributeError, TypeError, ValueError):
+            raise ValueError("Tombstone delete_event_id must be a valid UUID") from None
         column = f"{node_id}_ack_at"
         with self.transaction() as connection:
             row = connection.execute(
@@ -350,6 +357,10 @@ class PostgresStore:
         event_id=None,
     ):
         event_id = event_id or uuid.uuid4()
+        connection.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, 918273::bigint))",
+            (self.node_id,),
+        )
         local_sequence = connection.execute(
             "select nextval('sync_local_sequence')"
         ).fetchone()[0]
@@ -390,6 +401,10 @@ class PostgresStore:
         if kind not in ENTITY_KINDS:
             raise ValueError(f"Unsupported entity kind: {kind}")
 
+    def _validate_entity_key(self, kind, key):
+        if kind == "crm_credentials" and key != "default":
+            raise ValueError("crm_credentials entity_key must be default")
+
     def _stored_entity_payload(self, kind, key, payload):
         if kind == "crm_credentials" and key == "default":
             token = self.cipher.encrypt(payload).decode("ascii")
@@ -397,6 +412,7 @@ class PostgresStore:
         return dict(payload)
 
     def _entity_record(self, kind, row):
+        self._validate_entity_key(kind, row[0])
         payload = row[1]
         if kind == "crm_credentials" and row[0] == "default":
             payload = self.cipher.decrypt(payload["encrypted_token"].encode("ascii"))
