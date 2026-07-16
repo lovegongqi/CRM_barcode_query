@@ -51,3 +51,36 @@ def test_legacy_deleted_distributors_become_tombstones(tmp_path):
     store = FileStore(str(tmp_path))
 
     assert [row.key for row in store.load_entities("distributor")] == ["保留"]
+
+
+def test_restored_legacy_distributor_stays_restored_after_new_store_instance(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "distributor_history_deleted.json").write_text('["已恢复"]', encoding="utf-8")
+
+    store = FileStore(str(tmp_path))
+    assert store.load_entities("distributor") == []
+    store.put_entity("distributor", "已恢复", {"value": "已恢复"})
+
+    restored = FileStore(str(tmp_path))
+    assert [row.key for row in restored.load_entities("distributor")] == ["已恢复"]
+
+
+def test_put_report_replaces_active_report_when_archiving(tmp_path):
+    store = FileStore(str(tmp_path))
+    store.put_report(ReportRecord("845", b"active", False, "query-1", "2026-07-16 10:00:00"))
+    store.put_report(ReportRecord("845", b"archived", True, "query-1", "2026-07-16 10:01:00"))
+
+    assert not (tmp_path / "barcode" / "845.html").exists()
+    assert (tmp_path / "barcode" / "archived" / "845.html").read_bytes() == b"archived"
+    assert store.get_report("845").archived is True
+
+
+def test_put_report_replaces_archived_report_when_restoring(tmp_path):
+    store = FileStore(str(tmp_path))
+    store.put_report(ReportRecord("845", b"archived", True, "query-1", "2026-07-16 10:00:00"))
+    store.put_report(ReportRecord("845", b"active", False, "query-1", "2026-07-16 10:01:00"))
+
+    assert not (tmp_path / "barcode" / "archived" / "845.html").exists()
+    assert (tmp_path / "barcode" / "845.html").read_bytes() == b"active"
+    assert store.get_report("845").archived is False

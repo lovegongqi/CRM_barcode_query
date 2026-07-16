@@ -58,7 +58,11 @@ class FileStore:
 
     def put_report(self, record):
         with self._lock:
-            self._write_bytes(self._report_path(record.barcode, record.archived), record.html)
+            path = self._report_path(record.barcode, record.archived)
+            self._write_bytes(path, record.html)
+            opposite_path = self._report_path(record.barcode, not record.archived)
+            if os.path.exists(opposite_path):
+                os.unlink(opposite_path)
             self._clear_tombstone("report", record.barcode)
             metadata = self._entity_payloads("barcode_metadata")
             row = dict(metadata.get(record.barcode, {}))
@@ -225,6 +229,7 @@ class FileStore:
                 tombstones_changed = True
         if tombstones_changed:
             self._write_json(self._tombstone_path(), tombstones)
+        self._write_json(path, [])
 
     def _tombstone_keys(self):
         rows = self._read_json(self._tombstone_path(), [])
