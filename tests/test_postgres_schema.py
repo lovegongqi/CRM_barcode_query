@@ -22,7 +22,7 @@ def test_admin_dsn_must_target_local_test_database():
         validate_test_admin_dsn("postgresql://crm:test@database.example/crm_test")
 
 
-def test_migrations_are_serialized_across_independent_connections(pg_database_url, monkeypatch, tmp_path):
+def test_migrations_are_serialized_across_independent_connections(pg_temporary_database, monkeypatch, tmp_path):
     migration = tmp_path / "000_lock_test.sql"
     migration.write_text(
         "select pg_sleep(0.2);\n"
@@ -36,10 +36,10 @@ def test_migrations_are_serialized_across_independent_connections(pg_database_ur
 
     def apply_migrations():
         try:
-            with psycopg.connect(pg_database_url, autocommit=True) as connection:
+            with psycopg.connect(pg_temporary_database, autocommit=True) as connection:
                 server_version_num = int(connection.execute("show server_version_num").fetchone()[0])
                 assert server_version_num // 10000 == 17
-                barrier.wait()
+                barrier.wait(timeout=5)
                 run_migrations(connection)
         except Exception as error:
             errors.append(error)
@@ -47,15 +47,40 @@ def test_migrations_are_serialized_across_independent_connections(pg_database_ur
     threads = [threading.Thread(target=apply_migrations) for _ in range(2)]
     for thread in threads:
         thread.start()
-    barrier.wait()
-    for thread in threads:
-        thread.join()
+    try:
+        barrier.wait(timeout=5)
+    except threading.BrokenBarrierError as error:
+        errors.append(error)
+    finally:
+        for thread in threads:
+            thread.join(timeout=5)
 
+    assert all(not thread.is_alive() for thread in threads)
     assert not errors
-    with psycopg.connect(pg_database_url, autocommit=True) as connection:
+    with psycopg.connect(pg_temporary_database, autocommit=True) as connection:
         assert list(connection.execute("select version from schema_migrations")) == [("000_lock_test.sql",)]
-        connection.execute("drop table migration_lock_marker")
-        connection.execute("drop table schema_migrations")
+
+
+def test_failed_migration_preserves_previously_committed_migration(pg_temporary_database, monkeypatch, tmp_path):
+    (tmp_path / "001_first.sql").write_text(
+        "create table schema_migrations (version text primary key);\n"
+        "create table first_migration_marker (id integer primary key);\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "002_failing.sql").write_text(
+        "create table second_migration_marker (id integer primary key);\n"
+        "select 1 / 0;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(migrate, "MIGRATIONS_DIR", tmp_path)
+
+    with psycopg.connect(pg_temporary_database, autocommit=True) as connection:
+        with pytest.raises(psycopg.errors.DivisionByZero):
+            run_migrations(connection)
+
+        assert connection.execute("select to_regclass('public.first_migration_marker')").fetchone()[0] == "first_migration_marker"
+        assert connection.execute("select to_regclass('public.second_migration_marker')").fetchone()[0] is None
+        assert list(connection.execute("select version from schema_migrations")) == [("001_first.sql",)]
 
 
 def test_initial_schema_contains_required_tables(pg_connection):

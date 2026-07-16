@@ -1,4 +1,5 @@
 import os
+from contextlib import contextmanager
 from uuid import uuid4
 
 import psycopg
@@ -21,8 +22,8 @@ def validate_test_admin_dsn(dsn):
     return params
 
 
-@pytest.fixture(scope="session")
-def pg_database_url():
+@contextmanager
+def temporary_test_database():
     admin_dsn = os.environ.get("TEST_POSTGRES_ADMIN_DSN", DEFAULT_TEST_POSTGRES_ADMIN_DSN)
     params = validate_test_admin_dsn(admin_dsn)
     database_name = f"crm_test_{uuid4().hex}"
@@ -44,6 +45,18 @@ def pg_database_url():
                 (database_name,),
             )
             admin_connection.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(database_name)))
+
+
+@pytest.fixture(scope="session")
+def pg_database_url():
+    with temporary_test_database() as database_url:
+        yield database_url
+
+
+@pytest.fixture
+def pg_temporary_database():
+    with temporary_test_database() as database_url:
+        yield database_url
 
 
 @pytest.fixture
