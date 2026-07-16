@@ -44,25 +44,20 @@ Write-Host "==> Building exe"
     --add-data "build\app_icon.png;." `
     --add-data "config.example.json;." `
     --add-data "config.docker.example.json;." `
+    --add-data "crm_storage/migrations;crm_storage/migrations" `
     --collect-all playwright `
     --collect-all webview `
     --collect-all pystray `
+    --hidden-import crm_storage.postgres_store `
     --hidden-import openpyxl.cell._writer `
     app_launcher.py
 
 Write-Host "==> Installing Chromium into the exe folder"
-$env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $ProjectRoot "dist\CRMBarcodeQuery\ms-playwright"
-for ($Attempt = 1; $Attempt -le 5; $Attempt++) {
-    & .\.venv-win\Scripts\python.exe -m playwright install chromium
-    if ($LASTEXITCODE -eq 0) {
-        break
-    }
-    if ($Attempt -eq 5) {
-        throw "Playwright browser download failed after 5 attempts"
-    }
-    $Delay = $Attempt * 10
-    Write-Host "Playwright browser download failed, retrying in $Delay seconds..."
-    Start-Sleep -Seconds $Delay
+$env:PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT = "120000"
+& .\.venv-win\Scripts\python.exe scripts\install_packaged_chromium.py `
+    --target (Join-Path $ProjectRoot "dist\CRMBarcodeQuery\ms-playwright")
+if ($LASTEXITCODE -ne 0) {
+    throw "Failed to package Playwright Chromium"
 }
 
 Write-Host "==> Creating writable data folders"

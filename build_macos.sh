@@ -39,9 +39,11 @@ echo "==> Building executable"
   --add-data "build/app_icon.png:." \
   --add-data "config.example.json:." \
   --add-data "config.docker.example.json:." \
+  --add-data "crm_storage/migrations:crm_storage/migrations" \
   --collect-all playwright \
   --collect-all webview \
   --collect-all pystray \
+  --hidden-import crm_storage.postgres_store \
   --hidden-import AppKit \
   --hidden-import Foundation \
   --hidden-import objc \
@@ -49,17 +51,9 @@ echo "==> Building executable"
   app_launcher.py
 
 echo "==> Installing Chromium into the package folder"
-export PLAYWRIGHT_BROWSERS_PATH="$PROJECT_ROOT/$RUNTIME_DIR/ms-playwright"
-for attempt in 1 2 3 4 5; do
-  if ./.venv-macos/bin/python -m playwright install chromium; then
-    break
-  fi
-  if [ "$attempt" = "5" ]; then
-    exit 1
-  fi
-  echo "Playwright browser download failed, retrying in $((attempt * 10)) seconds..."
-  sleep $((attempt * 10))
-done
+export PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000
+./.venv-macos/bin/python scripts/install_packaged_chromium.py \
+  --target "$PROJECT_ROOT/$RUNTIME_DIR/ms-playwright"
 
 echo "==> Creating writable data folders"
 mkdir -p "$RUNTIME_DIR/barcode" "$RUNTIME_DIR/results" "$RUNTIME_DIR/session"
