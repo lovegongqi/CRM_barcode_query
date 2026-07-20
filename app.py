@@ -5105,6 +5105,13 @@ def _export_cell_value(row, column):
         return ''
     return records[column['record_index']].get(column['field_id'], '')
 
+XLSX_ILLEGAL_CHARACTERS_RE = re.compile(r'[\x00-\x08\x0b-\x0c\x0e-\x1f]')
+
+def _xlsx_cell_value(value):
+    if not isinstance(value, str):
+        value = _clean_export_value(value)
+    return XLSX_ILLEGAL_CHARACTERS_RE.sub('', value)
+
 def _display_width(value):
     text = str(value or '')
     return sum(2 if ord(ch) > 127 else 1 for ch in text)
@@ -6549,7 +6556,8 @@ def api_export_xlsx():
 
     for row_idx, export_row in enumerate(export_rows, 3):
         for col_idx, column in enumerate(columns, 1):
-            cell = ws.cell(row=row_idx, column=col_idx, value=_export_cell_value(export_row, column))
+            value = _xlsx_cell_value(_export_cell_value(export_row, column))
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
             cell.border = thin_border
             cell.alignment = Alignment(vertical='top', wrap_text=True)
 
@@ -6928,6 +6936,9 @@ def api_crm_transfer_status():
 
 @app.route("/barcode/<filename>")
 def serve_barcode(filename):
+    if filename.lower().endswith('.xlsx'):
+        return send_from_directory(BARCODE_DIR, filename, as_attachment=True)
+
     barcode = filename.rsplit('.', 1)[0]
     info = get_barcode_info(barcode)
     filepath = os.path.join(BARCODE_DIR, filename)
