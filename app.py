@@ -6937,7 +6937,12 @@ def api_crm_transfer_status():
 @app.route("/barcode/<filename>")
 def serve_barcode(filename):
     if filename.lower().endswith('.xlsx'):
-        return send_from_directory(BARCODE_DIR, filename, as_attachment=True)
+        return send_from_directory(
+            BARCODE_DIR,
+            filename,
+            as_attachment=True,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
 
     barcode = filename.rsplit('.', 1)[0]
     info = get_barcode_info(barcode)
