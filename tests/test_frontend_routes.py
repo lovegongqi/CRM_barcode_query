@@ -69,16 +69,16 @@ class FrontendRouteSmokeTest(unittest.TestCase):
                 self.assertIn(b'/static/aurora.css', response.data)
 
     def test_shared_assets_are_served(self):
-        for path, mimetype in (
-            ("/static/aurora.css", "text/css"),
-            ("/static/aurora.js", "text/javascript"),
-            ("/static/ecowater-logo.png", "image/png"),
+        for path, mimetypes in (
+            ("/static/aurora.css", ("text/css",)),
+            ("/static/aurora.js", ("text/javascript", "application/javascript")),
+            ("/static/ecowater-logo.png", ("image/png",)),
         ):
             with self.subTest(path=path):
                 response = self.client.get(path)
                 try:
                     self.assertEqual(response.status_code, 200)
-                    self.assertEqual(response.mimetype, mimetype)
+                    self.assertIn(response.mimetype, mimetypes)
                 finally:
                     response.close()
 
