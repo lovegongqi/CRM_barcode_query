@@ -76,6 +76,52 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertRegex(css, r"\.aurora-channel-picker\s*\{[^}]*position:\s*relative")
 
+    def test_mobile_results_actions_use_equal_three_by_three_grid(self):
+        results = self.source("index.html")
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertEqual(results.count('<div class="action-groups">'), 1)
+        self.assertEqual(
+            len(re.findall(r'<div class="action-groups">(.*?)</div>', results, re.S)[0].split('<button')) - 1,
+            9,
+        )
+        self.assertRegex(
+            css,
+            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+        )
+        self.assertRegex(
+            css,
+            r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*11px[^}]*white-space:\s*nowrap',
+        )
+
+    def test_mobile_results_stats_stay_in_one_equal_three_column_row(self):
+        results = self.source("index.html")
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        stats = re.findall(r'<div class="stats-grid">(.*?)</div>\s*</div>', results, re.S)[0]
+        self.assertEqual(stats.count('<div class="stat-card">'), 3)
+        self.assertRegex(
+            css,
+            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.stats-grid\s*\{[^}]*width:\s*100%[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+        )
+
+    def test_mobile_results_dates_use_two_columns_with_full_width_clear_row(self):
+        results = self.source("index.html")
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        date_row = re.findall(r'<div class="date-filter-row">(.*?)</div>', results, re.S)[0]
+        self.assertEqual(date_row.count('<input type="date"'), 2)
+        self.assertEqual(date_row.count('class="date-clear-btn"'), 1)
+        self.assertRegex(
+            css,
+            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.date-filter-row\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)',
+        )
+        self.assertRegex(
+            css,
+            r'body\[data-aurora-page="results"\] \.date-filter-row label,\s*body\[data-aurora-page="results"\] \.date-filter-row > span\s*\{[^}]*display:\s*none',
+        )
+        self.assertRegex(
+            css,
+            r'body\[data-aurora-page="results"\] \.date-clear-btn\s*\{[^}]*width:\s*100%[^}]*grid-column:\s*1\s*/\s*-1',
+        )
+
     def test_query_channels_use_one_shared_dropdown_at_all_widths(self):
         query = self.source("crm.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
