@@ -55,6 +55,53 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertRegex(css, r"\.aurora-channel-chip\s*\{[^}]*position:\s*relative")
 
+    def test_mobile_query_channels_use_one_shared_multiselect_state(self):
+        query = self.source("crm.html")
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        for token in (
+            'id="querySlotMobileTrigger"',
+            'id="querySlotMobileMenu"',
+            'id="querySlotMobileCount"',
+            "toggleQuerySlotMenu",
+            "selectAllQuerySlots",
+            "selectedQuerySlotIds",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, query)
+        self.assertRegex(
+            css,
+            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*none",
+        )
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"\.aurora-channel-options\s*\{[^}]*display:\s*none",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*inline-flex",
+        )
+
+    def test_query_batch_summary_is_persisted_and_replaces_static_badge(self):
+        query = self.source("crm.html")
+        self.assertIn('id="queryBatchSummary"', query)
+        self.assertIn("formatBatchElapsed", query)
+        self.assertIn("crm_last_query_summary", query)
+        self.assertIn("captureLastQuerySummary", query)
+        self.assertNotIn("AUTO SCHEDULING</span>", query)
+
+    def test_mobile_work_page_subtitles_are_hidden_without_affecting_desktop(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        desktop_css, mobile_css = css.split("@media (max-width: 720px)", 1)
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page\]:not\(\[data-aurora-page="login"\]\):not\(\[data-aurora-page="no-permission"\]\) \.header > div:first-child > p,[^}]*\.app-subtitle\s*\{[^}]*display:\s*none\s*!important',
+        )
+        self.assertNotRegex(
+            desktop_css,
+            r"\.app-subtitle\s*\{[^}]*display:\s*none",
+        )
+
     def test_mobile_logo_sits_left_of_every_work_page_title(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         mobile_css = css.split("@media (max-width: 720px)", 1)[1]
