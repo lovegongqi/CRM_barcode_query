@@ -18,16 +18,24 @@
         .secondary { background:#e5e7eb !important; color:#334155 !important; }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body>
+<body data-aurora-page="no-permission">
+<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
 <div class="container">
-    <div class="card">
+    <div class="card aurora-access-card">
+        <div class="aurora-access-code">403</div>
+        <div class="aurora-access-symbol" aria-hidden="true">×</div>
+        <div class="aurora-form-kicker">ACCESS GUARD</div>
         <h1>当前账号无权访问该页面</h1>
-        <p>当前账号：{{ account.username if account else '未登录' }}。你可以访问下面这些页面。</p>
+        <p>当前账号：<strong>{{ account.username if account else '未登录' }}</strong>。此页面未包含在你的权限范围内，请从下方可访问页面继续。</p>
+        <h2>可访问页面</h2>
         <div class="links">
             {% for link in links %}
             <a href="{{ link.href }}">{{ link.label }}</a>
             {% endfor %}
+            <a class="secondary" href="javascript:history.back()">返回上一页</a>
             <a class="secondary" href="/logout">退出登录</a>
         </div>
     </div>

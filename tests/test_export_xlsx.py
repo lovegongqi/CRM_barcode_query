@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 TEST_DATA_DIR = tempfile.TemporaryDirectory()
 atexit.register(TEST_DATA_DIR.cleanup)
 os.environ["CRM_DATA_DIR"] = TEST_DATA_DIR.name
-os.environ["CRM_DESKTOP_APP"] = "1"
+os.environ["CRM_DESKTOP_APP"] = "0"
 
 import app as app_module
 
@@ -21,6 +21,11 @@ class ExportXlsxTest(unittest.TestCase):
         app_module.BARCODE_DIR = self.output_dir.name
         app_module.app.config.update(TESTING=True)
         self.client = app_module.app.test_client()
+        response = self.client.post(
+            "/api/app-auth/login",
+            json={"username": "admin", "password": "88293529"},
+        )
+        self.assertTrue(response.get_json()["success"])
 
     def tearDown(self):
         app_module.BARCODE_DIR = self.original_barcode_dir

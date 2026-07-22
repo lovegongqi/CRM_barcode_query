@@ -24,19 +24,43 @@
         .hint { margin-top:14px; color:#94a3b8; font-size:12px; line-height:1.6; }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body>
-    <div class="page-shell">
-        <div class="login-card">
-            <h1>登录工作台</h1>
-            <p>请输入工具账号后继续使用 CRM 条码查询系统。</p>
-            <label>账号</label>
+<body data-aurora-page="login">
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+    <div class="page-shell aurora-login-shell">
+        <section class="aurora-login-intro">
+            <div class="aurora-login-kicker"><span></span>HIGH-FREQUENCY OFFICE WORKFLOW</div>
+            <h1>欢迎回到工作台<br><em>批量条码作业，从这里开始</em></h1>
+            <p>统一处理 CRM 在线查询、结果筛选、批量移库和产品型号匹配。登录后将根据工具账号自动加载对应页面权限。</p>
+            <div class="aurora-feature-grid">
+                <article class="aurora-feature">
+                    <span class="aurora-feature-icon icon-query" aria-hidden="true"></span>
+                    <strong>批量查询</strong><small>多通道自动调度</small>
+                </article>
+                <article class="aurora-feature">
+                    <span class="aurora-feature-icon icon-transfer" aria-hidden="true"></span>
+                    <strong>结果与移库</strong><small>连续批量处理</small>
+                </article>
+                <article class="aurora-feature">
+                    <span class="aurora-feature-icon icon-shield" aria-hidden="true"></span>
+                    <strong>权限隔离</strong><small>按账号开放页面</small>
+                </article>
+            </div>
+        </section>
+        <section class="login-card aurora-login-form">
+            <div class="aurora-form-kicker">WORKSPACE SIGN IN</div>
+            <h2>登录工作台</h2>
+            <p>请输入工具账号后继续使用 CRM 条码系统。</p>
+            <label for="username">工具账号 <span>USERNAME</span></label>
             <input id="username" placeholder="请输入账号" autocomplete="username" oninput="clearError()">
-            <label>密码</label>
+            <label for="password">登录密码 <span>PASSWORD</span></label>
             <input id="password" type="password" placeholder="密码" autocomplete="current-password" oninput="clearError()" onkeydown="if(event.key==='Enter')login()">
             <div class="error" id="errorBox" role="alert" aria-live="assertive"></div>
-            <button class="btn" id="loginBtn" type="button" onclick="login()">登录</button>
-        </div>
+            <button class="btn btn-primary" id="loginBtn" type="button" onclick="login()">登录工作台&nbsp;&nbsp;→</button>
+            <div class="aurora-form-note"><span></span>账号权限与访问范围将自动匹配</div>
+        </section>
     </div>
 <script>
 let loggingIn = false;
@@ -98,7 +122,7 @@ async function login() {
     } finally {
         loggingIn = false;
         btn.disabled = false;
-        btn.textContent = '登录';
+        btn.textContent = '登录工作台  →';
     }
 }
 

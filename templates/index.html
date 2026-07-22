@@ -1130,8 +1130,11 @@
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body class="results-page">
+<body class="results-page" data-aurora-page="results">
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
     <div class="container">
         <div class="app-header">
             <div class="app-title">
@@ -1145,6 +1148,13 @@
             </div>
         </div>
 
+        {% if not is_desktop_app %}
+        <div class="status-bar aurora-account-status">
+            <div class="status-text">当前工具账号：<span id="appAccountStatus">检测中</span></div>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        </div>
+        {% endif %}
+
         <!-- 查询区 -->
         <div class="query-card workspace-card">
             <div class="workspace-head">
@@ -1155,9 +1165,6 @@
                 <div class="status-pills">
                     <span class="status-pill"><span class="dot gray" id="browserDot"></span>浏览器</span>
                     <span class="status-pill"><span class="dot gray" id="loginDot"></span>CRM：<span id="loginStatus">未启动</span></span>
-                    {% if not is_desktop_app %}
-                    <span class="status-pill">工具账号：<span id="appAccountStatus">检测中</span> <a href="/logout">退出</a></span>
-                    {% endif %}
                 </div>
             </div>
             <div class="workspace-grid">
@@ -1248,7 +1255,7 @@
                     <span>条件筛选</span>
                     <span>支持多选联动</span>
                 </div>
-                <div class="filter-area" id="filterArea"></div>
+                <div class="filter-area" id="filterArea" data-filter-labels="归属经销商,服务经销商,是否结单"></div>
 
                 <div class="date-filter-row">
                     <label>查询日期</label>
@@ -1273,7 +1280,10 @@
             <div class="list-caption">点击条码行查看完整 CRM 报表</div>
         </div>
 
-        <div id="barcodeList" class="barcode-list"></div>
+        <div class="aurora-results-grid-head" aria-hidden="true">
+            <span></span><span>条码 / 产品</span><span>客户姓名</span><span>归属经销商</span><span>服务经销商</span><span>服务状态</span><span>查询日期</span><span>操作</span>
+        </div>
+        <div id="barcodeList" class="barcode-list aurora-results-grid"></div>
 
         <div class="footer">查询结果文件保存在 barcode/ 目录下</div>
     </div>
@@ -1663,30 +1673,31 @@
                 const timeDisplay = item.time;
                 const remarkSafe = escapeHtml(item.remark || '');
                 const remarkTitle = item.remark ? escapeHtml(item.remark) : '添加备注';
-                const currentDealer = item.currentDealerOverride || sr10['dealername1'] || '';
+                const currentDealer = item.currentDealerOverride || sr5['myproductdealer1'] || sr10['dealername1'] || '';
+                const customerName = sr2['name1'] || '';
+                const serviceDealer = sr2['newdealername1'] || '';
 
                 html += `
                     <div class="barcode-item" onclick="showDetail('${item.barcode}')">
-                        <div class="bc-left">
+                        <div class="aurora-result-check">
                             <input type="checkbox" class="bc-checkbox" id="cb-${item.barcode}" data-barcode="${item.barcode}" onclick="event.stopPropagation();toggleSelect('${item.barcode}', this.checked)" ${selectedBarcodes.has(item.barcode) ? 'checked' : ''}>
-                            <span class="bc-number">${item.barcode}</span>
-                            ${productName ? `<span style="font-size:12px;color:#666;margin-left:4px;">${productName}</span>` : ''}
-                            <div class="bc-meta">
-                                ${currentDealer ? `<span class="meta-tag">🏢 ${currentDealer}</span>` : ''}
-                                ${sr2['name1'] ? `<span class="meta-tag">👤 ${sr2['name1']}</span>` : ''}
-                            </div>
                         </div>
-                        <div class="bc-right">
-                            <div class="remark-area">
-                                <span class="remark-btn ${hasRemark ? 'has-remark' : ''}" onclick="event.stopPropagation();openRemark('${item.barcode}','${encodeURIComponent(item.remark || '')}')" title="${remarkTitle}">📝</span>
-                                ${item.remark ? `<span class="remark-text" title="${remarkSafe}">${remarkSafe}</span>` : ''}
-                            </div>
-                            <span style="font-size:12px;color:#888;white-space:nowrap">${sr2['newdealername1'] || ''}</span>
+                        <div class="aurora-result-product"><span class="bc-number">${item.barcode}</span><small>${escapeHtml(productName || '未识别产品')}</small></div>
+                        <div class="aurora-result-cell" data-label="客户姓名">${escapeHtml(customerName || '—')}</div>
+                        <div class="aurora-result-cell" data-label="归属经销商">${escapeHtml(currentDealer || '—')}</div>
+                        <div class="aurora-result-cell" data-label="服务经销商">${escapeHtml(serviceDealer || '—')}</div>
+                        <div class="aurora-result-cell aurora-service-state" data-label="服务状态">
                             <span class="status-badge ${statusClass}">${status}</span>
                             ${hasService
                                 ? `<span class="status-badge status-done service-copy" title="点击复制最新服务单号：${escapeHtml(latestServiceNo)}" onclick="event.stopPropagation();copyServiceNo('${encodeURIComponent(latestServiceNo)}')">有服务单</span>`
                                 : '<span class="status-badge status-none">无服务单</span>'}
-                            <span style="font-size:11px;color:#aaa;white-space:nowrap">${timeDisplay}</span>
+                        </div>
+                        <div class="aurora-result-cell" data-label="查询日期">${escapeHtml(timeDisplay)}</div>
+                        <div class="bc-right aurora-result-actions" data-label="操作">
+                            <div class="remark-area">
+                                <span class="remark-btn ${hasRemark ? 'has-remark' : ''}" onclick="event.stopPropagation();openRemark('${item.barcode}','${encodeURIComponent(item.remark || '')}')" title="${remarkTitle}">📝</span>
+                                ${item.remark ? `<span class="remark-text" title="${remarkSafe}">${remarkSafe}</span>` : ''}
+                            </div>
                             <button class="action-btn" onclick="event.stopPropagation();showDetail('${item.barcode}')">详情</button>
                             <button class="action-btn delete-btn" onclick="event.stopPropagation();deleteBarcode('${item.barcode}')">删除</button>
                         </div>

@@ -51,7 +51,6 @@ os.makedirs(SESSION_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
 os.environ.setdefault("CRM_DATA_DIR", DATA_DIR)
 os.environ.setdefault("CRM_SESSION_BASE", SESSION_DIR)
-os.environ.setdefault("CRM_DESKTOP_APP", "1")
 os.environ.setdefault("CRM_DISABLE_DATA_MIGRATION", "1")
 LOCAL_BROWSER_DIR = os.path.join(BASE_DIR, "ms-playwright")
 if os.path.isdir(LOCAL_BROWSER_DIR):
@@ -336,7 +335,7 @@ def _on_window_closing():
 
 
 def _wait_for_server(port, timeout=20):
-    url = f"http://127.0.0.1:{port}/product-library"
+    url = f"http://127.0.0.1:{port}/api/app-auth/status"
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -385,7 +384,7 @@ def _launch_app_window(port):
     if not _wait_for_server(port):
         _log("server did not respond before UI launch; trying to open UI anyway")
 
-    url = f"http://127.0.0.1:{port}/product-library"
+    url = f"http://127.0.0.1:{port}/logout"
     chromium = _find_packaged_chromium()
     if not chromium:
         _log("packaged Chromium not found, falling back to system browser")
@@ -418,7 +417,7 @@ def _open_native_window(port):
     if not _wait_for_server(port):
         _log("server did not respond before native window launch; trying to open UI anyway")
 
-    url = f"http://127.0.0.1:{port}/product-library"
+    url = f"http://127.0.0.1:{port}/logout"
     try:
         import webview
         _log("launching native webview window")

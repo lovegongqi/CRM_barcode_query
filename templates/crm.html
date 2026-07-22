@@ -101,8 +101,11 @@
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body>
+<body data-aurora-page="query">
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
     <div class="container">
         <div class="header">
             <div>
@@ -116,7 +119,7 @@
             </div>
         </div>
 
-        <div class="status-bar" id="statusBar">
+        <div class="status-bar aurora-account-status" id="statusBar">
             <div class="status-item">
                 <span class="status-dot gray" id="browserDot"></span>
                 <span id="browserStatus">浏览器</span>
@@ -128,8 +131,8 @@
             {% if not is_desktop_app %}
             <div class="status-item">
                 <span>工具账号：</span><span id="appAccountStatus">检测中</span>
-                <a href="/logout">退出</a>
             </div>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
             {% endif %}
             <div class="progress-bar" id="loginProgress">
                 <div class="bar" id="loginProgressBar"></div>
@@ -143,6 +146,10 @@
                     <button class="btn btn-primary" id="loginBtn" onclick="openLoginModal()">批量登录 CRM</button>
                     <button class="btn btn-danger" id="logoutBtn" onclick="doLogout()" style="display:none">退出登录</button>
                 </div>
+            </div>
+            <div class="aurora-channel-picker" data-default-selection="all">
+                <div><strong>查询通道</strong><small>默认全选，系统自动调度空闲通道</small></div>
+                <div class="aurora-channel-options" id="querySlotSelector"></div>
             </div>
             <div class="form-group">
                 <label>条码查询（可一行一个，也可用逗号、空格分隔）</label>
@@ -164,11 +171,18 @@
             </div>
         </div>
 
-        <div class="card">
-            <h2>操作日志</h2>
-            <div class="log-area" id="logArea">
-                <div class="dim">等待操作...</div>
+        <div class="card aurora-realtime">
+            <div class="aurora-realtime-head">
+                <h2>实时查询队列</h2>
+                <span class="aurora-live-badge"><span class="aurora-live-dot"></span>AUTO SCHEDULING</span>
             </div>
+            <div class="aurora-query-table-wrap">
+                <table class="aurora-query-table">
+                    <thead><tr><th>#</th><th>条码</th><th>查询通道</th><th>最新日志</th><th>查询状态</th><th>耗时</th></tr></thead>
+                    <tbody id="queryRealtimeRows"><tr><td colspan="6"><div class="aurora-empty">输入条码并开始查询后，将在这里逐条显示实时状态</div></td></tr></tbody>
+                </table>
+            </div>
+            <div class="log-area aurora-raw-log" id="logArea" aria-hidden="true"><div class="dim">等待操作...</div></div>
         </div>
     </div>
 
@@ -225,6 +239,8 @@
         let currentLoginJobId = sessionStorage.getItem('crm_bulk_login_job_query') || '';
         let loginPollTimer = null;
         let lastLoginLogSeq = 0;
+        let selectedQuerySlotIds = [];
+        let lastQueryItems = [];
 
         function slotPayload(extra={}) {
             return Object.assign({slot_id: currentQuerySlot, kind: 'query'}, extra);
@@ -289,12 +305,50 @@
             const data = await fetch('/api/crm/slots').then(r => r.json()).catch(() => null);
             if (!data || !data.success) return;
             querySlots = data.query || [];
+            const storedSelection = JSON.parse(localStorage.getItem('crm_query_selected_slots') || 'null');
+            if (!selectedQuerySlotIds.length) {
+                selectedQuerySlotIds = Array.isArray(storedSelection)
+                    ? storedSelection.filter(id => querySlots.some(slot => slot.id === id))
+                    : querySlots.map(slot => slot.id);
+                if (!selectedQuerySlotIds.length) selectedQuerySlotIds = querySlots.map(slot => slot.id);
+            } else {
+                selectedQuerySlotIds = selectedQuerySlotIds.filter(id => querySlots.some(slot => slot.id === id));
+            }
+            renderQuerySlotSelector();
             const previousSlot = currentQuerySlot;
             if (!querySlots.some(slot => slot.id === currentQuerySlot)) {
                 currentQuerySlot = (data.defaults && data.defaults.query) || (querySlots[0] && querySlots[0].id) || 'query-1';
                 localStorage.setItem('crm_query_slot', currentQuerySlot);
             }
             if (currentQuerySlot !== previousSlot) restoreQueryInput();
+        }
+
+        function renderQuerySlotSelector() {
+            const box = document.getElementById('querySlotSelector');
+            if (!box) return;
+            box.innerHTML = querySlots.map(slot => {
+                const selected = selectedQuerySlotIds.includes(slot.id);
+                const state = slot.logged_in ? '在线' : (slot.remembered_logged_in ? '待验证' : '未登录');
+                return `<label class="aurora-channel-chip ${selected ? 'selected' : ''}">
+                    <input type="checkbox" value="${escapeHtml(slot.id)}" ${selected ? 'checked' : ''} onchange="toggleQuerySlot('${escapeHtml(slot.id)}', this.checked)">
+                    <span>${escapeHtml(slot.label || slot.id)}</span><small>${escapeHtml(state)}</small>
+                </label>`;
+            }).join('') || '<span class="aurora-empty">暂无查询通道</span>';
+        }
+
+        function toggleQuerySlot(slotId, checked) {
+            if (checked && !selectedQuerySlotIds.includes(slotId)) selectedQuerySlotIds.push(slotId);
+            if (!checked) selectedQuerySlotIds = selectedQuerySlotIds.filter(id => id !== slotId);
+            if (!selectedQuerySlotIds.length) {
+                selectedQuerySlotIds = querySlots.map(slot => slot.id);
+                showToast('至少保留一个通道，已恢复全选');
+            }
+            localStorage.setItem('crm_query_selected_slots', JSON.stringify(selectedQuerySlotIds));
+            renderQuerySlotSelector();
+        }
+
+        function querySlotSelected(slot) {
+            return !!(slot && selectedQuerySlotIds.includes(slot.id));
         }
 
         function queryInputStorageKey(slotId=currentQuerySlot) {
@@ -375,6 +429,84 @@
             return `${secs}秒`;
         }
 
+        function queryDisplayItems() {
+            const active = Array.isArray(multiBatchJobs && multiBatchJobs.items) ? multiBatchJobs.items : [];
+            return active.length ? active : lastQueryItems;
+        }
+
+        function queryItemByBarcode(barcode) {
+            return queryDisplayItems().find(item => item.barcode === barcode) || null;
+        }
+
+        function appendQueryItemLog(item, entry) {
+            if (!item) return;
+            if (!Array.isArray(item.logs)) item.logs = [];
+            const row = typeof entry === 'string'
+                ? {time: new Date().toLocaleTimeString(), message: entry, level: 'dim'}
+                : {time: entry.time || new Date().toLocaleTimeString(), message: entry.message || '', level: entry.level || 'dim'};
+            item.logs.push(row);
+            item.logs = item.logs.slice(-120);
+            const text = row.message || '';
+            if (/重试|第\s*\d+\s*次/.test(text)) item.retries = Math.max(item.retries || 0, Number((text.match(/第\s*(\d+)\s*次/) || [])[1] || 1));
+            if (/报表|获取/.test(text)) item.status = '获取 CRM 报表';
+            else if (/登录/.test(text)) item.status = '验证 CRM 会话';
+            else if (/查询/.test(text) && !/完成|成功|失败/.test(text)) item.status = '正在查询 CRM';
+        }
+
+        function latestQueryLogMessage(item, fallback='') {
+            const logs = Array.isArray(item && item.logs) ? item.logs : [];
+            const latest = logs.length ? logs[logs.length - 1] : null;
+            if (!latest) return fallback || item.status || '等待查询';
+            const message = typeof latest === 'string' ? latest : (latest.message || '');
+            const time = typeof latest === 'object' && latest.time ? `${latest.time} · ` : '';
+            return `${time}${message || fallback || item.status || '等待查询'}`;
+        }
+
+        function queryStatePresentation(item) {
+            const state = String(item && item.state || '').toLowerCase();
+            if (state === 'success') return {label: '查询成功', className: 'success'};
+            if (state === 'error' || state === 'stopped') return {label: '查询失败', className: 'error'};
+            if (state === 'running') return {label: '查询中', className: ''};
+            return {label: '等待查询', className: 'warn'};
+        }
+
+        function renderQueryRealtime(statusText='') {
+            const body = document.getElementById('queryRealtimeRows');
+            if (!body) return;
+            const items = queryDisplayItems();
+            if (!items.length) {
+                body.innerHTML = '<tr><td colspan="6"><div class="aurora-empty">输入条码并开始查询后，将在这里逐条显示实时状态</div></td></tr>';
+                return;
+            }
+            body.innerHTML = items.map((item, index) => {
+                const elapsed = item.startedAt && !['success', 'error', 'stopped'].includes(item.state)
+                    ? Math.max(item.elapsed || 0, Math.floor((Date.now() - item.startedAt) / 1000))
+                    : (item.elapsed || 0);
+                const queryState = queryStatePresentation(item);
+                const latestLog = latestQueryLogMessage(item, statusText);
+                return `<tr>
+                    <td>${item.order || index + 1}</td>
+                    <td><code>${escapeHtml(item.barcode)}</code></td>
+                    <td>${escapeHtml(item.slot_label || '自动调度')}</td>
+                    <td><button type="button" class="aurora-log-preview" onclick="openQueryItemLog(${index})" title="查看该条码完整日志">${escapeHtml(latestLog)}</button></td>
+                    <td><span class="aurora-status-button ${queryState.className}">${queryState.label}</span></td>
+                    <td>${elapsed ? escapeHtml(formatDuration(elapsed)) : '—'}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        function openQueryItemLog(index) {
+            const item = queryDisplayItems()[index];
+            if (!item) return;
+            const queryState = queryStatePresentation(item);
+            openAuroraLog(`条码 ${item.barcode}`, item.logs || [], {
+                '查询通道': item.slot_label || '自动调度',
+                '查询状态': queryState.label,
+                '重试次数': item.retries || 0,
+                '耗时': item.elapsed ? formatDuration(item.elapsed) : '进行中'
+            }, '条码完整查询日志');
+        }
+
         function renderQuerySummary(statusText='查询中') {
             const area = document.getElementById('logArea');
             if (!area || !multiBatchJobs || !multiBatchJobs.total) return;
@@ -412,6 +544,7 @@
                 ${notices.map(msg => `<div class="warn">${escapeHtml(msg)}</div>`).join('')}
             `;
             area.scrollTop = area.scrollHeight;
+            renderQueryRealtime(statusText);
         }
 
         function setQueryButtonsRunning(runningText='查询中...', stopText='停止查询') {
@@ -436,12 +569,18 @@
         }
 
         function clearMultiBatchJobs() {
+            if (Array.isArray(multiBatchJobs && multiBatchJobs.items) && multiBatchJobs.items.length) {
+                lastQueryItems = multiBatchJobs.items;
+                sessionStorage.setItem('crm_last_query_items', JSON.stringify(lastQueryItems));
+            }
             multiBatchJobs = {};
             sessionStorage.removeItem('crm_multi_batch_jobs');
+            renderQueryRealtime();
         }
 
         function restoreMultiBatchJobs() {
             try {
+                lastQueryItems = JSON.parse(sessionStorage.getItem('crm_last_query_items') || '[]');
                 const raw = sessionStorage.getItem('crm_multi_batch_jobs');
                 multiBatchJobs = raw ? JSON.parse(raw) : {};
                 if (!multiBatchJobs || !multiBatchJobs.slots || !Array.isArray(multiBatchJobs.pending)) {
@@ -453,14 +592,21 @@
                     if (slot.running && slot.barcode && !slot.startedAt) slot.startedAt = Date.now();
                     if (!slot.running) slot.startedAt = 0;
                 });
+                if (!Array.isArray(multiBatchJobs.items)) {
+                    const active = Object.values(multiBatchJobs.slots || {}).map(slot => slot.barcode).filter(Boolean);
+                    const all = [...active, ...(multiBatchJobs.pending || [])];
+                    multiBatchJobs.items = all.map((barcode, index) => ({barcode, order:index + 1, state:active.includes(barcode) ? 'running' : 'waiting', status:active.includes(barcode) ? '正在查询' : '队列等待中', logs:[]}));
+                }
                 if (!multiBatchJobs.startedAtMs && multiBatchJobs.started_at) {
                     const parsedStartedAt = Date.parse(multiBatchJobs.started_at);
                     if (Number.isFinite(parsedStartedAt)) multiBatchJobs.startedAtMs = parsedStartedAt;
                 }
                 isMultiBatchRunning = true;
+                renderQueryRealtime('恢复查询状态');
             } catch(e) {
                 clearMultiBatchJobs();
                 isMultiBatchRunning = false;
+                renderQueryRealtime();
             }
         }
 
@@ -496,7 +642,7 @@
             if (!isMultiBatchRunning || !multiBatchJobs || !multiBatchJobs.slots || multiBatchJobs.stopRequested) return 0;
             await loadSlots();
             const addedSlots = [];
-            querySlots.filter(slotCanAutoRun).forEach(slot => {
+            querySlots.filter(slot => querySlotSelected(slot) && slotCanAutoRun(slot)).forEach(slot => {
                 if (addMultiBatchSlot(slot)) addedSlots.push(slot);
             });
             if (!addedSlots.length) return 0;
@@ -902,8 +1048,9 @@
             batchStartPending = true;
             saveQueryInput();
             await loadSlots();
-            const loggedSlots = querySlots.filter(slotCanAutoRun);
-            const skippedSlots = querySlots.filter(slot => !slotCanAutoRun(slot));
+            const selectedSlots = querySlots.filter(querySlotSelected);
+            const loggedSlots = selectedSlots.filter(slotCanAutoRun);
+            const skippedSlots = selectedSlots.filter(slot => !slotCanAutoRun(slot));
             const restoringSlots = loggedSlots.filter(slot => !slot.logged_in && slot.remembered_logged_in);
             if (restoringSlots.length) {
                 log(`${restoringSlots.length} 个查询通道会先验证上次 CRM 登录状态：${restoringSlots.map(s => s.label).join('，')}`, 'info');
@@ -915,6 +1062,18 @@
             const retryLimit = getRetryLimit();
             multiBatchJobs = {
                 pending: [...uniqueBarcodes],
+                items: uniqueBarcodes.map((barcode, index) => ({
+                    barcode,
+                    order: index + 1,
+                    slot_id: '',
+                    slot_label: '',
+                    state: 'waiting',
+                    status: '队列等待中',
+                    retries: 0,
+                    startedAt: 0,
+                    elapsed: 0,
+                    logs: [{time: new Date().toLocaleTimeString(), message: '已加入查询队列', level: 'dim'}]
+                })),
                 slots: {},
                 total: uniqueBarcodes.length,
                 completed: 0,
@@ -953,6 +1112,15 @@
             if (!slot || slot.running || !multiBatchJobs.pending.length) return false;
             if (slot.cooldownUntil && Date.now() < slot.cooldownUntil) return false;
             const barcode = multiBatchJobs.pending.shift();
+            const item = queryItemByBarcode(barcode);
+            if (item) {
+                item.slot_id = slot.slot_id;
+                item.slot_label = slot.label || slot.slot_id;
+                item.state = 'running';
+                item.status = '正在启动查询';
+                item.startedAt = Date.now();
+                appendQueryItemLog(item, {message: `已分配到 ${item.slot_label}`, level: 'info'});
+            }
             slot.barcode = barcode;
             slot.job_id = '';
             slot.lastLogSeq = 0;
@@ -983,11 +1151,22 @@
                         slot.cooldownUntil = Date.now() + 5000;
                         multiBatchJobs.pending.push(barcode);
                         rememberQueryNotice(`${barcode} 已放回队列稍后重查`);
+                        if (item) {
+                            item.state = 'waiting';
+                            item.status = '通道繁忙，重新排队';
+                            appendQueryItemLog(item, {message: '通道繁忙，条码已放回队列', level: 'warn'});
+                        }
                     } else {
                         multiBatchJobs.completed += 1;
                         multiBatchJobs.failedCount += 1;
                         rememberFailedBarcode(barcode);
                         rememberQueryNotice(`${barcode} 启动查询失败：${errorText}`);
+                        if (item) {
+                            item.state = 'error';
+                            item.status = '查询启动失败';
+                            item.elapsed = Math.max(0, Math.floor((Date.now() - item.startedAt) / 1000));
+                            appendQueryItemLog(item, {message: errorText, level: 'error'});
+                        }
                     }
                     persistMultiBatchJobs();
                     renderQuerySummary('查询中');
@@ -1007,6 +1186,12 @@
                 multiBatchJobs.failedCount += 1;
                 rememberFailedBarcode(barcode);
                 rememberQueryNotice(`${barcode} 启动查询出错：${e}`);
+                if (item) {
+                    item.state = 'error';
+                    item.status = '查询启动出错';
+                    item.elapsed = Math.max(0, Math.floor((Date.now() - item.startedAt) / 1000));
+                    appendQueryItemLog(item, {message: String(e), level: 'error'});
+                }
                 persistMultiBatchJobs();
                 renderQuerySummary('查询中');
                 return false;
@@ -1061,6 +1246,7 @@
                                 continue;
                             }
                             (d.logs || []).forEach(entry => {
+                                appendQueryItemLog(queryItemByBarcode(requestedBarcode), entry);
                                 if (window.globalLogAppend) {
                                     window.globalLogAppend(`${job.label || job.slot_id}：${entry.message || ''}`, entry.level || 'dim', entry.time || '');
                                 }
@@ -1071,6 +1257,11 @@
                                 if (!job.startedAt) job.startedAt = Date.now();
                                 anyRunning = true;
                                 activeCurrent += Math.min(job.current || 0, 1);
+                                const activeItem = queryItemByBarcode(requestedBarcode);
+                                if (activeItem) {
+                                    activeItem.state = 'running';
+                                    if (!activeItem.status || activeItem.status === '正在启动查询') activeItem.status = '正在查询 · 获取 CRM 报表';
+                                }
                             } else if (job.running) {
                                 const resultRows = Array.isArray(d.results) ? d.results : [];
                                 resultRows.filter(row => !row.success).forEach(row => rememberFailedBarcode(row.barcode || requestedBarcode));
@@ -1080,6 +1271,16 @@
                                 multiBatchJobs.successCount += d.success_count || 0;
                                 multiBatchJobs.failedCount += d.failed_count || 0;
                                 if (d.failed_count) rememberFailedBarcode(job.barcode);
+                                const finishedItem = queryItemByBarcode(requestedBarcode);
+                                if (finishedItem) {
+                                    finishedItem.elapsed = Math.max(0, Math.floor((Date.now() - finishedItem.startedAt) / 1000));
+                                    finishedItem.state = d.failed_count ? 'error' : 'success';
+                                    finishedItem.status = d.failed_count ? '查询失败' : '查询成功';
+                                    appendQueryItemLog(finishedItem, {
+                                        message: d.failed_count ? '查询结束：未获得有效结果' : '查询完成，结果已保存',
+                                        level: d.failed_count ? 'error' : 'success'
+                                    });
+                                }
                                 job.barcode = '';
                                 job.current = 0;
                                 job.startedAt = 0;
@@ -1129,6 +1330,12 @@
         async function stopBatch() {
             if (isMultiBatchRunning) {
                 log('正在停止所有多线程查询任务...', 'warn');
+                (multiBatchJobs.items || []).filter(item => ['waiting', 'running'].includes(item.state)).forEach(item => {
+                    item.state = 'stopped';
+                    item.status = '查询已停止';
+                    if (item.startedAt) item.elapsed = Math.max(0, Math.floor((Date.now() - item.startedAt) / 1000));
+                    appendQueryItemLog(item, {message: '用户停止了查询任务', level: 'warn'});
+                });
                 multiBatchJobs.stopRequested = true;
                 multiBatchJobs.pending = [];
                 persistMultiBatchJobs();

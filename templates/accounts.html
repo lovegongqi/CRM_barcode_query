@@ -34,8 +34,9 @@
         .stepper { display:flex; gap:6px; align-items:center; }
         .stepper input { width:80px; height:36px; text-align:center; font-weight:800; }
         .stepper button { min-width:36px; min-height:36px; padding:0 10px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; font-weight:900; cursor:pointer; }
-        .business-config-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(220px,1fr) minmax(190px,auto); gap:12px; align-items:end; margin-top:12px; }
-        .business-config-grid .inline-check { align-self:end; }
+        .business-config-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(220px,1fr); gap:12px; align-items:start; margin-top:12px; }
+        .frozen-warehouse-field .inline-check { display:flex; align-items:center; gap:7px; margin:9px 0 0; }
+        .frozen-warehouse-field .inline-check input { width:auto; }
         .bulk-login-grid { display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto auto; gap:12px; align-items:end; }
         .bulk-login-grid .remember-inline { display:flex; align-items:center; gap:8px; margin:0 0 8px; white-space:nowrap; color:#334155; }
         .bulk-login-grid .remember-inline input { width:auto; }
@@ -56,8 +57,11 @@
         @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .bulk-login-grid, .bulk-captcha-row { grid-template-columns:1fr; } }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body>
+<body data-aurora-page="settings">
+<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
 <div class="container">
     <div class="header">
         <div>
@@ -72,12 +76,9 @@
     </div>
 
     {% if not is_desktop_app %}
-    <div class="card">
-        <h2>当前工具账号</h2>
+    <div class="status-bar aurora-account-status">
         <div class="status-text">当前工具账号：<span id="accountStatus">检测中</span></div>
-        <div class="actions" style="margin-top:12px;">
-            <a class="btn btn-secondary" href="/logout" style="text-decoration:none;display:inline-flex;align-items:center;">退出登录</a>
-        </div>
+        <a class="aurora-account-logout" href="/logout">退出工具账号</a>
     </div>
 
     <div class="card" id="passwordCard" style="display:none">
@@ -90,6 +91,7 @@
     </div>
     {% endif %}
 
+    <div class="settings-primary-grid">
     <div class="card" id="runtimeConfigCard" style="display:none">
         <h2>系统配置</h2>
         <div class="channel-grid">
@@ -97,7 +99,7 @@
                 <label>查询通道数量</label>
                 <div class="stepper">
                     <button type="button" onclick="changeWorkerCount('queryWorkerCount', -1)">-</button>
-                    <input id="queryWorkerCount" type="number" min="1" max="10" value="2">
+                    <input id="queryWorkerCount" type="number" min="1" max="10" value="10">
                     <button type="button" onclick="changeWorkerCount('queryWorkerCount', 1)">+</button>
                 </div>
             </div>
@@ -105,7 +107,7 @@
                 <label>移库通道数量</label>
                 <div class="stepper">
                     <button type="button" onclick="changeWorkerCount('transferWorkerCount', -1)">-</button>
-                    <input id="transferWorkerCount" type="number" min="1" max="10" value="2">
+                    <input id="transferWorkerCount" type="number" min="1" max="10" value="5">
                     <button type="button" onclick="changeWorkerCount('transferWorkerCount', 1)">+</button>
                 </div>
             </div>
@@ -113,8 +115,11 @@
         </div>
         <div class="business-config-grid">
             <div><label>本公司经销商名称</label><input id="ownDealerName" placeholder="例如：江西省天麓工贸有限公司"></div>
-            <div><label>冻结仓库名称</label><input id="frozenWarehouseName" placeholder="例如：江西天麓冻结仓库"></div>
-            <label class="inline-check"><input id="frozenWarehouseSaveOnly" type="checkbox"> 冻结仓库只保存不确认</label>
+            <div class="frozen-warehouse-field">
+                <label>冻结仓库名称</label>
+                <input id="frozenWarehouseName" placeholder="例如：江西天麓冻结仓库">
+                <label class="inline-check"><input id="frozenWarehouseSaveOnly" type="checkbox"> 冻结仓库只保存不确认</label>
+            </div>
         </div>
     </div>
 
@@ -130,11 +135,11 @@
             <div><label>短信验证码</label><input id="bulkCrmCaptcha" placeholder="输入一次验证码，同步提交到所有通道" maxlength="6"></div>
             <button class="btn btn-primary" id="bulkCaptchaBtn" onclick="submitBulkCrmCaptcha()">提交验证码</button>
         </div>
-        <div class="slot-status-list" id="bulkCrmSlotStatus"></div>
+        <div class="slot-status-list" id="bulkCrmSlotStatus" data-slot-layout="5x3"></div>
         <div class="log-box" id="bulkCrmLoginLog"><div class="dim">等待操作...</div></div>
     </div>
+    </div>
 
-    {% if not is_desktop_app %}
     <div class="card" id="accountEditCard" style="display:none">
         <h2>账号设置</h2>
         <input type="hidden" id="accountId">
@@ -160,7 +165,6 @@
         <h2>账号列表</h2>
         <div id="accountsBox"></div>
     </div>
-    {% endif %}
 </div>
 
 <script>
@@ -449,19 +453,12 @@ async function saveRuntimeConfig() {
 }
 
 async function loadAccounts() {
-    if (IS_DESKTOP_APP) {
-        document.getElementById('runtimeConfigCard').style.display = '';
-        document.getElementById('bulkCrmLoginCard').style.display = '';
-        loadRuntimeConfig();
-        loadBulkCrmSlots();
-        loadSavedCrmCredentials();
-        if (currentBulkCrmLoginJobId) startBulkLoginPolling();
-        return;
-    }
     const data = await fetch('/api/accounts').then(res => res.json());
     const account = data.account || null;
-    document.getElementById('accountStatus').textContent = account ? `${account.username}${account.is_admin ? '（管理员）' : ''}` : '未登录';
-    document.getElementById('passwordCard').style.display = account ? '' : 'none';
+    if (!IS_DESKTOP_APP) {
+        document.getElementById('accountStatus').textContent = account ? `${account.username}${account.is_admin ? '（管理员）' : ''}` : '未登录';
+        document.getElementById('passwordCard').style.display = account ? '' : 'none';
+    }
     const canManage = !!(account && account.is_admin);
     document.getElementById('accountEditCard').style.display = canManage ? '' : 'none';
     document.getElementById('accountListCard').style.display = canManage ? '' : 'none';

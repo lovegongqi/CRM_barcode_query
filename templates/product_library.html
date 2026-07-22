@@ -60,8 +60,11 @@
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
 </head>
-<body>
+<body data-aurora-page="product-library">
+<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
 <div class="container">
     <div class="header">
         <div>
@@ -82,9 +85,9 @@
     </div>
 
     {% if account and not is_desktop_app %}
-    <div class="status-bar wrap">
+    <div class="status-bar wrap aurora-account-status">
         <div class="status-text">工具账号：<span id="accountStatus">检测中</span></div>
-        <a class="btn btn-secondary" href="/logout" style="text-decoration:none;display:inline-flex;align-items:center;">退出登录</a>
+        <a class="aurora-account-logout" href="/logout">退出工具账号</a>
     </div>
     {% endif %}
 
@@ -100,7 +103,19 @@
             <button class="btn btn-secondary" onclick="clearUnifiedSearch()">清空</button>
         </div>
         <div id="lookupBox" class="note">输入条码可识别机器；输入型号、产品名称或产品编码可查编码。在线查询需要输入完整条码。</div>
-        <div class="log" id="queryLog" style="display:none"></div>
+        <section class="aurora-library-activity" id="libraryQueryActivity" hidden>
+            <div class="aurora-realtime-head">
+                <h2>实时查询动态</h2>
+                <span class="aurora-live-badge"><span class="aurora-live-dot"></span>LIVE QUERY</span>
+            </div>
+            <div class="aurora-query-table-wrap">
+                <table class="aurora-library-query-table">
+                    <thead><tr><th>条码</th><th>查询通道</th><th>实时状态</th><th>重试</th><th>耗时</th></tr></thead>
+                    <tbody id="libraryQueryActivityRows"></tbody>
+                </table>
+            </div>
+        </section>
+        <div class="log aurora-raw-log" id="queryLog" style="display:none" aria-hidden="true"></div>
     </div>
 
     <div class="card" id="editCard" style="display:none">
@@ -180,6 +195,7 @@ loadLibrary();
 
 let lookupTimer = null;
 let queryTimer = null;
+let libraryQueryActivityData = null;
 
 function normalizeSearchText(text) {
     return String(text || '').toLowerCase().replace(/\s+/g, '');
@@ -314,6 +330,18 @@ async function confirmQueryBarcode() {
         appendQueryLog(data.error || '查询启动失败', 'error');
         return;
     }
+    libraryQueryActivityData = {
+        barcode,
+        slot_id: data.slot_id || '',
+        slot_label: data.slot_label || '自动调度',
+        running: true,
+        done: false,
+        query_success: false,
+        started_at: new Date().toISOString(),
+        finished_at: '',
+        logs: [{time: new Date().toLocaleTimeString(), message: data.message || '条码查询已开始', level: 'info'}]
+    };
+    renderLibraryQueryActivity();
     if (queryTimer) clearInterval(queryTimer);
     queryTimer = setInterval(pollQueryStatus, 1000);
     pollQueryStatus();
@@ -327,21 +355,77 @@ function appendQueryLog(message, level='dim') {
     line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
     box.appendChild(line);
     box.scrollTop = box.scrollHeight;
+    if (libraryQueryActivityData) {
+        if (!Array.isArray(libraryQueryActivityData.logs)) libraryQueryActivityData.logs = [];
+        libraryQueryActivityData.logs.push({time: new Date().toLocaleTimeString(), message, level});
+        renderLibraryQueryActivity();
+    }
     if (window.globalLogAppend) window.globalLogAppend(message, level);
 }
 
-function renderQueryLogs(logs) {
+function libraryQueryElapsed(data) {
+    if (!data || !data.started_at) return 0;
+    const start = Date.parse(String(data.started_at).replace(' ', 'T'));
+    const end = data.finished_at ? Date.parse(String(data.finished_at).replace(' ', 'T')) : Date.now();
+    return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, Math.floor((end - start) / 1000)) : 0;
+}
+
+function libraryQueryRetryCount(logs) {
+    return (logs || []).filter(row => /重试|换一个未使用/.test(row.message || '')).length;
+}
+
+function libraryQueryStatus(data) {
+    if (!data) return {text: '队列等待中', state: 'waiting'};
+    if (data.done) return data.query_success ? {text: '查询成功 · 已更新匹配', state: 'success'} : {text: '查询失败', state: 'error'};
+    const last = (data.logs || []).slice(-1)[0] || {};
+    if (/重试|切换/.test(last.message || '')) return {text: last.message, state: 'warn'};
+    if (/报表/.test(last.message || '')) return {text: '正在查询 · 获取 CRM 报表', state: 'running'};
+    return {text: last.message || '正在查询 CRM', state: 'running'};
+}
+
+function renderLibraryQueryActivity() {
+    const panel = document.getElementById('libraryQueryActivity');
+    const body = document.getElementById('libraryQueryActivityRows');
+    if (!panel || !body || !libraryQueryActivityData) return;
+    const data = libraryQueryActivityData;
+    const status = libraryQueryStatus(data);
+    const stateClass = window.auroraStatusClass ? window.auroraStatusClass(status.state) : '';
+    const elapsed = libraryQueryElapsed(data);
+    panel.hidden = false;
+    body.innerHTML = `<tr>
+        <td><code>${escapeHtml(data.barcode || document.getElementById('lookupInput').value.trim())}</code></td>
+        <td>${escapeHtml(data.slot_label || '自动调度')}</td>
+        <td><button type="button" class="aurora-status-button ${stateClass}" onclick="openLibraryQueryLog()">${escapeHtml(status.text)}</button></td>
+        <td>${libraryQueryRetryCount(data.logs)} 次</td>
+        <td>${elapsed ? `${elapsed} 秒` : '—'}</td>
+    </tr>`;
+}
+
+function openLibraryQueryLog() {
+    const data = libraryQueryActivityData || {};
+    const status = libraryQueryStatus(data);
+    openAuroraLog(`条码 ${data.barcode || ''}`, data.logs || [], {
+        '查询通道': data.slot_label || '自动调度',
+        '实时状态': status.text,
+        '重试次数': libraryQueryRetryCount(data.logs),
+        '耗时': libraryQueryElapsed(data) ? `${libraryQueryElapsed(data)} 秒` : '进行中'
+    }, '条码匹配在线查询完整日志');
+}
+
+function renderQueryLogs(logs, data=null) {
     const box = document.getElementById('queryLog');
     if (!logs || !logs.length) return;
     box.style.display = '';
     box.innerHTML = logs.map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('');
     box.scrollTop = box.scrollHeight;
+    libraryQueryActivityData = Object.assign({}, libraryQueryActivityData || {}, data || {}, {logs});
+    renderLibraryQueryActivity();
     if (window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
 }
 
 async function pollQueryStatus() {
     const data = await fetch('/api/product-library/query/status').then(res => res.json());
-    renderQueryLogs(data.logs || []);
+    renderQueryLogs(data.logs || [], data);
     if (!data.done) return;
     clearInterval(queryTimer);
     queryTimer = null;
@@ -357,7 +441,10 @@ async function pollQueryStatus() {
 async function restoreQueryStatus() {
     const data = await fetch('/api/product-library/query/status').then(res => res.json()).catch(() => null);
     if (!data || !data.success) return;
-    renderQueryLogs(data.logs || []);
+    if (data.barcode || data.running || data.done) {
+        libraryQueryActivityData = data;
+        renderQueryLogs(data.logs || [], data);
+    }
     if (data.running) {
         if (queryTimer) clearInterval(queryTimer);
         queryTimer = setInterval(pollQueryStatus, 1000);

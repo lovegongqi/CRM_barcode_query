@@ -3403,8 +3403,8 @@ def _normalize_worker_count(value, default=2):
 
 def _load_worker_count_config():
     defaults = {
-        "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 2),
-        "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 2),
+        "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 10),
+        "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 5),
     }
     config_path = _runtime_config_path()
     _migrate_root_config_file("runtime_config.json")
@@ -4740,8 +4740,8 @@ def _runtime_bool_value(value, default=True):
 
 def load_runtime_config():
     defaults = {
-        "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 2),
-        "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 2),
+        "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 10),
+        "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 5),
         "own_dealer_name": _runtime_text_value(os.environ.get("CRM_OWN_DEALER_NAME"), DEFAULT_OWN_DEALER_NAME),
         "frozen_warehouse_name": _runtime_text_value(os.environ.get("CRM_FROZEN_WAREHOUSE_NAME"), DEFAULT_FROZEN_WAREHOUSE_NAME),
         "frozen_warehouse_save_only": _runtime_bool_value(os.environ.get("CRM_FROZEN_WAREHOUSE_SAVE_ONLY"), True),
@@ -4764,8 +4764,8 @@ def save_runtime_config(config):
     os.makedirs(os.path.dirname(RUNTIME_CONFIG_FILE), exist_ok=True)
     current = load_runtime_config()
     payload = {
-        "query_workers": _normalize_worker_count(config.get("query_workers"), current.get("query_workers", 2)),
-        "transfer_workers": _normalize_worker_count(config.get("transfer_workers"), current.get("transfer_workers", 2)),
+        "query_workers": _normalize_worker_count(config.get("query_workers"), current.get("query_workers", 10)),
+        "transfer_workers": _normalize_worker_count(config.get("transfer_workers"), current.get("transfer_workers", 5)),
         "own_dealer_name": _runtime_text_value(config.get("own_dealer_name"), current.get("own_dealer_name", DEFAULT_OWN_DEALER_NAME)),
         "frozen_warehouse_name": _runtime_text_value(config.get("frozen_warehouse_name"), current.get("frozen_warehouse_name", DEFAULT_FROZEN_WAREHOUSE_NAME)),
         "frozen_warehouse_save_only": _runtime_bool_value(config.get("frozen_warehouse_save_only"), current.get("frozen_warehouse_save_only", True)),
@@ -6144,20 +6144,7 @@ def account_public(row):
         'is_admin': row.get('username') == 'admin' or bool(row.get('is_admin')),
     }
 
-def desktop_account_row():
-    return {
-        'id': 'desktop',
-        'username': 'desktop',
-        'display_name': '本机管理员',
-        'password': '',
-        'permissions': ['crm', 'results', 'transfer', 'accounts', 'product-library'],
-        'updated_at': '',
-        'is_admin': True,
-    }
-
 def current_account():
-    if IS_DESKTOP_APP:
-        return desktop_account_row()
     username = session.get('account_username')
     if not username:
         return None
@@ -6171,7 +6158,7 @@ def crm_credentials_owner_key():
     row = current_account()
     if row and row.get("username"):
         return str(row.get("username"))
-    return "desktop" if IS_DESKTOP_APP else ""
+    return ""
 
 def load_crm_credentials_store():
     with crm_credentials_lock:
@@ -6224,8 +6211,8 @@ PAGE_LINKS = [
     {'permission': 'crm', 'label': '在线查询', 'href': '/crm'},
     {'permission': 'results', 'label': '结果管理', 'href': '/'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
-    {'permission': 'accounts', 'label': '账号管理', 'href': '/accounts'},
     {'permission': 'product-library', 'label': '条码匹配', 'href': '/product-library'},
+    {'permission': 'accounts', 'label': '账号管理', 'href': '/accounts'},
 ]
 
 DESKTOP_PAGE_LINKS = [
@@ -6234,17 +6221,16 @@ DESKTOP_PAGE_LINKS = [
 ]
 
 def visible_page_links():
-    if IS_DESKTOP_APP:
-        return DESKTOP_PAGE_LINKS
     row = current_account()
     if not row:
         return []
+    page_links = DESKTOP_PAGE_LINKS if IS_DESKTOP_APP else PAGE_LINKS
     if row.get('username') == 'admin':
-        return PAGE_LINKS
+        return page_links
     permissions = set(row.get('permissions') or [])
-    links = [link for link in PAGE_LINKS if link['permission'] in permissions]
+    links = [link for link in page_links if link['permission'] in permissions]
     if not any(link['permission'] == 'accounts' for link in links):
-        links.append({'permission': 'account-self', 'label': '账号管理', 'href': '/accounts'})
+        links.append({'permission': 'account-self', 'label': '设置' if IS_DESKTOP_APP else '账号管理', 'href': '/accounts'})
     return links
 
 def is_admin_account():
@@ -6285,21 +6271,9 @@ def required_permission_for_path(path):
 @app.before_request
 def require_app_login():
     path = request.path
-    if IS_DESKTOP_APP:
-        return None
     if path.startswith("/api/app-auth"):
         return None
     if path == "/login":
-        return None
-    if path == "/product-library":
-        return None
-    if path == "/api/product-library" and request.method == "GET":
-        return None
-    if path == "/api/product-library/lookup":
-        return None
-    if path == "/api/product-library/query/start":
-        return None
-    if path == "/api/product-library/query/status":
         return None
     if path.startswith("/api/accounts"):
         if not current_account():
@@ -7039,8 +7013,6 @@ def accounts_page():
 
 @app.route("/login")
 def login_page():
-    if IS_DESKTOP_APP:
-        return redirect("/product-library")
     return render_template("login.html")
 
 @app.route("/api/product-library", methods=["GET"])
@@ -7262,8 +7234,6 @@ def api_app_auth_logout():
 @app.route("/logout")
 def app_logout_page():
     session.pop('account_username', None)
-    if IS_DESKTOP_APP:
-        return redirect("/product-library")
     return redirect("/login")
 
 @app.route("/api/app-auth/password", methods=["POST"])
