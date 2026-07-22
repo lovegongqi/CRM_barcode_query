@@ -22,6 +22,20 @@ class FrontendContractTest(unittest.TestCase):
     def source(self, filename):
         return (TEMPLATES / filename).read_text(encoding="utf-8")
 
+    def media_block(self, css, max_width):
+        matches = list(re.finditer(rf"@media\s*\(max-width:\s*{max_width}px\)\s*\{{", css))
+        self.assertEqual(len(matches), 1)
+        match = matches[0]
+        depth = 1
+        for index in range(match.end(), len(css)):
+            if css[index] == "{":
+                depth += 1
+            elif css[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return css[:match.start()], css[match.end():index], css[index + 1:]
+        self.fail(f"Unclosed max-width: {max_width}px media block")
+
     def test_every_page_uses_aurora_shell_and_logo(self):
         for page, filename in self.page_templates.items():
             with self.subTest(page=page):
@@ -79,46 +93,66 @@ class FrontendContractTest(unittest.TestCase):
     def test_mobile_results_actions_use_equal_three_by_three_grid(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
         self.assertEqual(results.count('<div class="action-groups">'), 1)
         self.assertEqual(
             len(re.findall(r'<div class="action-groups">(.*?)</div>', results, re.S)[0].split('<button')) - 1,
             9,
         )
+        for selector in (
+            'body[data-aurora-page="results"] .action-groups {',
+            'body[data-aurora-page="results"] .action-groups .btn {',
+        ):
+            self.assertNotIn(selector, before_mobile)
+            self.assertNotIn(selector, after_mobile)
         self.assertRegex(
-            css,
-            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+            mobile_css,
+            r'body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
         )
         self.assertRegex(
-            css,
+            mobile_css,
             r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*11px[^}]*white-space:\s*nowrap',
         )
 
     def test_mobile_results_stats_stay_in_one_equal_three_column_row(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
         stats = re.findall(r'<div class="stats-grid">(.*?)</div>\s*</div>', results, re.S)[0]
         self.assertEqual(stats.count('<div class="stat-card">'), 3)
+        selector = 'body[data-aurora-page="results"] .stats-grid {'
+        self.assertNotIn(selector, before_mobile)
+        self.assertNotIn(selector, after_mobile)
         self.assertRegex(
-            css,
-            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.stats-grid\s*\{[^}]*width:\s*100%[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+            mobile_css,
+            r'body\[data-aurora-page="results"\] \.stats-grid\s*\{[^}]*width:\s*100%[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
         )
 
     def test_mobile_results_dates_use_two_columns_with_full_width_clear_row(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
         date_row = re.findall(r'<div class="date-filter-row">(.*?)</div>', results, re.S)[0]
         self.assertEqual(date_row.count('<input type="date"'), 2)
         self.assertEqual(date_row.count('class="date-clear-btn"'), 1)
+        for selector in (
+            'body[data-aurora-page="results"] .date-filter-row {',
+            'body[data-aurora-page="results"] .date-filter-row label,\nbody[data-aurora-page="results"] .date-filter-row > span {',
+            'body[data-aurora-page="results"] .date-filter-row input {',
+            'body[data-aurora-page="results"] .date-clear-btn {',
+        ):
+            self.assertNotIn(selector, before_mobile)
+            self.assertNotIn(selector, after_mobile)
         self.assertRegex(
-            css,
-            r'@media\s*\(max-width:\s*640px\)[\s\S]*body\[data-aurora-page="results"\] \.date-filter-row\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)',
+            mobile_css,
+            r'body\[data-aurora-page="results"\] \.date-filter-row\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)',
         )
         self.assertRegex(
-            css,
+            mobile_css,
             r'body\[data-aurora-page="results"\] \.date-filter-row label,\s*body\[data-aurora-page="results"\] \.date-filter-row > span\s*\{[^}]*display:\s*none',
         )
         self.assertRegex(
-            css,
+            mobile_css,
             r'body\[data-aurora-page="results"\] \.date-clear-btn\s*\{[^}]*width:\s*100%[^}]*grid-column:\s*1\s*/\s*-1',
         )
 
