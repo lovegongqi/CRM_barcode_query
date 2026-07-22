@@ -151,7 +151,6 @@
                         <span id="querySlotMobileCount">已选 0/0</span><span aria-hidden="true">⌄</span>
                     </button>
                 </div>
-                <div class="aurora-channel-options" id="querySlotSelector"></div>
                 <div class="aurora-channel-mobile-menu" id="querySlotMobileMenu" hidden></div>
             </div>
             <div class="form-group">
@@ -333,18 +332,6 @@
         }
 
         function renderQuerySlotSelector() {
-            const box = document.getElementById('querySlotSelector');
-            if (!box) return;
-            const slotMarkup = querySlots.map(slot => {
-                const selected = selectedQuerySlotIds.includes(slot.id);
-                const state = slot.logged_in ? '在线' : (slot.remembered_logged_in ? '待验证' : '未登录');
-                return `<label class="aurora-channel-chip ${selected ? 'selected' : ''}">
-                    <input type="checkbox" value="${escapeHtml(slot.id)}" ${selected ? 'checked' : ''} onchange="toggleQuerySlot('${escapeHtml(slot.id)}', this.checked)">
-                    <span>${escapeHtml(slot.label || slot.id)}</span><small>${escapeHtml(state)}</small>
-                </label>`;
-            }).join('');
-            box.innerHTML = slotMarkup || '<span class="aurora-empty">暂无查询通道</span>';
-
             const count = document.getElementById('querySlotMobileCount');
             if (count) count.textContent = `已选 ${selectedQuerySlotIds.length}/${querySlots.length}`;
             const trigger = document.getElementById('querySlotMobileTrigger');

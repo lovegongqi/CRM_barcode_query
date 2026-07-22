@@ -53,9 +53,9 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_mobile_query_select_all_stays_on_one_line(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
-        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        desktop_css = css.split("@media (max-width: 720px)", 1)[0]
         self.assertRegex(
-            mobile_css,
+            desktop_css,
             r"\.aurora-channel-select-all\s*\{[^}]*display:\s*flex;[^}]*white-space:\s*nowrap",
         )
 
@@ -74,11 +74,12 @@ class FrontendContractTest(unittest.TestCase):
             mobile_css,
             r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
         )
-        self.assertRegex(css, r"\.aurora-channel-chip\s*\{[^}]*position:\s*relative")
+        self.assertRegex(css, r"\.aurora-channel-picker\s*\{[^}]*position:\s*relative")
 
-    def test_mobile_query_channels_use_one_shared_multiselect_state(self):
+    def test_query_channels_use_one_shared_dropdown_at_all_widths(self):
         query = self.source("crm.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        desktop_css = css.split("@media (max-width: 720px)", 1)[0]
         for token in (
             'id="querySlotMobileTrigger"',
             'id="querySlotMobileMenu"',
@@ -89,18 +90,19 @@ class FrontendContractTest(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, query)
-        self.assertRegex(
-            css,
+        self.assertNotIn('id="querySlotSelector"', query)
+        self.assertNotIn("document.getElementById('querySlotSelector')", query)
+        self.assertNotRegex(
+            desktop_css,
             r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*none",
         )
-        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
         self.assertRegex(
-            mobile_css,
-            r"\.aurora-channel-options\s*\{[^}]*display:\s*none",
+            desktop_css,
+            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*inline-flex",
         )
         self.assertRegex(
-            mobile_css,
-            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*inline-flex",
+            desktop_css,
+            r"\.aurora-channel-mobile-menu\s*\{[^}]*position:\s*absolute",
         )
 
     def test_query_batch_summary_is_persisted_and_replaces_static_badge(self):
