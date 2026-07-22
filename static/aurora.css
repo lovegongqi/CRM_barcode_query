@@ -60,10 +60,10 @@ body[data-aurora-page] .container {
 .aurora-logo {
     position: absolute;
     z-index: 80;
-    top: 27px;
+    top: 25px;
     left: max(24px, calc((100vw - 1500px) / 2 + 24px));
-    width: 58px;
-    height: 58px;
+    width: 68px;
+    height: 68px;
     padding: 7px;
     display: grid;
     place-items: center;
@@ -997,7 +997,14 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
         font-size: 11px;
         text-align: left;
     }
-    .aurora-channel-select-all { grid-template-columns: 20px minmax(0, 1fr); color: #9ff2ff; cursor: pointer; }
+    .aurora-channel-select-all {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #9ff2ff;
+        white-space: nowrap;
+        cursor: pointer;
+    }
     .aurora-channel-mobile-option.selected { color: #effcff; border-color: rgba(87, 227, 255, .30); background: rgba(73, 203, 233, .12); }
     .aurora-channel-mobile-option input { width: 15px; height: 15px; accent-color: #57e3ff; }
     .aurora-channel-mobile-option small { margin: 0; color: var(--aurora-green); font-size: 9px; white-space: nowrap; }

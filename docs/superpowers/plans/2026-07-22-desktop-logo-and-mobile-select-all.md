@@ -34,7 +34,7 @@ def test_desktop_logo_is_enlarged_and_aligned_with_header_copy(self):
     css = (STATIC / "aurora.css").read_text(encoding="utf-8")
     desktop_css, mobile_css = css.split("@media (max-width: 720px)", 1)
     logo_rule = re.search(r"\.aurora-logo\s*\{([^}]*)\}", desktop_css, re.S)
-    self.assertRegex(logo_rule.group(1), r"top:\s*22px")
+    self.assertRegex(logo_rule.group(1), r"top:\s*25px")
     self.assertRegex(logo_rule.group(1), r"width:\s*68px")
     self.assertRegex(logo_rule.group(1), r"height:\s*68px")
     self.assertRegex(mobile_css, r"\.aurora-logo\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px")
@@ -68,7 +68,7 @@ Expected: both tests fail because the desktop Logo is still `58px` at `top: 27px
 
 ```css
 .aurora-logo {
-    top: 22px;
+    top: 25px;
     width: 68px;
     height: 68px;
 }

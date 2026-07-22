@@ -38,6 +38,27 @@ class FrontendContractTest(unittest.TestCase):
         self.assertRegex(base_rule.group(1), r"position:\s*absolute")
         self.assertNotRegex(base_rule.group(1), r"position:\s*fixed")
 
+    def test_desktop_logo_is_enlarged_and_aligned_with_header_copy(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        desktop_css, mobile_css = css.split("@media (max-width: 720px)", 1)
+        logo_rule = re.search(r"\.aurora-logo\s*\{([^}]*)\}", desktop_css, re.S)
+        self.assertIsNotNone(logo_rule)
+        self.assertRegex(logo_rule.group(1), r"top:\s*25px")
+        self.assertRegex(logo_rule.group(1), r"width:\s*68px")
+        self.assertRegex(logo_rule.group(1), r"height:\s*68px")
+        self.assertRegex(
+            mobile_css,
+            r"\.aurora-logo\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px",
+        )
+
+    def test_mobile_query_select_all_stays_on_one_line(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"\.aurora-channel-select-all\s*\{[^}]*display:\s*flex;[^}]*white-space:\s*nowrap",
+        )
+
     def test_logged_in_navigation_is_fixed_on_mobile(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(css, r"@media\s*\(max-width:\s*720px\)")
