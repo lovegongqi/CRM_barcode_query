@@ -145,8 +145,14 @@
                 </div>
             </div>
             <div class="aurora-channel-picker" data-default-selection="all">
-                <div><strong>查询通道</strong><small>默认全选，系统自动调度空闲通道</small></div>
+                <div class="aurora-channel-heading">
+                    <div><strong>查询通道</strong><small>默认全选，系统自动调度空闲通道</small></div>
+                    <button class="aurora-channel-mobile-trigger" id="querySlotMobileTrigger" type="button" aria-expanded="false" aria-controls="querySlotMobileMenu" onclick="toggleQuerySlotMenu(event)">
+                        <span id="querySlotMobileCount">已选 0/0</span><span aria-hidden="true">⌄</span>
+                    </button>
+                </div>
                 <div class="aurora-channel-options" id="querySlotSelector"></div>
+                <div class="aurora-channel-mobile-menu" id="querySlotMobileMenu" hidden></div>
             </div>
             <div class="form-group">
                 <label>条码查询（可一行一个，也可用逗号、空格分隔）</label>
@@ -171,7 +177,7 @@
         <div class="card aurora-realtime">
             <div class="aurora-realtime-head">
                 <h2>实时查询队列</h2>
-                <span class="aurora-live-badge"><span class="aurora-live-dot"></span>AUTO SCHEDULING</span>
+                <span class="aurora-live-badge" id="queryBatchSummary"><span class="aurora-live-dot"></span>完成:0/0　耗时:0h:0m:0s</span>
             </div>
             <div class="aurora-query-table-wrap">
                 <table class="aurora-query-table">
@@ -323,14 +329,35 @@
         function renderQuerySlotSelector() {
             const box = document.getElementById('querySlotSelector');
             if (!box) return;
-            box.innerHTML = querySlots.map(slot => {
+            const slotMarkup = querySlots.map(slot => {
                 const selected = selectedQuerySlotIds.includes(slot.id);
                 const state = slot.logged_in ? '在线' : (slot.remembered_logged_in ? '待验证' : '未登录');
                 return `<label class="aurora-channel-chip ${selected ? 'selected' : ''}">
                     <input type="checkbox" value="${escapeHtml(slot.id)}" ${selected ? 'checked' : ''} onchange="toggleQuerySlot('${escapeHtml(slot.id)}', this.checked)">
                     <span>${escapeHtml(slot.label || slot.id)}</span><small>${escapeHtml(state)}</small>
                 </label>`;
-            }).join('') || '<span class="aurora-empty">暂无查询通道</span>';
+            }).join('');
+            box.innerHTML = slotMarkup || '<span class="aurora-empty">暂无查询通道</span>';
+
+            const count = document.getElementById('querySlotMobileCount');
+            if (count) count.textContent = `已选 ${selectedQuerySlotIds.length}/${querySlots.length}`;
+            const trigger = document.getElementById('querySlotMobileTrigger');
+            if (trigger) trigger.disabled = querySlots.length === 0;
+
+            const mobileMenu = document.getElementById('querySlotMobileMenu');
+            if (mobileMenu) {
+                mobileMenu.innerHTML = querySlots.length ? `
+                    <button class="aurora-channel-select-all" type="button" onclick="selectAllQuerySlots()">✓ 全选通道</button>
+                    ${querySlots.map(slot => {
+                        const selected = selectedQuerySlotIds.includes(slot.id);
+                        const state = slot.logged_in ? '在线' : (slot.remembered_logged_in ? '待验证' : '未登录');
+                        return `<label class="aurora-channel-mobile-option ${selected ? 'selected' : ''}">
+                            <input type="checkbox" value="${escapeHtml(slot.id)}" ${selected ? 'checked' : ''} onchange="toggleQuerySlot('${escapeHtml(slot.id)}', this.checked)">
+                            <span>${escapeHtml(slot.label || slot.id)}</span><small>${escapeHtml(state)}</small>
+                        </label>`;
+                    }).join('')}
+                ` : '<span class="aurora-empty">暂无查询通道</span>';
+            }
         }
 
         function toggleQuerySlot(slotId, checked) {
@@ -343,6 +370,36 @@
             localStorage.setItem('crm_query_selected_slots', JSON.stringify(selectedQuerySlotIds));
             renderQuerySlotSelector();
         }
+
+        function selectAllQuerySlots() {
+            selectedQuerySlotIds = querySlots.map(slot => slot.id);
+            localStorage.setItem('crm_query_selected_slots', JSON.stringify(selectedQuerySlotIds));
+            renderQuerySlotSelector();
+        }
+
+        function toggleQuerySlotMenu(event) {
+            event.stopPropagation();
+            const menu = document.getElementById('querySlotMobileMenu');
+            const trigger = document.getElementById('querySlotMobileTrigger');
+            if (!menu || !trigger) return;
+            const opening = menu.hidden;
+            menu.hidden = !opening;
+            trigger.setAttribute('aria-expanded', opening ? 'true' : 'false');
+        }
+
+        function closeQuerySlotMenu() {
+            const menu = document.getElementById('querySlotMobileMenu');
+            const trigger = document.getElementById('querySlotMobileTrigger');
+            if (menu) menu.hidden = true;
+            if (trigger) trigger.setAttribute('aria-expanded', 'false');
+        }
+
+        document.addEventListener('click', event => {
+            if (!event.target.closest('.aurora-channel-picker')) closeQuerySlotMenu();
+        });
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape') closeQuerySlotMenu();
+        });
 
         function querySlotSelected(slot) {
             return !!(slot && selectedQuerySlotIds.includes(slot.id));

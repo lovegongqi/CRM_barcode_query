@@ -617,6 +617,7 @@ body[data-aurora-page] #detailFrame {
 .aurora-transfer-table th:nth-child(4), .aurora-transfer-table td:nth-child(4) { width: 230px; }
 .aurora-transfer-table th:nth-child(6), .aurora-transfer-table td:nth-child(6) { width: 90px; }
 .aurora-channel-picker { margin: 0 0 14px; padding: 10px 12px; display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; align-items: center; color: #a5bbc9; background: rgba(4, 14, 26, .48); border: 1px solid var(--aurora-line); border-radius: 13px; }
+.aurora-channel-heading { min-width: 0; }
 .aurora-channel-picker strong { display: block; color: #d7edf4; font-size: 12px; }
 .aurora-channel-picker small { display: block; margin-top: 3px; color: #6e8799; font-size: 9px; }
 .aurora-channel-options { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -625,6 +626,8 @@ body[data-aurora-page] #detailFrame {
 .aurora-channel-chip input { position: absolute; opacity: 0; pointer-events: none; }
 .aurora-channel-chip span { font-size: 10px; }
 .aurora-channel-chip small { margin: 0; color: var(--aurora-green); font-size: 8px; }
+.aurora-channel-mobile-trigger { display: none; }
+.aurora-channel-mobile-menu { display: none; }
 
 .aurora-results-grid-head,
 .aurora-results-grid .barcode-item {
@@ -938,9 +941,64 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     body[data-aurora-page="product-library"] #editCard { height: min(68vh, 600px); min-height: 520px; max-height: 600px; }
     .aurora-log-dialog { padding: 12px; align-items: flex-end; }
     .aurora-log-panel { max-height: 82vh; border-radius: 20px 20px 14px 14px; }
-    .aurora-channel-picker { grid-template-columns: 1fr; }
-    .aurora-channel-options { width: 100%; max-width: 100%; min-width: 0; justify-content: flex-start; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-inline: contain; padding-bottom: 3px; }
-    .aurora-channel-chip { flex: 0 0 auto; }
+    .aurora-channel-picker { position: relative; grid-template-columns: 1fr; }
+    .aurora-channel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .aurora-channel-options { display: none; }
+    .aurora-channel-mobile-trigger {
+        min-height: 34px;
+        padding: 7px 10px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        flex: 0 0 auto;
+        border: 1px solid rgba(87, 227, 255, .28);
+        border-radius: 10px;
+        color: #dff8fd;
+        background: rgba(73, 203, 233, .10);
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+    }
+    .aurora-channel-mobile-trigger:disabled { opacity: .55; cursor: default; }
+    .aurora-channel-mobile-menu {
+        position: absolute;
+        z-index: 40;
+        top: calc(100% - 4px);
+        right: 10px;
+        width: min(290px, calc(100% - 20px));
+        max-height: 320px;
+        padding: 8px;
+        display: grid;
+        gap: 5px;
+        overflow-y: auto;
+        border: 1px solid rgba(87, 227, 255, .24);
+        border-radius: 14px;
+        background: rgba(6, 18, 32, .98);
+        box-shadow: 0 18px 40px rgba(0, 0, 0, .38);
+    }
+    .aurora-channel-mobile-menu[hidden] { display: none; }
+    .aurora-channel-select-all,
+    .aurora-channel-mobile-option {
+        width: 100%;
+        min-height: 38px;
+        padding: 8px 10px;
+        display: grid;
+        grid-template-columns: 20px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--aurora-line);
+        border-radius: 10px;
+        color: #b9ceda;
+        background: rgba(10, 27, 45, .88);
+        font: inherit;
+        font-size: 11px;
+        text-align: left;
+    }
+    .aurora-channel-select-all { grid-template-columns: 20px minmax(0, 1fr); color: #9ff2ff; cursor: pointer; }
+    .aurora-channel-mobile-option.selected { color: #effcff; border-color: rgba(87, 227, 255, .30); background: rgba(73, 203, 233, .12); }
+    .aurora-channel-mobile-option input { width: 15px; height: 15px; accent-color: #57e3ff; }
+    .aurora-channel-mobile-option small { margin: 0; color: var(--aurora-green); font-size: 9px; white-space: nowrap; }
     .aurora-query-table { min-width: 1000px; }
     .aurora-transfer-table { min-width: 720px; }
     .aurora-library-query-table { min-width: 620px; }
