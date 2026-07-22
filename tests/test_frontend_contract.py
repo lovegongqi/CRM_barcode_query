@@ -346,6 +346,10 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(label, source)
 
+    def test_results_page_omits_legacy_file_storage_footer(self):
+        source = self.source("index.html")
+        self.assertNotIn("查询结果文件保存在 barcode/ 目录下", source)
+
     def test_results_management_panel_uses_dark_glass_theme(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         for selector in (
