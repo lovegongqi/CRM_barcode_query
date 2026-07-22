@@ -43,6 +43,37 @@ class FrontendContractTest(unittest.TestCase):
         self.assertRegex(css, r"@media\s*\(max-width:\s*720px\)")
         self.assertRegex(css, r"\.page-nav[^{]*\{[^}]*position:\s*fixed")
         self.assertIn("bottom: max(10px, env(safe-area-inset-bottom))", css)
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertNotIn("top: max(10px, env(safe-area-inset-top))", mobile_css)
+
+    def test_mobile_shell_does_not_create_page_level_horizontal_scroll(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
+        )
+        self.assertRegex(css, r"\.aurora-channel-chip\s*\{[^}]*position:\s*relative")
+
+    def test_mobile_logo_uses_the_shared_page_inset(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"\.aurora-logo\s*\{[^}]*margin-left:\s*12px",
+        )
+
+    def test_transfer_mobile_grid_constrains_wide_tables_to_their_scroller(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.grid > div\s*\{[^}]*min-width:\s*0',
+        )
 
     def test_desktop_navigation_sits_below_the_page_title(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
