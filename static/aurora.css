@@ -223,8 +223,24 @@ body[data-aurora-page] .aurora-account-status {
     gap: 12px;
 }
 
-body[data-aurora-page] .aurora-account-status > .aurora-account-logout {
+body[data-aurora-page] .aurora-account-session {
+    min-width: 0;
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+body[data-aurora-page] .aurora-account-name {
+    min-width: 0;
+    max-width: 180px;
+    overflow: hidden;
+    color: #b9ceda;
+    font-size: 11px;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 body[data-aurora-page] .card,
@@ -947,6 +963,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     body[data-aurora-page] h1 { font-size: 20px !important; }
     body[data-aurora-page] .card { padding: 14px !important; border-radius: 16px !important; }
     body[data-aurora-page] .status-bar { border-radius: 14px !important; }
+    body[data-aurora-page] .aurora-account-name { max-width: 110px; }
     body[data-aurora-page] table { font-size: 11px !important; }
     body[data-aurora-page] th, body[data-aurora-page] td { padding: 8px 7px !important; }
 

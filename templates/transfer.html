@@ -99,7 +99,10 @@
     <div class="status-bar aurora-account-status">
         <div class="status-text"><span class="dot" id="loginDot"></span>CRM 登录状态：<span id="loginStatus">检测中</span></div>
         {% if not is_desktop_app %}
-        <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        <div class="aurora-account-session">
+            <span class="aurora-account-name" id="appAccountStatus">检测中</span>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        </div>
         {% endif %}
     </div>
 

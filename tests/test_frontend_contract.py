@@ -272,6 +272,21 @@ class FrontendContractTest(unittest.TestCase):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn(".aurora-account-logout", css)
 
+    def test_every_work_page_places_plain_username_before_logout(self):
+        filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
+        for filename in filenames:
+            with self.subTest(filename=filename):
+                source = self.source(filename)
+                self.assertIn('class="aurora-account-session"', source)
+                self.assertIn('class="aurora-account-name"', source)
+                self.assertLess(source.index('class="aurora-account-name"'), source.index('class="aurora-account-logout"'))
+                self.assertNotIn("当前工具账号", source)
+                self.assertNotIn("工具账号：", source)
+                self.assertNotIn("（管理员）", source)
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.aurora-account-session\s*\{[^}]*display:\s*inline-flex")
+        self.assertRegex(css, r"\.aurora-account-name\s*\{[^}]*text-overflow:\s*ellipsis")
+
     def test_tool_account_controls_use_compact_status_rows(self):
         filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
         for filename in filenames:

@@ -86,8 +86,10 @@
 
     {% if account and not is_desktop_app %}
     <div class="status-bar wrap aurora-account-status">
-        <div class="status-text">工具账号：<span id="accountStatus">检测中</span></div>
-        <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        <div class="aurora-account-session">
+            <span class="aurora-account-name" id="accountStatus">检测中</span>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        </div>
     </div>
     {% endif %}
 
@@ -145,7 +147,7 @@ async function loadLibrary() {
     productLibraryRows = rows;
     document.getElementById('editCard').style.display = data.can_edit ? '' : 'none';
     const accountStatus = document.getElementById('accountStatus');
-    if (accountStatus) accountStatus.textContent = data.account ? `${data.account.username}${data.can_edit ? '（管理员）' : ''}` : '';
+    if (accountStatus) accountStatus.textContent = data.account ? data.account.username : '未登录';
     const libraryCount = document.getElementById('libraryCount');
     if (libraryCount) libraryCount.textContent = `已有 ${rows.length} 条`;
     document.getElementById('libraryBox').innerHTML = `

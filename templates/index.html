@@ -1150,8 +1150,10 @@
 
         {% if not is_desktop_app %}
         <div class="status-bar aurora-account-status">
-            <div class="status-text">当前工具账号：<span id="appAccountStatus">检测中</span></div>
-            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+            <div class="aurora-account-session">
+                <span class="aurora-account-name" id="appAccountStatus">检测中</span>
+                <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+            </div>
         </div>
         {% endif %}
 

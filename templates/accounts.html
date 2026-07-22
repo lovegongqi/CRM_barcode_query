@@ -77,8 +77,10 @@
 
     {% if not is_desktop_app %}
     <div class="status-bar aurora-account-status">
-        <div class="status-text">当前工具账号：<span id="accountStatus">检测中</span></div>
-        <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        <div class="aurora-account-session">
+            <span class="aurora-account-name" id="accountStatus">检测中</span>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        </div>
     </div>
 
     <div class="card" id="passwordCard" style="display:none">
@@ -456,7 +458,7 @@ async function loadAccounts() {
     const data = await fetch('/api/accounts').then(res => res.json());
     const account = data.account || null;
     if (!IS_DESKTOP_APP) {
-        document.getElementById('accountStatus').textContent = account ? `${account.username}${account.is_admin ? '（管理员）' : ''}` : '未登录';
+        document.getElementById('accountStatus').textContent = account ? account.username : '未登录';
         document.getElementById('passwordCard').style.display = account ? '' : 'none';
     }
     const canManage = !!(account && account.is_admin);
