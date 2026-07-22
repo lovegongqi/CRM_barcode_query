@@ -133,6 +133,14 @@ class FrontendContractTest(unittest.TestCase):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(css, r"\.aurora-account-status\s*\{[^}]*min-height:\s*50px")
 
+    def test_query_and_transfer_omit_redundant_tool_account_text(self):
+        query = self.source("crm.html")
+        transfer = self.source("transfer.html")
+        self.assertNotIn('<span>工具账号：</span>', query)
+        self.assertNotIn('工具账号：<span id="appAccountStatus">', transfer)
+        self.assertIn('class="aurora-account-logout"', query)
+        self.assertIn('class="aurora-account-logout"', transfer)
+
     def test_results_list_has_fixed_scrollable_viewport(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(
