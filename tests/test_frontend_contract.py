@@ -55,12 +55,16 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertRegex(css, r"\.aurora-channel-chip\s*\{[^}]*position:\s*relative")
 
-    def test_mobile_logo_uses_the_shared_page_inset(self):
+    def test_mobile_logo_sits_left_of_every_work_page_title(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         mobile_css = css.split("@media (max-width: 720px)", 1)[1]
         self.assertRegex(
             mobile_css,
-            r"\.aurora-logo\s*\{[^}]*margin-left:\s*12px",
+            r"\.aurora-logo\s*\{[^}]*position:\s*absolute;[^}]*top:\s*18px;[^}]*left:\s*12px;[^}]*margin:\s*0",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.header > div:first-child,[^}]*\.app-header > \.app-title\s*\{[^}]*padding-left:\s*50px",
         )
 
     def test_transfer_mobile_grid_constrains_wide_tables_to_their_scroller(self):
@@ -93,7 +97,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn(".app-header > .app-title", css)
         self.assertRegex(
             css,
-            r"@media\s*\(max-width:\s*720px\)[\s\S]*\.app-header > \.app-title[^}]*padding-left:\s*0",
+            r"@media\s*\(max-width:\s*720px\)[\s\S]*\.app-header > \.app-title[^}]*padding-left:\s*50px",
         )
 
     def test_results_title_uses_the_shared_english_eyebrow(self):
