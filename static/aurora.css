@@ -925,6 +925,8 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     }
     body[data-aurora-page] .header > div:first-child::before,
     body[data-aurora-page] .app-header > .app-title::before { font-size: 8px; }
+    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child > p,
+    body[data-aurora-page="results"] .app-subtitle { display: none !important; }
     body[data-aurora-page] h1 { font-size: 20px !important; }
     body[data-aurora-page] .card { padding: 14px !important; border-radius: 16px !important; }
     body[data-aurora-page] .status-bar { border-radius: 14px !important; }
