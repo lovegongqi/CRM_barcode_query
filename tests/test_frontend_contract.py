@@ -471,6 +471,27 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, source)
 
+    def test_transfer_realtime_history_is_operation_based(self):
+        source = self.source("transfer.html")
+
+        self.assertNotIn("AUTO REFRESH", source)
+        self.assertIn("clearTransferRealtimeRecords()", source)
+        self.assertIn("<th>操作</th>", source)
+        self.assertIn('colspan="7"', source)
+        self.assertIn("crm_transfer_realtime_records_v2", source)
+        self.assertIn("transferRealtimeRecords.unshift", source)
+        self.assertNotIn("transferSlots.forEach(ensureTransferRecord)", source)
+        self.assertIn("function deleteTransferRealtimeRecord(recordId)", source)
+        self.assertIn("function clearTransferRealtimeRecords()", source)
+        self.assertRegex(
+            source,
+            r'onclick="openTransferChannelLog\(\'\$\{escapeHtml\(record\.record_id\)\}\'\)"',
+        )
+        self.assertRegex(
+            source,
+            r'onclick="deleteTransferRealtimeRecord\(\'\$\{escapeHtml\(record\.record_id\)\}\'\)"',
+        )
+
     def test_transfer_slot_tabs_use_dark_glass_theme(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn('body[data-aurora-page="transfer"] .slot-tab {', css)

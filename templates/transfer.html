@@ -155,12 +155,12 @@
             <div class="card aurora-realtime">
                 <div class="aurora-realtime-head">
                     <h2>移库实时记录</h2>
-                    <span class="aurora-live-badge"><span class="aurora-live-dot"></span>AUTO REFRESH</span>
+                    <button type="button" class="aurora-live-action" onclick="clearTransferRealtimeRecords()">清空</button>
                 </div>
                 <div class="aurora-query-table-wrap">
                     <table class="aurora-transfer-table">
-                        <thead><tr><th>#</th><th>通道</th><th>生成的移库单号</th><th>实时状态</th><th>目标分销商</th><th>耗时</th></tr></thead>
-                        <tbody id="transferRealtimeRows"><tr><td colspan="6"><div class="aurora-empty">提交移库后，将在这里按通道显示实时记录</div></td></tr></tbody>
+                        <thead><tr><th>#</th><th>通道</th><th>生成的移库单号</th><th>实时状态</th><th>目标分销商</th><th>耗时</th><th>操作</th></tr></thead>
+                        <tbody id="transferRealtimeRows"><tr><td colspan="7"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr></tbody>
                     </table>
                 </div>
                 <div class="log aurora-raw-log" id="transferLog" aria-hidden="true"><div class="dim">等待操作...</div></div>
@@ -236,7 +236,8 @@ let pendingLoginSlots = [];
 let currentLoginJobId = sessionStorage.getItem('crm_bulk_login_job_transfer') || '';
 let loginPollTimer = null;
 let lastLoginLogSeq = 0;
-let transferRealtimeRecords = {};
+let transferRealtimeRecords = [];
+const TRANSFER_REALTIME_STORAGE_KEY = 'crm_transfer_realtime_records_v2';
 const BUSINESS_CONFIG = {{ business_config|tojson }};
 const OWN_DEALER_NAME = BUSINESS_CONFIG.own_dealer_name || '江西省天麓工贸有限公司';
 let canDeleteDistributorHistory = {{ 'true' if account and account.is_admin else 'false' }};
@@ -301,27 +302,54 @@ function isLoggedInMessage(message) {
 }
 
 function restoreTransferRealtimeRecords() {
-    try { transferRealtimeRecords = JSON.parse(sessionStorage.getItem('crm_transfer_realtime_records') || '{}') || {}; }
-    catch (e) { transferRealtimeRecords = {}; }
+    try {
+        const rows = JSON.parse(sessionStorage.getItem(TRANSFER_REALTIME_STORAGE_KEY) || '[]');
+        transferRealtimeRecords = Array.isArray(rows) ? rows : [];
+    } catch (e) {
+        transferRealtimeRecords = [];
+    }
 }
 
-function ensureTransferRecord(slot) {
-    const slotId = typeof slot === 'string' ? slot : slot.id;
-    if (!transferRealtimeRecords[slotId]) {
-        transferRealtimeRecords[slotId] = {
-            slot_id: slotId,
-            slot_label: typeof slot === 'string' ? slotId : (slot.label || slotId),
-            order_no: '',
-            state: 'waiting',
-            status: '等待任务',
-            distributor: '',
-            started_at: '',
-            finished_at: '',
-            elapsed: 0,
-            logs: []
-        };
-    }
-    return transferRealtimeRecords[slotId];
+function transferRecordId() {
+    return `transfer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function slotLabel(slotId) {
+    const slot = transferSlots.find(row => row.id === slotId);
+    return slot ? slot.label : slotId;
+}
+
+function findTransferRecord(recordId) {
+    return transferRealtimeRecords.find(row => row.record_id === recordId) || null;
+}
+
+function findActiveTransferRecord(slotId, jobId='') {
+    const storedId = sessionStorage.getItem(`crm_transfer_record_id_${slotId}`) || '';
+    return findTransferRecord(storedId)
+        || (jobId ? transferRealtimeRecords.find(row => row.job_id === jobId) : null)
+        || null;
+}
+
+function createTransferRealtimeRecord(slotId, distributor) {
+    const record = {
+        record_id: transferRecordId(),
+        job_id: '',
+        slot_id: slotId,
+        slot_label: slotLabel(slotId),
+        order_no: '',
+        state: 'running',
+        status: '正在创建移库任务',
+        distributor: distributor || '',
+        started_at: new Date().toISOString(),
+        finished_at: '',
+        elapsed: 0,
+        logs: []
+    };
+    transferRealtimeRecords.unshift(record);
+    sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
+    saveTransferRealtimeRecords();
+    renderTransferRealtimeRecords();
+    return record;
 }
 
 function transferElapsed(record) {
@@ -333,13 +361,14 @@ function transferElapsed(record) {
 }
 
 function saveTransferRealtimeRecords() {
-    sessionStorage.setItem('crm_transfer_realtime_records', JSON.stringify(transferRealtimeRecords));
+    sessionStorage.setItem(TRANSFER_REALTIME_STORAGE_KEY, JSON.stringify(transferRealtimeRecords));
 }
 
-function updateTransferRealtimeRecord(slotId, jobData={}, logs=[]) {
-    const slot = transferSlots.find(row => row.id === slotId) || slotId;
-    const record = ensureTransferRecord(slot);
+function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
+    const record = findTransferRecord(recordId);
+    if (!record) return;
     record.logs = Array.isArray(logs) ? logs.slice(-160) : record.logs;
+    record.job_id = jobData.job_id || record.job_id;
     record.started_at = jobData.started_at || record.started_at;
     record.finished_at = jobData.finished_at || record.finished_at;
     record.distributor = (jobData.transfer && jobData.transfer.distributor) || record.distributor || document.getElementById('transferDistributor')?.value.trim() || '';
@@ -362,22 +391,21 @@ function updateTransferRealtimeRecord(slotId, jobData={}, logs=[]) {
 function renderTransferRealtimeRecords() {
     const body = document.getElementById('transferRealtimeRows');
     if (!body) return;
-    const slots = transferSlots.length ? transferSlots : Object.values(transferRealtimeRecords).map(row => ({id: row.slot_id, label: row.slot_label}));
-    if (!slots.length) {
-        body.innerHTML = '<tr><td colspan="6"><div class="aurora-empty">提交移库后，将在这里按通道显示实时记录</div></td></tr>';
+    if (!transferRealtimeRecords.length) {
+        body.innerHTML = '<tr><td colspan="7"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr>';
         return;
     }
-    body.innerHTML = slots.map((slot, index) => {
-        const record = ensureTransferRecord(slot);
+    body.innerHTML = transferRealtimeRecords.map((record, index) => {
         const stateClass = window.auroraStatusClass ? window.auroraStatusClass(record.state) : '';
         const elapsed = transferElapsed(record);
         return `<tr>
             <td>${index + 1}</td>
-            <td>${escapeHtml(record.slot_label || slot.label || slot.id)}</td>
+            <td>${escapeHtml(record.slot_label || record.slot_id)}</td>
             <td><code>${escapeHtml(record.order_no || '—')}</code></td>
-            <td><button type="button" class="aurora-status-button ${stateClass}" onclick="openTransferChannelLog('${escapeHtml(slot.id)}')">${escapeHtml(record.status)}</button></td>
+            <td><button type="button" class="aurora-status-button ${stateClass}" onclick="openTransferChannelLog('${escapeHtml(record.record_id)}')">${escapeHtml(record.status)}</button></td>
             <td>${escapeHtml(record.distributor || '—')}</td>
             <td>${elapsed ? escapeHtml(jobDurationText(elapsed)) : '—'}</td>
+            <td><button type="button" class="aurora-row-action danger" onclick="deleteTransferRealtimeRecord('${escapeHtml(record.record_id)}')">删除</button></td>
         </tr>`;
     }).join('');
 }
@@ -387,14 +415,27 @@ function jobDurationText(seconds) {
     return value >= 60 ? `${Math.floor(value / 60)} 分 ${value % 60} 秒` : `${value} 秒`;
 }
 
-function openTransferChannelLog(slotId) {
-    const record = ensureTransferRecord(transferSlots.find(row => row.id === slotId) || slotId);
-    openAuroraLog(`${record.slot_label || slotId} 移库日志`, record.logs || [], {
+function openTransferChannelLog(recordId) {
+    const record = findTransferRecord(recordId);
+    if (!record) return;
+    openAuroraLog(`${record.slot_label || record.slot_id} 移库日志`, record.logs || [], {
         '移库单号': record.order_no || '尚未生成',
         '实时状态': record.status,
         '目标分销商': record.distributor || '—',
         '耗时': transferElapsed(record) ? jobDurationText(transferElapsed(record)) : '—'
     }, '通道完整移库日志');
+}
+
+function deleteTransferRealtimeRecord(recordId) {
+    transferRealtimeRecords = transferRealtimeRecords.filter(row => row.record_id !== recordId);
+    saveTransferRealtimeRecords();
+    renderTransferRealtimeRecords();
+}
+
+function clearTransferRealtimeRecords() {
+    transferRealtimeRecords = [];
+    saveTransferRealtimeRecords();
+    renderTransferRealtimeRecords();
 }
 
 async function loadSlots() {
@@ -406,7 +447,6 @@ async function loadSlots() {
         localStorage.setItem('crm_transfer_slot', currentTransferSlot);
     }
     renderTransferSlots();
-    transferSlots.forEach(ensureTransferRecord);
     renderTransferRealtimeRecords();
 }
 
@@ -981,14 +1021,6 @@ async function previewTransfer() {
     lastSummary = null;
     if (previewTimer) clearInterval(previewTimer);
     appendLog('开始汇总预览，缺少条码匹配前缀时会自动查询代表条码...', 'info');
-    const previewRecord = ensureTransferRecord(currentTransferSlot);
-    previewRecord.state = 'running';
-    previewRecord.status = '正在汇总核对';
-    previewRecord.distributor = document.getElementById('transferDistributor').value.trim();
-    previewRecord.started_at = new Date().toISOString();
-    previewRecord.finished_at = '';
-    previewRecord.elapsed = 0;
-    renderTransferRealtimeRecords();
     let data = null;
     try {
         const payload = JSON.stringify(transferPayloadForSlot(slotId, {
@@ -1062,16 +1094,8 @@ async function submitTransfer() {
     if (!await ensureCrmLoggedIn('提交移库')) return;
     if (slotId !== currentTransferSlot) return;
     document.getElementById('submitBtn').disabled = true;
-    appendLog('提交移库任务...', 'info');
-    const activeRecord = ensureTransferRecord(slotId);
-    activeRecord.state = 'running';
-    activeRecord.status = '正在创建移库任务';
-    activeRecord.distributor = distributor;
-    activeRecord.order_no = '';
-    activeRecord.started_at = new Date().toISOString();
-    activeRecord.finished_at = '';
-    activeRecord.elapsed = 0;
-    renderTransferRealtimeRecords();
+    const activeRecord = createTransferRealtimeRecord(slotId, distributor);
+    appendLog('提交移库任务...', 'info', activeRecord.record_id);
     const res = await fetch('/api/crm/transfer', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -1085,10 +1109,11 @@ async function submitTransfer() {
     const data = await res.json();
     if (!data.success) {
         if (slotId === currentTransferSlot) {
-            appendLog(data.error || '提交失败', 'error');
+            appendLog(data.error || '提交失败', 'error', activeRecord.record_id);
             activeRecord.state = 'error';
             activeRecord.status = '提交失败';
             activeRecord.finished_at = new Date().toISOString();
+            saveTransferRealtimeRecords();
             renderTransferRealtimeRecords();
             document.getElementById('submitBtn').disabled = false;
         }
@@ -1096,13 +1121,15 @@ async function submitTransfer() {
     }
     const jobId = data.job_id || '';
     if (jobId) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, jobId);
+    activeRecord.job_id = jobId;
+    saveTransferRealtimeRecords();
     submittedTransferDistributor = distributor;
     if (slotId !== currentTransferSlot) return;
     currentTransferJobId = jobId;
-    startTransferPolling(slotId, jobId);
+    startTransferPolling(slotId, jobId, activeRecord.record_id);
 }
 
-function appendLog(message, level='dim') {
+function appendLog(message, level='dim', recordId='') {
     const box = document.getElementById('transferLog');
     if (box.innerText.includes('等待操作')) box.innerHTML = '';
     const line = document.createElement('div');
@@ -1111,16 +1138,18 @@ function appendLog(message, level='dim') {
     box.appendChild(line);
     lastRenderedLogKey = '';
     box.scrollTop = box.scrollHeight;
-    const record = ensureTransferRecord(currentTransferSlot);
-    if (!Array.isArray(record.logs)) record.logs = [];
-    record.logs.push({time: new Date().toLocaleTimeString(), message, level});
-    record.logs = record.logs.slice(-160);
-    saveTransferRealtimeRecords();
-    renderTransferRealtimeRecords();
+    const record = recordId ? findTransferRecord(recordId) : null;
+    if (record) {
+        if (!Array.isArray(record.logs)) record.logs = [];
+        record.logs.push({time: new Date().toLocaleTimeString(), message, level});
+        record.logs = record.logs.slice(-160);
+        saveTransferRealtimeRecords();
+        renderTransferRealtimeRecords();
+    }
     if (window.globalLogAppend) window.globalLogAppend(message, level);
 }
 
-function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时') {
+function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='') {
     const box = document.getElementById('transferLog');
     if ((!logs || !logs.length) && !jobData) return;
     const durationLine = jobDurationLine(jobData, runningLabel, doneLabel);
@@ -1129,24 +1158,26 @@ function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总
     lastRenderedLogKey = key;
     box.innerHTML = (logs || []).map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') + durationLine;
     box.scrollTop = box.scrollHeight;
-    updateTransferRealtimeRecord(currentTransferSlot, jobData || {}, logs || []);
+    if (recordId) updateTransferRealtimeRecord(recordId, jobData || {}, logs || []);
     if (logs && logs.length && window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
 }
 
-function startTransferPolling(slotId=currentTransferSlot, jobId=currentTransferJobId) {
+function startTransferPolling(slotId=currentTransferSlot, jobId=currentTransferJobId, recordId='') {
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(() => pollStatus(slotId, jobId), 1200);
-    pollStatus(slotId, jobId);
+    pollTimer = setInterval(() => pollStatus(slotId, jobId, recordId), 1200);
+    pollStatus(slotId, jobId, recordId);
 }
 
-async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId) {
+async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId, recordId='') {
     const params = new URLSearchParams({slot_id: slotId, job_id: jobId || ''});
     const res = await fetch('/api/crm/transfer/status?' + params.toString());
     const data = await res.json();
     if (data.job_id) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, data.job_id);
     if (slotId !== currentTransferSlot) return;
     if (data.job_id) currentTransferJobId = data.job_id;
-    renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时');
+    const activeRecord = findActiveTransferRecord(slotId, data.job_id || jobId || '');
+    const activeRecordId = recordId || (activeRecord && activeRecord.record_id) || '';
+    if (activeRecordId) renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时', activeRecordId);
     if (data.summary) renderSummary(data.summary);
     if (data.done) {
         clearInterval(pollTimer);
@@ -1170,7 +1201,9 @@ async function restoreTransferStatus() {
         sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, data.job_id);
     }
 
-    renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时');
+    const activeRecord = findActiveTransferRecord(slotId, data.job_id || currentTransferJobId || '');
+    const activeRecordId = activeRecord ? activeRecord.record_id : '';
+    if (activeRecordId) renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时', activeRecordId);
     if (data.summary) {
         renderSummary(data.summary);
         lastSummary = data.summary;
@@ -1180,7 +1213,7 @@ async function restoreTransferStatus() {
     if (data.running) {
         submitBtn.disabled = true;
         if (!pollTimer) {
-            startTransferPolling(slotId, currentTransferJobId);
+            startTransferPolling(slotId, currentTransferJobId, activeRecordId);
         }
         return true;
     }

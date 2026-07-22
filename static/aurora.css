@@ -611,6 +611,22 @@ body[data-aurora-page] #detailFrame {
 
 .aurora-realtime-head h2 { margin: 0 !important; padding: 0 !important; border: 0 !important; }
 .aurora-live-badge { padding: 4px 8px; border-radius: 999px; color: #9ff2ff; background: rgba(76, 207, 234, .10); border: 1px solid rgba(76, 207, 234, .20); font-size: 10px; letter-spacing: .06em; }
+.aurora-live-action,
+.aurora-row-action {
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 1px solid rgba(87, 227, 255, .22);
+    border-radius: 999px;
+    color: #aeeefa;
+    background: rgba(76, 207, 234, .08);
+    font-size: 11px;
+    font-weight: 800;
+    cursor: pointer;
+}
+.aurora-live-action:hover,
+.aurora-row-action:hover { border-color: rgba(87, 227, 255, .46); color: #e6fbff; background: rgba(76, 207, 234, .14); }
+.aurora-row-action.danger { color: #ff9caf; background: rgba(255, 112, 137, .09); border-color: rgba(255, 112, 137, .20); }
+.aurora-row-action.danger:hover { border-color: rgba(255, 112, 137, .48); background: rgba(255, 112, 137, .15); }
 .aurora-live-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--aurora-cyan); box-shadow: 0 0 9px rgba(95, 229, 255, .7); animation: aurora-pulse 1.5s ease-in-out infinite; }
 @keyframes aurora-pulse { 50% { opacity: .35; transform: scale(.78); } }
 .aurora-raw-log { display: none !important; }
@@ -632,6 +648,7 @@ body[data-aurora-page] #detailFrame {
 .aurora-transfer-table th:nth-child(3), .aurora-transfer-table td:nth-child(3) { width: 210px; }
 .aurora-transfer-table th:nth-child(4), .aurora-transfer-table td:nth-child(4) { width: 230px; }
 .aurora-transfer-table th:nth-child(6), .aurora-transfer-table td:nth-child(6) { width: 90px; }
+.aurora-transfer-table th:nth-child(7), .aurora-transfer-table td:nth-child(7) { width: 82px; text-align: right; }
 .aurora-channel-picker { position: relative; margin: 0 0 14px; padding: 10px 12px; color: #a5bbc9; background: rgba(4, 14, 26, .48); border: 1px solid var(--aurora-line); border-radius: 13px; }
 .aurora-channel-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .aurora-channel-picker strong { display: block; color: #d7edf4; font-size: 12px; }
