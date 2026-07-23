@@ -101,7 +101,9 @@
                 <input id="lookupInput" placeholder="输入条码、818ECD、800GPRO、EWD600S" inputmode="latin" lang="en" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="ime-mode:inactive" oninput="scheduleLookup()" onkeydown="if(event.key==='Enter')unifiedSearch()">
             </div>
             <button class="btn btn-primary" onclick="unifiedSearch()">搜索</button>
+            {% if can_online_query %}
             <button class="btn btn-secondary" onclick="confirmQueryBarcode()">在线查询</button>
+            {% endif %}
             <button class="btn btn-secondary" onclick="clearUnifiedSearch()">清空</button>
         </div>
         <div id="lookupBox" class="note">输入条码可识别机器；输入型号、产品名称或产品编码可查编码。在线查询需要输入完整条码。</div>
@@ -120,7 +122,8 @@
         <div class="log aurora-raw-log" id="queryLog" style="display:none" aria-hidden="true"></div>
     </div>
 
-    <div class="card" id="editCard" style="display:none">
+    {% if account and account.is_admin %}
+    <div class="card" id="editCard">
         <h2>条码匹配规则 <span class="muted" id="libraryCount">已有 0 条</span></h2>
         <div class="note">前缀默认是条码去掉最后 10 位。比如 162501010001 的默认产品前缀是 16。</div>
         <div class="library-form">
@@ -131,6 +134,7 @@
         </div>
         <div id="libraryBox"></div>
     </div>
+    {% endif %}
 </div>
 
 <script>
@@ -139,18 +143,21 @@ function escapeHtml(text) {
 }
 
 let productLibraryRows = [];
+const CAN_USE_ONLINE_QUERY = {{ 'true' if can_online_query else 'false' }};
 
 async function loadLibrary() {
     const res = await fetch('/api/product-library');
     const data = await res.json();
     const rows = data.products || [];
     productLibraryRows = rows;
-    document.getElementById('editCard').style.display = data.can_edit ? '' : 'none';
+    const editCard = document.getElementById('editCard');
+    if (editCard) editCard.style.display = data.can_edit ? '' : 'none';
     const accountStatus = document.getElementById('accountStatus');
     if (accountStatus) accountStatus.textContent = data.account ? data.account.username : '未登录';
     const libraryCount = document.getElementById('libraryCount');
     if (libraryCount) libraryCount.textContent = `已有 ${rows.length} 条`;
-    document.getElementById('libraryBox').innerHTML = `
+    const libraryBox = document.getElementById('libraryBox');
+    if (libraryBox) libraryBox.innerHTML = `
         <table>
             <thead><tr><th>前缀</th><th>产品编码</th><th>产品名称</th><th>来源条码</th><th>更新</th><th></th></tr></thead>
             <tbody>${rows.map(row => `
@@ -310,10 +317,18 @@ async function lookupBarcode(barcodeValue = '') {
             </div>`;
         return;
     }
+    if (!CAN_USE_ONLINE_QUERY) {
+        box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。当前可使用条码/型号本地搜索。`;
+        return;
+    }
     box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。是否立即查询该条码并自动补充条码匹配？ <button class="btn btn-primary" onclick="confirmQueryBarcode()">确认查询</button>`;
 }
 
 async function confirmQueryBarcode() {
+    if (!CAN_USE_ONLINE_QUERY) {
+        appendQueryLog('当前页面仅支持本地条码/型号搜索', 'warn');
+        return;
+    }
     const barcode = document.getElementById('lookupInput').value.trim();
     if (!barcode) return alert('请输入条码');
     if (!isLikelyBarcode(barcode)) {

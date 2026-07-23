@@ -6268,6 +6268,16 @@ def required_permission_for_path(path):
         return "crm"
     return None
 
+def is_public_product_library_request(path, method):
+    return (
+        method == "GET"
+        and (
+            path == "/product-library"
+            or path == "/api/product-library"
+            or path == "/api/product-library/lookup"
+        )
+    )
+
 @app.before_request
 def require_app_login():
     path = request.path
@@ -6278,6 +6288,8 @@ def require_app_login():
     if path.startswith("/api/accounts"):
         if not current_account():
             return jsonify({'success': False, 'error': '请先登录工具账号'}), 401
+        return None
+    if is_public_product_library_request(path, request.method):
         return None
 
     permission = required_permission_for_path(path)
@@ -7005,7 +7017,12 @@ def transfer_page():
 
 @app.route("/product-library")
 def product_library_page():
-    return render_template("product_library.html", nav_links=visible_page_links(), account=current_account_public())
+    return render_template(
+        "product_library.html",
+        nav_links=visible_page_links(),
+        account=current_account_public(),
+        can_online_query=account_has_permission("product-library"),
+    )
 
 @app.route("/accounts")
 def accounts_page():
