@@ -155,6 +155,32 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertEqual(service_filter["label"], "有无服务单")
         self.assertEqual(service_filter["options"], ["无服务单", "有服务单"])
 
+    def test_batch_stop_endpoint_marks_stop_requested(self):
+        client = app_module.app.test_client()
+        client.post("/api/app-auth/login", json={"username": "admin", "password": "88293529"})
+
+        with app_module.batch_job_lock:
+            job = app_module._empty_batch_job(slot_id="query-1", barcodes=["1", "2"])
+            job["running"] = True
+            app_module.batch_jobs[job["job_id"]] = job
+            app_module.latest_batch_job_by_slot["query-1"] = job["job_id"]
+            job_id = job["job_id"]
+
+        try:
+            response = client.post(
+                "/api/crm/batch/stop",
+                json={"slot_id": "query-1", "job_id": job_id, "kind": "query"},
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertTrue(payload["success"])
+            with app_module.batch_job_lock:
+                self.assertTrue(app_module.batch_jobs[job_id]["stop_requested"])
+        finally:
+            with app_module.batch_job_lock:
+                app_module.batch_jobs.pop(job_id, None)
+                app_module.latest_batch_job_by_slot.pop("query-1", None)
+
 
 if __name__ == "__main__":
     unittest.main()

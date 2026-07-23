@@ -179,7 +179,10 @@
         <div class="card aurora-realtime">
             <div class="aurora-realtime-head">
                 <h2>实时查询队列</h2>
-                <span class="aurora-live-badge" id="queryBatchSummary"><span class="aurora-live-dot"></span>完成:0/0　耗时:0h:0m:0s</span>
+                <div class="aurora-live-group">
+                    <span class="aurora-live-badge" id="queryBatchSummary"><span class="aurora-live-dot"></span>完成:0/0 失败:0 耗时:0h:0m:0s</span>
+                    <button type="button" class="aurora-live-action" id="retryFailedBarcodesBtn" onclick="retryFailedBarcodes()" hidden>失败条码重查</button>
+                </div>
             </div>
             <div class="aurora-query-table-wrap">
                 <table class="aurora-query-table">
@@ -578,7 +581,12 @@
                     Number(multiBatchJobs.completed || 0),
                     terminalQueryItemCount(multiBatchJobs.items)
                 );
+                const failedItems = (multiBatchJobs && Array.isArray(multiBatchJobs.failedBarcodes)) ? multiBatchJobs.failedBarcodes.length : 0;
+                const failedCount = Number(multiBatchJobs.failedCount || failedItems || 0);
                 return {
+                    total,
+                    failed: failedCount,
+                    failedBarcodes: failedItems,
                     completed: Math.min(total, completed),
                     total,
                     elapsedSeconds: Number.isFinite(startedAtMs) && startedAtMs > 0
@@ -589,6 +597,8 @@
             return {
                 completed: Number(lastQuerySummary.completed || 0),
                 total: Number(lastQuerySummary.total || 0),
+                failed: Number(lastQuerySummary.failed || 0),
+                failedBarcodes: Number(lastQuerySummary.failedBarcodes || 0),
                 elapsedSeconds: Number(lastQuerySummary.elapsedSeconds || 0)
             };
         }
@@ -597,13 +607,24 @@
             const target = document.getElementById('queryBatchSummary');
             if (!target) return;
             const summary = queryBatchSummarySnapshot();
-            target.innerHTML = `<span class="aurora-live-dot"></span>完成:${summary.completed}/${summary.total}　耗时:${formatBatchElapsed(summary.elapsedSeconds)}`;
+            target.innerHTML = `<span class="aurora-live-dot"></span>完成:${summary.completed}/${summary.total} 失败:${summary.failed || 0} 耗时:${formatBatchElapsed(summary.elapsedSeconds)}`;
+            const retryBtn = document.getElementById('retryFailedBarcodesBtn');
+            if (retryBtn) {
+                const failedList = (multiBatchJobs && Array.isArray(multiBatchJobs.failedBarcodes))
+                    ? multiBatchJobs.failedBarcodes
+                    : (lastQuerySummary && Array.isArray(lastQuerySummary.failedBarcodesList) ? lastQuerySummary.failedBarcodesList : []);
+                const uniqueFailed = Array.from(new Set(failedList || []));
+                const shouldShow = uniqueFailed.length > 0 && !isBatchRunning && !isMultiBatchRunning;
+                retryBtn.hidden = !shouldShow;
+                retryBtn.textContent = uniqueFailed.length ? `失败条码重查 (${uniqueFailed.length})` : '失败条码重查';
+            }
         }
 
         function captureLastQuerySummary() {
             if (!multiBatchJobs || !multiBatchJobs.total) return;
             if (!multiBatchJobs.finishedAtMs) multiBatchJobs.finishedAtMs = Date.now();
             lastQuerySummary = queryBatchSummarySnapshot();
+            lastQuerySummary.failedBarcodesList = Array.from(new Set(multiBatchJobs.failedBarcodes || []));
             sessionStorage.setItem('crm_last_query_summary', JSON.stringify(lastQuerySummary));
             renderQueryBatchSummary();
         }
@@ -1139,11 +1160,27 @@
 
         async function doBatchQuery() {
             if (isBatchRunning || batchStartPending || isMultiBatchRunning) { showToast('批量查询进行中'); return; }
+            await clearAllWorkerStopFlags();
             const uniqueBarcodes = getUniqueBarcodesFromInput();
             if (uniqueBarcodes.length === 0) { showToast('没有有效条码'); return; }
 
             if (isBatchRunning || batchStartPending || isMultiBatchRunning) { showToast('批量查询进行中'); return; }
             doMultiBatchQuery(uniqueBarcodes);
+        }
+
+        async function clearAllWorkerStopFlags() {
+            if (typeof querySlots === 'undefined' || !Array.isArray(querySlots)) return;
+            await Promise.all(querySlots.map(async (slot) => {
+                try {
+                    const resp = await fetch('/api/crm/clear-stop', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({slot_id: slot.id, kind: 'query'})
+                    });
+                    if (!resp.ok) return;
+                    await resp.json();
+                } catch (e) {}
+            }));
         }
 
         async function doMultiBatchQuery(uniqueBarcodes) {
@@ -1457,6 +1494,36 @@
                 return;
             }
             showToast('当前没有正在查询的任务');
+        }
+
+        async function startBatchQuery() {
+            if (typeof doBatchQuery === 'function') {
+                return doBatchQuery();
+            }
+            log('未找到多线程查询入口，无法启动', 'error');
+        }
+
+        async function retryFailedBarcodes() {
+            if (isBatchRunning || isMultiBatchRunning) {
+                showToast('请先等待当前查询结束');
+                return;
+            }
+            const storedSource = (multiBatchJobs && Array.isArray(multiBatchJobs.failedBarcodes))
+                ? multiBatchJobs.failedBarcodes
+                : (lastQuerySummary && Array.isArray(lastQuerySummary.failedBarcodesList) ? lastQuerySummary.failedBarcodesList : []);
+            const failedBarcodes = Array.from(new Set((storedSource || []).filter(Boolean)));
+            if (!failedBarcodes.length) {
+                showToast('当前没有失败条码可重查');
+                return;
+            }
+            document.getElementById('batchInput').value = failedBarcodes.join('\n');
+            saveQueryInput();
+            log(`已将 ${failedBarcodes.length} 个失败条码填入并自动开始查询`, 'warn');
+            try {
+                await startBatchQuery();
+            } catch (e) {
+                showToast('重新排队失败：' + (e && e.message ? e.message : e));
+            }
         }
 
         restoreMultiBatchJobs();

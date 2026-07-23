@@ -115,6 +115,25 @@ class CRMSession:
         self.needs_navigation = True  # 标记是否需要导航到报表页面
         self.last_report_error = ""
         self.report_last_used_at = 0
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
+
+    def clear_stop(self):
+        try:
+            self._stop_event.clear()
+        except Exception:
+            pass
+
+    def is_stop_requested(self):
+        try:
+            return self._stop_event.is_set()
+        except Exception:
+            return False
 
     def _browser_crash_message(self):
         return "CRM 浏览器页面已崩溃，已自动关闭当前会话，请重新登录 CRM 后再操作"
@@ -1376,6 +1395,9 @@ class CRMSession:
 
                 has_loading = False
                 for _ in range(30):
+                    if self.is_stop_requested():
+                        emit("收到停止信号，提前结束等待", 'warn')
+                        return False, "查询已被用户停止"
                     try:
                         imgs = self.page.query_selector_all("img")
                         has_loading = False
@@ -3239,8 +3261,31 @@ class CRMWorker:
         self.remembered_logged_in_cache = _slot_remembered_logged_in(slot_id)
         self.logged_in_cache = False
         self.current_task = ""
+        self.stop_requested = False
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
+
+    def request_stop(self):
+        with self.state_lock:
+            self.stop_requested = True
+        try:
+            with self.session.lock:
+                self.session.request_stop()
+        except Exception:
+            pass
+
+    def clear_stop(self):
+        with self.state_lock:
+            self.stop_requested = False
+        try:
+            with self.session.lock:
+                self.session.clear_stop()
+        except Exception:
+            pass
+
+    def is_stop_requested(self):
+        with self.state_lock:
+            return self.stop_requested
 
     def _update_state(self, session):
         try:
@@ -4522,60 +4567,63 @@ def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIM
 
         success = False
         result = ""
-        attempts = retry_limit + 1
-        for attempt in range(1, attempts + 1):
-            if _batch_stop_requested(job_id, idx):
-                return
-            if attempt == 1:
-                _batch_job_log(job_id, f"正在查询第 {idx}/{len(barcodes)} 个：{barcode}", 'info')
-            else:
-                _batch_job_log(job_id, f"{barcode} 第 {attempt - 1}/{retry_limit} 次重试中...", 'warn')
+    attempts = retry_limit + 1
+    for attempt in range(1, attempts + 1):
+        if _batch_stop_requested(job_id, idx):
+            return
+        if worker.is_stop_requested():
+            _batch_job_log(job_id, f"收到停止信号，已中止第 {idx}/{len(barcodes)} 个", 'warn')
+            return
+        if attempt == 1:
+            _batch_job_log(job_id, f"正在查询第 {idx}/{len(barcodes)} 个：{barcode}", 'info')
+        else:
+            _batch_job_log(job_id, f"{barcode} 第 {attempt - 1}/{retry_limit} 次重试中...", 'warn')
 
-            success, result = worker.query_barcode(barcode, lambda msg, level='dim': _batch_job_log(job_id, msg, level))
-            if success:
-                break
+        success, result = worker.query_barcode(barcode, lambda msg, level='dim': _batch_job_log(job_id, msg, level))
+        if success:
+            break
 
-            if attempt <= retry_limit:
-                _batch_job_log(
-                    job_id,
-                    f"{barcode} 查询失败，将重试 {attempt}/{retry_limit}: {_brief_batch_error(result)}",
-                    'warn'
-                )
-                time.sleep(2)
+        if attempt <= retry_limit:
+            _batch_job_log(
+                job_id,
+                f"{barcode} 查询失败，将重试 {attempt}/{retry_limit}: {_brief_batch_error(result)}",
+                'warn'
+            )
+            time.sleep(2)
 
-        with batch_job_lock:
-            job = batch_jobs.get(job_id)
-            if not job:
-                return
-            if success:
-                update_barcode_query_slot(barcode, job.get('slot_id') or worker.slot_id)
-                job['success'] += 1
-                job['results'].append({
-                    'barcode': barcode,
-                    'success': True,
-                    'attempts': attempt,
-                    'view_url': f'/barcode/{barcode}.html',
-                })
-                _append_job_log_unlocked(
-                    job,
-                    f"✓ {barcode} 查询成功" + (f"（重试第 {attempt - 1} 次）" if attempt > 1 else ""),
-                    'success',
-                    BATCH_LOG_LIMIT
-                )
-            else:
-                job['failed'] += 1
-                job['results'].append({
-                    'barcode': barcode,
-                    'success': False,
-                    'attempts': attempts,
-                    'error': _brief_batch_error(result),
-                })
-                _append_job_log_unlocked(
-                    job,
-                    f"✗ {barcode} 查询失败（已重试 {retry_limit} 次）: {_brief_batch_error(result)}",
-                    'error',
-                    BATCH_LOG_LIMIT
-                )
+    with batch_job_lock:
+        job = batch_jobs.get(job_id)
+        if not job:
+            return
+        if success:
+            update_barcode_query_slot(barcode, job.get('slot_id') or worker.slot_id)
+            job['success'] += 1
+            job['results'].append({
+                'barcode': barcode,
+                'success': True,
+                'attempts': attempt,
+                'view_url': f'/barcode/{barcode}.html',
+            })
+            _append_job_log_unlocked(
+                job,
+                f"✓ {barcode} 查询成功" + (f"（重试第 {attempt - 1} 次）" if attempt > 1 else ""),
+                'success',
+                BATCH_LOG_LIMIT
+            )
+        else:
+            job['failed'] += 1
+            job['results'].append({
+                'barcode': barcode,
+                'success': False,
+                'attempts': attempts,
+                'error': _brief_batch_error(result),
+            })
+            _append_job_log_unlocked(
+                job,
+                f"✗ {barcode} 查询失败（已重试 {retry_limit} 次）: {_brief_batch_error(result)}",
+                'error',
+                BATCH_LOG_LIMIT
+            )
 
     with batch_job_lock:
         job = batch_jobs.get(job_id)
@@ -7591,8 +7639,24 @@ def api_crm_batch_stop():
         job = batch_jobs.get(job_id)
         if job and job['running']:
             job['stop_requested'] = True
+            try:
+                worker = crm_pool.get(job.get('slot_id') or slot_id, 'query')
+                worker.request_stop()
+            except Exception:
+                pass
             return jsonify({'success': True, 'job_id': job_id, 'slot_id': slot_id})
     return jsonify({'success': False, 'error': '没有正在运行的批量查询'})
+
+@app.route("/api/crm/clear-stop", methods=["POST"])
+def api_crm_clear_stop():
+    data = request.get_json(silent=True) or {}
+    slot_id = crm_pool.normalize_slot(data.get("slot_id"), data.get("kind") or "query")
+    try:
+        worker = crm_pool.get(slot_id, data.get("kind") or "query")
+        worker.clear_stop()
+    except Exception:
+        pass
+    return jsonify({'success': True, 'slot_id': slot_id})
 
 if __name__ == "__main__":
     print("=" * 60)

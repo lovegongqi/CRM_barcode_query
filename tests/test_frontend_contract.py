@@ -465,6 +465,15 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertIn(label, source)
         self.assertIn("getServicePresenceStatus", source)
 
+    def test_query_summary_includes_failure_count_and_requeue_button(self):
+        source = self.source("crm.html")
+        self.assertIn('id="queryBatchSummary"', source)
+        self.assertIn('id="retryFailedBarcodesBtn"', source)
+        self.assertIn("retryFailedBarcodes()", source)
+        self.assertIn("multiBatchJobs.failedBarcodes", source)
+        self.assertIn("失败条码填入并自动开始查询", source)
+        self.assertIn("formatBatchElapsed", source)
+
     def test_results_page_omits_legacy_file_storage_footer(self):
         source = self.source("index.html")
         self.assertNotIn("查询结果文件保存在 barcode/ 目录下", source)
