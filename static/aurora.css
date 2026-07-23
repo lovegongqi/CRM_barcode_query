@@ -643,12 +643,25 @@ body[data-aurora-page] #detailFrame {
 .aurora-log-preview { width: 100%; min-width: 0; min-height: 30px; padding: 5px 9px; display: block; overflow: hidden; color: #aeeefa; background: rgba(62, 198, 230, .07); border: 1px solid rgba(87, 227, 255, .12); border-radius: 8px; cursor: pointer; font-size: 11px; line-height: 18px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .aurora-log-preview:hover, .aurora-log-preview:focus-visible { color: #e1fbff; border-color: rgba(87, 227, 255, .48); background: rgba(62, 198, 230, .13); outline: none; }
 .aurora-transfer-table code { color: #dcf7ff; font: 11px/1.4 "SFMono-Regular", Consolas, monospace; }
+.aurora-transfer-table { width: 100%; min-width: 980px; table-layout: fixed; }
 .aurora-transfer-table th:first-child, .aurora-transfer-table td:first-child { width: 48px; text-align: center; }
 .aurora-transfer-table th:nth-child(2), .aurora-transfer-table td:nth-child(2) { width: 120px; }
 .aurora-transfer-table th:nth-child(3), .aurora-transfer-table td:nth-child(3) { width: 210px; }
-.aurora-transfer-table th:nth-child(4), .aurora-transfer-table td:nth-child(4) { width: 230px; }
+.aurora-transfer-table th:nth-child(4), .aurora-transfer-table td:nth-child(4) { width: auto; min-width: 0; }
+.aurora-transfer-table th:nth-child(5), .aurora-transfer-table td:nth-child(5) { width: 180px; }
 .aurora-transfer-table th:nth-child(6), .aurora-transfer-table td:nth-child(6) { width: 90px; }
 .aurora-transfer-table th:nth-child(7), .aurora-transfer-table td:nth-child(7) { width: 82px; text-align: right; }
+body[data-aurora-page="transfer"] .summary,
+body[data-aurora-page="transfer"] .note,
+body[data-aurora-page="transfer"] .login-modal {
+    color: var(--aurora-text);
+    background: linear-gradient(145deg, rgba(15, 31, 52, .96), rgba(8, 18, 32, .96)) !important;
+    border-color: var(--aurora-line) !important;
+}
+body[data-aurora-page="transfer"] .login-modal-head { border-bottom-color: rgba(139, 190, 220, .12) !important; }
+body[data-aurora-page="transfer"] .summary table,
+body[data-aurora-page="transfer"] .summary th,
+body[data-aurora-page="transfer"] .summary td { background: transparent !important; }
 .aurora-channel-picker { position: relative; margin: 0 0 14px; padding: 10px 12px; color: #a5bbc9; background: rgba(4, 14, 26, .48); border: 1px solid var(--aurora-line); border-radius: 13px; }
 .aurora-channel-heading { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .aurora-channel-picker strong { display: block; color: #d7edf4; font-size: 12px; }
@@ -986,6 +999,39 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
 
     body[data-aurora-page="transfer"] .grid { grid-template-columns: minmax(0, 1fr); }
     body[data-aurora-page="transfer"] .grid > div { min-width: 0; }
+    body[data-aurora-page="transfer"] .card,
+    body[data-aurora-page="transfer"] .card-head,
+    body[data-aurora-page="transfer"] .fields,
+    body[data-aurora-page="transfer"] .actions,
+    body[data-aurora-page="transfer"] textarea { min-width: 0; max-width: 100%; }
+    body[data-aurora-page="transfer"] .slot-tabs {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+    }
+    body[data-aurora-page="transfer"] .slot-tab {
+        width: 100%;
+        min-width: 0;
+        padding: 7px 5px;
+        font-size: 11px;
+    }
+    body[data-aurora-page="transfer"] .actions {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 7px;
+    }
+    body[data-aurora-page="transfer"] .actions .btn {
+        width: 100%;
+        min-width: 0;
+        padding: 7px 4px;
+        font-size: 11px;
+        white-space: nowrap;
+    }
+    body[data-aurora-page="transfer"] .aurora-realtime {
+        height: min(54vh, 520px);
+        min-height: 360px;
+        max-height: 520px;
+    }
 
     body[data-aurora-page="settings"] .settings-primary-grid { grid-template-columns: 1fr; gap: 10px; }
     body[data-aurora-page="settings"] #runtimeConfigCard,
@@ -996,7 +1042,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     .aurora-log-panel { max-height: 82vh; border-radius: 20px 20px 14px 14px; }
     .aurora-channel-mobile-menu { width: min(290px, calc(100% - 20px)); max-height: 320px; }
     .aurora-query-table { min-width: 1000px; }
-    .aurora-transfer-table { min-width: 720px; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table { min-width: 680px; }
     .aurora-library-query-table { min-width: 620px; }
     .aurora-results-grid-head { display: none !important; }
     body[data-aurora-page="results"] .aurora-results-grid {

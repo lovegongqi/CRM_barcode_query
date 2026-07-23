@@ -229,6 +229,26 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="transfer"\] \.grid > div\s*\{[^}]*min-width:\s*0',
         )
 
+    def test_transfer_mobile_controls_and_table_stay_within_the_page(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.slot-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.actions\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.aurora-transfer-table\s*\{[^}]*min-width:\s*680px',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="transfer"\] \.aurora-realtime\s*\{[^}]*max-height:\s*520px',
+        )
+
     def test_desktop_navigation_sits_below_the_page_title(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn("--aurora-nav-height:", css)
