@@ -145,6 +145,16 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertIn(b'id="accountEditCard"', response.data)
         self.assertIn(b'id="accountListCard"', response.data)
 
+    def test_filter_options_include_service_order_presence(self):
+        filters = app_module.get_filter_options([
+            {"fields": {"sr2": [{"servno1": "FW202607230001"}]}},
+            {"fields": {"sr2": [{}]}},
+        ])
+
+        service_filter = filters["has_service_sr2"]
+        self.assertEqual(service_filter["label"], "有无服务单")
+        self.assertEqual(service_filter["options"], ["无服务单", "有服务单"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -457,11 +457,13 @@ class FrontendContractTest(unittest.TestCase):
             "归属经销商",
             "服务经销商",
             "是否结单",
+            "有无服务单",
             "查询日期",
             "客户姓名",
         ):
             with self.subTest(label=label):
                 self.assertIn(label, source)
+        self.assertIn("getServicePresenceStatus", source)
 
     def test_results_page_omits_legacy_file_storage_footer(self):
         source = self.source("index.html")

@@ -4864,6 +4864,7 @@ FILTER_FIELDS = {
     'myproductdealer1_sr5': '归属经销商',
     'newdealername1_sr2': '服务经销商',
     'newisclosed1_sr2': '是否结单',
+    'has_service_sr2': '有无服务单',
 }
 
 SUBREPORT_NAMES = {
@@ -5133,10 +5134,17 @@ def _service_closed_filter_value(fields):
     records = sub if isinstance(sub, list) else ([sub] if isinstance(sub, dict) else [])
     return '已结单' if any((row or {}).get('newisclosed1') == '已结单' for row in records) else '未结单'
 
+def _service_presence_filter_value(fields):
+    sub = (fields or {}).get('sr2', {})
+    records = sub if isinstance(sub, list) else ([sub] if isinstance(sub, dict) else [])
+    return '有服务单' if any(_clean_export_value((row or {}).get('servno1')) for row in records) else '无服务单'
+
 def _get_filter_value(item, field_id):
     fields = item.get('fields') or {}
     if field_id == 'newisclosed1_sr2':
         return _service_closed_filter_value(fields)
+    if field_id == 'has_service_sr2':
+        return _service_presence_filter_value(fields)
     m = re.search(r'_sr(\d+)$', field_id)
     if m:
         sr_key = f"sr{m.group(1)}"

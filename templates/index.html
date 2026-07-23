@@ -1257,7 +1257,7 @@
                     <span>条件筛选</span>
                     <span>支持多选联动</span>
                 </div>
-                <div class="filter-area" id="filterArea" data-filter-labels="归属经销商,服务经销商,是否结单"></div>
+                <div class="filter-area" id="filterArea" data-filter-labels="归属经销商,服务经销商,是否结单,有无服务单"></div>
 
                 <div class="date-filter-row">
                     <label>查询日期</label>
@@ -1539,6 +1539,7 @@
         function getFilterFieldValue(item, fieldId) {
             if (fieldId === 'querySlotLabel') return (item && item.querySlotLabel ? String(item.querySlotLabel).trim() : '');
             if (fieldId === 'newisclosed1_sr2') return getServiceClosedStatus((item && item.fields) || {});
+            if (fieldId === 'has_service_sr2') return getServicePresenceStatus((item && item.fields) || {});
             return gfFields((item && item.fields) || {}, fieldId);
         }
 
@@ -1546,6 +1547,12 @@
             const sr2 = fields['sr2'];
             const rows = Array.isArray(sr2) ? sr2 : (sr2 ? [sr2] : []);
             return rows.some(row => row && row['newisclosed1'] === '已结单') ? '已结单' : '未结单';
+        }
+
+        function getServicePresenceStatus(fields) {
+            const sr2 = fields['sr2'];
+            const rows = Array.isArray(sr2) ? sr2 : (sr2 ? [sr2] : []);
+            return rows.some(row => row && String(row['servno1'] || '').trim()) ? '有服务单' : '无服务单';
         }
 
         function gfFields(fields, fieldId) {
