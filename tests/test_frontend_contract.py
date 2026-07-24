@@ -542,6 +542,19 @@ class FrontendContractTest(unittest.TestCase):
             r'onclick="deleteTransferRealtimeRecord\(\'\$\{escapeHtml\(record\.record_id\)\}\'\)"',
         )
 
+    def test_transfer_realtime_status_uses_latest_log_while_running(self):
+        source = self.source("transfer.html")
+
+        self.assertIn("function latestTransferLogMessage(logs)", source)
+        self.assertIn(
+            "const latestLogMessage = latestTransferLogMessage(record.logs);",
+            source,
+        )
+        self.assertIn(
+            "latestLogMessage || jobData.message || '正在生成 CRM 移库单'",
+            source,
+        )
+
     def test_transfer_slot_tabs_use_dark_glass_theme(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn('body[data-aurora-page="transfer"] .slot-tab {', css)

@@ -364,10 +364,20 @@ function saveTransferRealtimeRecords() {
     sessionStorage.setItem(TRANSFER_REALTIME_STORAGE_KEY, JSON.stringify(transferRealtimeRecords));
 }
 
+function latestTransferLogMessage(logs) {
+    const rows = Array.isArray(logs) ? logs : [];
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+        const message = String(rows[index]?.message || '').trim();
+        if (message) return message;
+    }
+    return '';
+}
+
 function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     const record = findTransferRecord(recordId);
     if (!record) return;
     record.logs = Array.isArray(logs) ? logs.slice(-160) : record.logs;
+    const latestLogMessage = latestTransferLogMessage(record.logs);
     record.job_id = jobData.job_id || record.job_id;
     record.started_at = jobData.started_at || record.started_at;
     record.finished_at = jobData.finished_at || record.finished_at;
@@ -375,7 +385,7 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     record.order_no = jobData.order_no || (jobData.result && jobData.result.order_no) || record.order_no || '';
     if ('transfer_success' in jobData) {
         record.state = jobData.running ? 'running' : (jobData.done ? (jobData.transfer_success ? 'success' : 'error') : 'waiting');
-        record.status = jobData.running ? '正在生成 CRM 移库单' : (jobData.done ? (jobData.transfer_success ? '移库成功' : '移库失败') : '等待处理');
+        record.status = jobData.running ? (latestLogMessage || jobData.message || '正在生成 CRM 移库单') : (jobData.done ? (jobData.transfer_success ? '移库成功' : '移库失败') : '等待处理');
     } else if (jobData.running) {
         record.state = 'running';
         record.status = '正在汇总核对';
