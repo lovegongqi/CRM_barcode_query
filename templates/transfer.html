@@ -372,7 +372,7 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     record.started_at = jobData.started_at || record.started_at;
     record.finished_at = jobData.finished_at || record.finished_at;
     record.distributor = (jobData.transfer && jobData.transfer.distributor) || record.distributor || document.getElementById('transferDistributor')?.value.trim() || '';
-    record.order_no = (jobData.result && jobData.result.order_no) || record.order_no || '';
+    record.order_no = jobData.order_no || (jobData.result && jobData.result.order_no) || record.order_no || '';
     if ('transfer_success' in jobData) {
         record.state = jobData.running ? 'running' : (jobData.done ? (jobData.transfer_success ? 'success' : 'error') : 'waiting');
         record.status = jobData.running ? '正在生成 CRM 移库单' : (jobData.done ? (jobData.transfer_success ? '移库成功' : '移库失败') : '等待处理');
@@ -386,6 +386,7 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     if (record.finished_at) record.elapsed = transferElapsed(record);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
+    refreshTransferChannelLog(record);
 }
 
 function renderTransferRealtimeRecords() {
@@ -419,6 +420,16 @@ function openTransferChannelLog(recordId) {
     const record = findTransferRecord(recordId);
     if (!record) return;
     openAuroraLog(`${record.slot_label || record.slot_id} 移库日志`, record.logs || [], {
+        '移库单号': record.order_no || '尚未生成',
+        '实时状态': record.status,
+        '目标分销商': record.distributor || '—',
+        '耗时': transferElapsed(record) ? jobDurationText(transferElapsed(record)) : '—'
+    }, '通道完整移库日志', `transfer:${record.record_id}`);
+}
+
+function refreshTransferChannelLog(record) {
+    if (!record || !window.refreshAuroraLog) return;
+    refreshAuroraLog(`transfer:${record.record_id}`, `${record.slot_label || record.slot_id} 移库日志`, record.logs || [], {
         '移库单号': record.order_no || '尚未生成',
         '实时状态': record.status,
         '目标分销商': record.distributor || '—',

@@ -66,8 +66,7 @@
         };
     }
 
-    window.openAuroraLog = function (title, logs, meta, subtitle) {
-        const dialog = ensureDialog();
+    function renderAuroraLog(dialog, title, logs, meta, subtitle) {
         const rows = Array.isArray(logs) ? logs : (logs ? [logs] : []);
         document.getElementById('auroraLogTitle').textContent = title || '详细日志';
         document.getElementById('auroraLogSubtitle').textContent = subtitle || '实时任务时间线';
@@ -80,15 +79,30 @@
                 const level = ['success', 'warn', 'error'].includes(row.level) ? row.level : '';
                 return `<div class="aurora-log-line ${level}"><span class="aurora-log-time">${escapeHtml(row.time)}</span>${escapeHtml(row.message)}</div>`;
             }).join('');
+    }
+
+    window.openAuroraLog = function (title, logs, meta, subtitle, liveKey='') {
+        const dialog = ensureDialog();
+        dialog.dataset.liveKey = String(liveKey || '');
+        renderAuroraLog(dialog, title, logs, meta, subtitle);
         dialog.classList.add('show');
         document.body.style.overflow = 'hidden';
         dialog.querySelector('.aurora-log-close').focus();
+    };
+
+    window.refreshAuroraLog = function (liveKey, title, logs, meta, subtitle) {
+        const dialog = document.getElementById('auroraLogDialog');
+        if (!dialog || !dialog.classList.contains('show')) return false;
+        if (dialog.dataset.liveKey !== String(liveKey || '')) return false;
+        renderAuroraLog(dialog, title, logs, meta, subtitle);
+        return true;
     };
 
     window.closeAuroraLog = function () {
         const dialog = document.getElementById('auroraLogDialog');
         if (!dialog) return;
         dialog.classList.remove('show');
+        dialog.dataset.liveKey = '';
         document.body.style.overflow = '';
     };
 

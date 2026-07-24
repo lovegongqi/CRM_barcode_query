@@ -523,6 +523,20 @@
             return {label: '等待查询', className: 'warn'};
         }
 
+        function queryItemLogKey(item) {
+            return `query:${item.order || 0}:${item.barcode || ''}`;
+        }
+
+        function queryItemLogMeta(item) {
+            const queryState = queryStatePresentation(item);
+            return {
+                '查询通道': item.slot_label || '自动调度',
+                '查询状态': queryState.label,
+                '重试次数': item.retries || 0,
+                '耗时': item.elapsed ? formatDuration(item.elapsed) : '进行中'
+            };
+        }
+
         function renderQueryRealtime(statusText='') {
             const body = document.getElementById('queryRealtimeRows');
             if (!body) return;
@@ -546,18 +560,27 @@
                     <td>${elapsed ? escapeHtml(formatDuration(elapsed)) : '—'}</td>
                 </tr>`;
             }).join('');
+            if (window.refreshAuroraLog) {
+                items.forEach(item => refreshAuroraLog(
+                    queryItemLogKey(item),
+                    `条码 ${item.barcode}`,
+                    item.logs || [],
+                    queryItemLogMeta(item),
+                    '条码完整查询日志'
+                ));
+            }
         }
 
         function openQueryItemLog(index) {
             const item = queryDisplayItems()[index];
             if (!item) return;
-            const queryState = queryStatePresentation(item);
-            openAuroraLog(`条码 ${item.barcode}`, item.logs || [], {
-                '查询通道': item.slot_label || '自动调度',
-                '查询状态': queryState.label,
-                '重试次数': item.retries || 0,
-                '耗时': item.elapsed ? formatDuration(item.elapsed) : '进行中'
-            }, '条码完整查询日志');
+            openAuroraLog(
+                `条码 ${item.barcode}`,
+                item.logs || [],
+                queryItemLogMeta(item),
+                '条码完整查询日志',
+                queryItemLogKey(item)
+            );
         }
 
         function formatBatchElapsed(seconds) {

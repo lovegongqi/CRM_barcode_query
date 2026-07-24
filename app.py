@@ -9,6 +9,7 @@ os.environ['ASYNCIO_CORE_EVENT_LOOP'] = '0'
 
 import re
 import json
+import sqlite3
 import time
 import builtins
 import html as html_mod
@@ -3145,7 +3146,7 @@ class CRMSession:
 
         return False, last_msg or "确认后未检测到成功提示，且确认按钮仍存在"
 
-    def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None):
+    def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         def emit(message, level='info'):
             if log:
                 log(message, level)
@@ -3182,6 +3183,8 @@ class CRMSession:
                 if not ok:
                     return fail(result)
                 order_no = result
+                if progress:
+                    progress(order_no=order_no)
                 emit(f"移库单已保存：{order_no}", "success")
 
                 added_products = []
@@ -3392,8 +3395,8 @@ class CRMWorker:
     def close_idle_report_tabs(self, idle_seconds=REPORT_IDLE_TIMEOUT_SECONDS):
         return self._call("close_idle_report_tabs", idle_seconds)
 
-    def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None):
-        return self._call("create_transfer", summary, distributor, transfer_type, remark, log)
+    def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
+        return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
 
     def shutdown(self):
         try:
@@ -3717,6 +3720,7 @@ def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_typ
         'done': False,
         'success': False,
         'error': '',
+        'order_no': '',
         'result': None,
         'summary': summary,
         'distributor': distributor,
@@ -4291,9 +4295,17 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
     def log(message, level='dim'):
         _transfer_job_log(job_id, message, level)
 
+    def progress(order_no=''):
+        if not order_no:
+            return
+        with transfer_job_lock:
+            job = transfer_jobs.get(job_id)
+            if job:
+                job['order_no'] = str(order_no).strip()
+
     log(f"开始提交移库：{transfer_type}，分销商 {distributor}", 'info')
     try:
-        success, result = worker.create_transfer(summary, distributor, transfer_type, remark, log)
+        success, result = worker.create_transfer(summary, distributor, transfer_type, remark, log, progress)
         with transfer_job_lock:
             job = transfer_jobs.get(job_id)
             if not job:
@@ -4304,6 +4316,8 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
             job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             if success:
                 job['result'] = result
+                if isinstance(result, dict) and result.get('order_no'):
+                    job['order_no'] = result['order_no']
                 job['error'] = ''
             else:
                 job['error'] = _brief_batch_error(result, 800)
@@ -5238,7 +5252,15 @@ def product_prefix_from_barcode(barcode):
         return barcode[:-10]
     return barcode[:2]
 
-def load_product_library():
+product_library_lock = threading.RLock()
+PRODUCT_LIBRARY_MIGRATION_KEY = 'legacy_json_migrated'
+
+
+def _product_library_db_file():
+    return os.path.join(CONFIG_DIR, 'product_library.sqlite3')
+
+
+def _load_legacy_product_library():
     if os.path.exists(PRODUCT_LIBRARY_FILE):
         try:
             with open(PRODUCT_LIBRARY_FILE, 'r', encoding='utf-8') as f:
@@ -5248,10 +5270,119 @@ def load_product_library():
             pass
     return {}
 
-def save_product_library(data):
+
+def _product_library_rows(data):
+    rows = []
+    for stored_prefix, item in (data or {}).items():
+        item = item if isinstance(item, dict) else {}
+        prefix = _clean_export_value(item.get('prefix') or stored_prefix)
+        product_code = _clean_export_value(item.get('product_code'))
+        product_name = _clean_export_value(item.get('product_name'))
+        if not prefix or not product_code or not product_name:
+            continue
+        rows.append((
+            prefix,
+            product_code,
+            product_name,
+            _clean_export_value(item.get('source_barcode')),
+            _clean_export_value(item.get('updated_at'))
+            or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        ))
+    return rows
+
+
+def _connect_product_library_db():
     os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(PRODUCT_LIBRARY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    return sqlite3.connect(_product_library_db_file())
+
+
+def _ensure_product_library_db(conn):
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library (
+            prefix TEXT PRIMARY KEY,
+            product_code TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            source_barcode TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS product_library_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+    migrated = conn.execute(
+        "SELECT value FROM product_library_meta WHERE key = ?",
+        (PRODUCT_LIBRARY_MIGRATION_KEY,),
+    ).fetchone()
+    if not migrated:
+        rows = _product_library_rows(_load_legacy_product_library())
+        if rows:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO product_library
+                (prefix, product_code, product_name, source_barcode, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        conn.execute(
+            "INSERT INTO product_library_meta (key, value) VALUES (?, ?)",
+            (PRODUCT_LIBRARY_MIGRATION_KEY, datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+        )
+    conn.commit()
+
+
+def load_product_library():
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            rows = conn.execute(
+                """
+                SELECT prefix, product_code, product_name, source_barcode, updated_at
+                FROM product_library
+                """
+            ).fetchall()
+            return {
+                prefix: {
+                    'prefix': prefix,
+                    'product_code': product_code,
+                    'product_name': product_name,
+                    'source_barcode': source_barcode,
+                    'updated_at': updated_at,
+                }
+                for prefix, product_code, product_name, source_barcode, updated_at in rows
+            }
+        finally:
+            conn.close()
+
+
+def save_product_library(data):
+    rows = _product_library_rows(data)
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            conn.execute("DELETE FROM product_library")
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO product_library
+                    (prefix, product_code, product_name, source_barcode, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
 
 def upsert_product_library(prefix, product_code, product_name, source_barcode=""):
     prefix = _clean_export_value(prefix)
@@ -5259,16 +5390,51 @@ def upsert_product_library(prefix, product_code, product_name, source_barcode=""
     product_name = _clean_export_value(product_name)
     if not prefix or not product_code or not product_name:
         return False
-    data = load_product_library()
-    data[prefix] = {
-        'prefix': prefix,
-        'product_code': product_code,
-        'product_name': product_name,
-        'source_barcode': _clean_export_value(source_barcode),
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
-    save_product_library(data)
+    updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            conn.execute(
+                """
+                INSERT INTO product_library
+                (prefix, product_code, product_name, source_barcode, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(prefix) DO UPDATE SET
+                    product_code = excluded.product_code,
+                    product_name = excluded.product_name,
+                    source_barcode = excluded.source_barcode,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    prefix,
+                    product_code,
+                    product_name,
+                    _clean_export_value(source_barcode),
+                    updated_at,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
     return True
+
+
+def delete_product_library(prefix):
+    prefix = _clean_export_value(prefix)
+    if not prefix:
+        return False
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            deleted = conn.execute(
+                "DELETE FROM product_library WHERE prefix = ?", (prefix,)
+            ).rowcount
+            conn.commit()
+            return deleted > 0
+        finally:
+            conn.close()
 
 def update_product_library_from_info(info):
     barcode = _clean_export_value(info.get('barcode'))
@@ -6946,7 +7112,7 @@ def api_crm_transfer_status():
     with transfer_job_lock:
         job = transfer_jobs.get(job_id) or _empty_transfer_job(slot_id)
         result = job.get('result') or {}
-        order_no = result.get('order_no') if isinstance(result, dict) else ''
+        order_no = job.get('order_no') or (result.get('order_no') if isinstance(result, dict) else '')
         if job['success'] and isinstance(result, dict) and result.get('pending_approval'):
             message = f"移库单已保存待审批：{order_no or '已保存'}"
         elif job['success']:
@@ -6962,6 +7128,7 @@ def api_crm_transfer_status():
             'transfer_success': job['success'],
             'error': job['error'],
             'message': message,
+            'order_no': order_no,
             'result': job['result'],
             'summary': job['summary'],
             'transfer': {
@@ -7179,10 +7346,7 @@ def api_product_library_save():
 def api_product_library_delete(prefix):
     if not is_admin_account():
         return jsonify({'success': False, 'error': '只有管理员可以删除条码匹配规则'})
-    data = load_product_library()
-    if prefix in data:
-        del data[prefix]
-        save_product_library(data)
+    delete_product_library(prefix)
     return jsonify({'success': True})
 
 @app.route("/api/accounts", methods=["GET"])

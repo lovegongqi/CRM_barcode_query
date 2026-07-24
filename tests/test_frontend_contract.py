@@ -416,6 +416,25 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn('id="libraryQueryActivity"', library)
         self.assertIn('openAuroraLog(', library)
 
+    def test_query_and_transfer_log_dialogs_refresh_while_open(self):
+        query = self.source("crm.html")
+        transfer = self.source("transfer.html")
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+
+        self.assertIn("window.refreshAuroraLog", aurora)
+        self.assertIn("queryItemLogKey(item)", query)
+        self.assertIn("refreshAuroraLog(", query)
+        self.assertIn("`transfer:${record.record_id}`", transfer)
+        self.assertIn("refreshAuroraLog(", transfer)
+
+    def test_transfer_record_accepts_order_number_from_job_progress(self):
+        transfer = self.source("transfer.html")
+
+        self.assertIn(
+            "jobData.order_no || (jobData.result && jobData.result.order_no)",
+            transfer,
+        )
+
     def test_product_library_rules_use_fixed_scrollable_viewport(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(

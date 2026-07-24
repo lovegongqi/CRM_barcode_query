@@ -155,6 +155,47 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertEqual(service_filter["label"], "有无服务单")
         self.assertEqual(service_filter["options"], ["无服务单", "有服务单"])
 
+    def test_failed_transfer_keeps_order_number_saved_before_detail_failure(self):
+        class FailingAfterSaveWorker:
+            def create_transfer(self, summary, distributor, transfer_type, remark, log, progress=None):
+                if progress:
+                    progress(order_no="TRSF202607240001")
+                log("移库单已保存：TRSF202607240001", "success")
+                return False, "添加移库明细失败"
+
+        with app_module.transfer_job_lock:
+            job = app_module._empty_transfer_job(
+                slot_id="transfer-1",
+                summary={"groups": [], "details": []},
+                distributor="测试分销商",
+                transfer_type="移出",
+            )
+            job.update({"running": True, "started_at": "2026-07-24 10:00:00"})
+            app_module.transfer_jobs[job["job_id"]] = job
+            job_id = job["job_id"]
+
+        try:
+            app_module._run_transfer_job(
+                job_id,
+                FailingAfterSaveWorker(),
+                job["summary"],
+                job["distributor"],
+                job["transfer_type"],
+                "",
+            )
+            with app_module.transfer_job_lock:
+                saved_job = app_module.transfer_jobs[job_id]
+                self.assertFalse(saved_job["success"])
+                self.assertEqual(saved_job["order_no"], "TRSF202607240001")
+            response = self.client.get(
+                f"/api/crm/transfer/status?slot_id=transfer-1&job_id={job_id}"
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["order_no"], "TRSF202607240001")
+        finally:
+            with app_module.transfer_job_lock:
+                app_module.transfer_jobs.pop(job_id, None)
+
     def test_batch_stop_endpoint_marks_stop_requested(self):
         client = app_module.app.test_client()
         client.post("/api/app-auth/login", json={"username": "admin", "password": "88293529"})
