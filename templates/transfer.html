@@ -149,6 +149,13 @@
                     <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
                     <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
                 </div>
+            </div>
+
+            <div class="card transfer-summary-card" id="transferSummaryCard" hidden>
+                <div class="aurora-realtime-head">
+                    <h2>汇总产品数量明细</h2>
+                    <span class="aurora-live-badge" id="transferSummaryTotal"></span>
+                </div>
                 <div class="summary" id="summaryBox"></div>
             </div>
 
@@ -237,6 +244,8 @@ let currentLoginJobId = sessionStorage.getItem('crm_bulk_login_job_transfer') ||
 let loginPollTimer = null;
 let lastLoginLogSeq = 0;
 let transferRealtimeRecords = [];
+let transferRealtimeRefreshTimer = null;
+let transferRealtimeRefreshPending = false;
 const TRANSFER_REALTIME_STORAGE_KEY = 'crm_transfer_realtime_records_v2';
 const BUSINESS_CONFIG = {{ business_config|tojson }};
 const OWN_DEALER_NAME = BUSINESS_CONFIG.own_dealer_name || '江西省天麓工贸有限公司';
@@ -341,6 +350,21 @@ async function loadTransferRealtimeRecords() {
     renderTransferRealtimeRecords();
 }
 
+async function refreshTransferRealtimeRecordsFromServer() {
+    if (transferRealtimeRefreshPending) return;
+    transferRealtimeRefreshPending = true;
+    try {
+        const response = await fetch('/api/transfer-records').then(res => res.json()).catch(() => null);
+        if (!response || !response.success || !Array.isArray(response.records)) return;
+        transferRealtimeRecords = response.records;
+        saveTransferRealtimeRecords();
+        renderTransferRealtimeRecords();
+        transferRealtimeRecords.forEach(refreshTransferChannelLog);
+    } finally {
+        transferRealtimeRefreshPending = false;
+    }
+}
+
 function transferRecordId() {
     return `transfer-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -382,7 +406,6 @@ function createTransferRealtimeRecord(slotId, distributor) {
     sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
-    persistTransferRealtimeRecord(record);
     return record;
 }
 
@@ -430,7 +453,6 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     if (record.finished_at) record.elapsed = transferElapsed(record);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
-    persistTransferRealtimeRecord(record);
     refreshTransferChannelLog(record);
 }
 
@@ -605,8 +627,11 @@ function stopActivePolling() {
 }
 
 function resetTransferActionUi() {
+    const transferSummaryCard = document.getElementById('transferSummaryCard');
+    transferSummaryCard.hidden = true;
     document.getElementById('summaryBox').style.display = 'none';
     document.getElementById('summaryBox').innerHTML = '';
+    document.getElementById('transferSummaryTotal').textContent = '';
     document.getElementById('submitBtn').disabled = true;
     document.getElementById('previewBtn').disabled = false;
     document.getElementById('previewBtn').textContent = '汇总预览';
@@ -823,6 +848,7 @@ function clearForm() {
 
 function renderSummary(summary) {
     const box = document.getElementById('summaryBox');
+    const transferSummaryCard = document.getElementById('transferSummaryCard');
     mergeDistributorHistory((summary.details || []).flatMap(row => [row.current_dealer, row.service_dealer]));
     const totalQty = (summary.groups || []).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
     const rows = (summary.groups || []).map(row => `
@@ -845,6 +871,9 @@ function renderSummary(summary) {
         ${missingRows ? `<div class="note blocked">以下条码无法识别产品。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${missingRows}</tbody></table>` : ''}
         ${excludedRows ? `<div class="note blocked">以下条码不会参与本次移库。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${excludedRows}</tbody></table>` : ''}
     `;
+    document.getElementById('transferSummaryTotal').textContent =
+        `产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个`;
+    transferSummaryCard.hidden = false;
     box.style.display = '';
 }
 
@@ -1171,6 +1200,7 @@ async function submitTransfer() {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(transferPayloadForSlot(slotId, {
+            record_id: activeRecord.record_id,
             barcodes: parseBarcodes(),
             distributor,
             transfer_type: document.getElementById('transferType').value,
@@ -1186,7 +1216,6 @@ async function submitTransfer() {
             activeRecord.finished_at = new Date().toISOString();
             saveTransferRealtimeRecords();
             renderTransferRealtimeRecords();
-            persistTransferRealtimeRecord(activeRecord);
             document.getElementById('submitBtn').disabled = false;
         }
         return;
@@ -1195,7 +1224,6 @@ async function submitTransfer() {
     if (jobId) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, jobId);
     activeRecord.job_id = jobId;
     saveTransferRealtimeRecords();
-    persistTransferRealtimeRecord(activeRecord);
     submittedTransferDistributor = distributor;
     if (slotId !== currentTransferSlot) return;
     currentTransferJobId = jobId;
@@ -1218,7 +1246,6 @@ function appendLog(message, level='dim', recordId='') {
         record.logs = record.logs.slice(-160);
         saveTransferRealtimeRecords();
         renderTransferRealtimeRecords();
-        persistTransferRealtimeRecord(record);
     }
     if (window.globalLogAppend) window.globalLogAppend(message, level);
 }
@@ -1256,6 +1283,7 @@ async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId
     if (data.done) {
         clearInterval(pollTimer);
         pollTimer = null;
+        refreshTransferRealtimeRecordsFromServer();
         if (data.transfer_success) {
             saveDistributorHistory((data.transfer && data.transfer.distributor) || submittedTransferDistributor);
             submittedTransferDistributor = '';
@@ -1459,6 +1487,7 @@ async function loadQueriedDealerHistory() {
 (async function initPage() {
     await loadSlots();
     await loadTransferRealtimeRecords();
+    transferRealtimeRefreshTimer = setInterval(refreshTransferRealtimeRecordsFromServer, 1000);
     const targetSlot = sessionStorage.getItem('transferTargetSlot') || '';
     if (targetSlot && transferSlots.some(slot => slot.id === targetSlot)) {
         currentTransferSlot = targetSlot;
@@ -1481,11 +1510,13 @@ async function loadQueriedDealerHistory() {
 
 document.addEventListener('visibilitychange', () => {
     if (!document.hidden) {
+        refreshTransferRealtimeRecordsFromServer();
         resumeBackgroundJobs();
     }
 });
 
 window.addEventListener('pageshow', () => {
+    refreshTransferRealtimeRecordsFromServer();
     resumeBackgroundJobs();
 });
 </script>

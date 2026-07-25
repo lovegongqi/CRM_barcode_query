@@ -593,6 +593,20 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("loadTransferRealtimeRecords", transfer)
         self.assertIn("migrateLegacyTransferRecords", transfer)
 
+    def test_transfer_records_refresh_independently_of_slot_switching(self):
+        transfer = self.source("transfer.html")
+        self.assertIn("refreshTransferRealtimeRecordsFromServer", transfer)
+        self.assertRegex(
+            transfer,
+            r"setInterval\(refreshTransferRealtimeRecordsFromServer,\s*1000\)",
+        )
+
+    def test_transfer_summary_has_a_dedicated_product_quantity_card(self):
+        transfer = self.source("transfer.html")
+        self.assertIn('id="transferSummaryCard"', transfer)
+        self.assertIn("汇总产品数量明细", transfer)
+        self.assertIn("transferSummaryCard.hidden = false", transfer)
+
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         for label in ("查询", "结果", "移库", "匹配", "设置"):

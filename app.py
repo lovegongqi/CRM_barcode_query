@@ -3663,6 +3663,10 @@ batch_job_lock = threading.Lock()
 batch_jobs = {}
 latest_batch_job_by_slot = {}
 
+background_query_job_lock = threading.RLock()
+background_query_jobs = {}
+latest_background_query_job_by_owner = {}
+
 library_query_lock = threading.Lock()
 library_query_job = {
     'running': False,
@@ -3712,10 +3716,54 @@ def _empty_batch_job(slot_id=None, barcodes=None, retry_limit=DEFAULT_BATCH_RETR
         'finished_at': '',
     }
 
+
+def _empty_background_query_job(owner, barcodes=None, slot_ids=None, retry_limit=DEFAULT_BATCH_RETRY_LIMIT):
+    barcodes = list(barcodes or [])
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'running': False,
+        'done': False,
+        'success': False,
+        'stop_requested': False,
+        'barcodes': barcodes,
+        'slot_ids': list(slot_ids or []),
+        'total': len(barcodes),
+        'completed': 0,
+        'success_count': 0,
+        'failed_count': 0,
+        'failed_barcodes': [],
+        'retry_limit': _normalize_retry_limit(retry_limit),
+        'log_seq': 0,
+        'logs': [],
+        'items': [
+            {
+                'barcode': barcode,
+                'order': index,
+                'slot_id': '',
+                'slot_label': '',
+                'state': 'waiting',
+                'status': '队列等待中',
+                'attempts': 0,
+                'retries': 0,
+                'elapsed': 0,
+                'logs': [],
+                'started_at': '',
+                'finished_at': '',
+            }
+            for index, barcode in enumerate(barcodes, 1)
+        ],
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
 def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_type='', remark=''):
     return {
         'job_id': uuid.uuid4().hex,
+        'record_id': '',
         'slot_id': slot_id or crm_pool.default_slot("transfer"),
+        'slot_label': '',
         'running': False,
         'done': False,
         'success': False,
@@ -3858,11 +3906,92 @@ def _job_log(lock, jobs, job_id, message, level='dim', limit=300):
 def _batch_job_log(job_id, message, level='dim'):
     _job_log(batch_job_lock, batch_jobs, job_id, message, level, BATCH_LOG_LIMIT)
 
+
+def _background_query_job_log(job_id, message, level='dim'):
+    _job_log(
+        background_query_job_lock,
+        background_query_jobs,
+        job_id,
+        message,
+        level,
+        BATCH_LOG_LIMIT,
+    )
+
+
+def _background_query_item_log(job_id, item_index, message, level='dim'):
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if not job or item_index < 0 or item_index >= len(job.get('items') or []):
+            return
+        item = job['items'][item_index]
+        row = {
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'message': _safe_log_text(message),
+            'level': level,
+        }
+        item['logs'].append(row)
+        item['logs'] = item['logs'][-160:]
+        slot_label = item.get('slot_label') or item.get('slot_id') or '后台调度'
+        _append_job_log_unlocked(
+            job,
+            f"{slot_label} {item.get('barcode') or ''}：{row['message']}",
+            level,
+            BATCH_LOG_LIMIT,
+        )
+
+
+def _background_query_status_payload(job):
+    if not job:
+        return {
+            'success': True,
+            'job_id': '',
+            'running': False,
+            'done': False,
+            'stop_requested': False,
+            'total': 0,
+            'completed': 0,
+            'success_count': 0,
+            'failed_count': 0,
+            'failed_barcodes': [],
+            'pending_count': 0,
+            'items': [],
+            'logs': [],
+            'log_seq': 0,
+            'started_at': '',
+            'finished_at': '',
+            'slot_ids': [],
+        }
+    payload = {
+        key: value
+        for key, value in job.items()
+        if key not in {'owner', 'barcodes'}
+    }
+    payload['success'] = True
+    payload['items'] = json.loads(json.dumps(job.get('items') or [], ensure_ascii=False))
+    payload['logs'] = list(job.get('logs') or [])
+    payload['failed_barcodes'] = list(job.get('failed_barcodes') or [])
+    payload['slot_ids'] = list(job.get('slot_ids') or [])
+    payload['pending_count'] = sum(
+        1 for item in payload['items'] if item.get('state') == 'waiting'
+    )
+    now = datetime.now()
+    for item in payload['items']:
+        if item.get('state') != 'running' or not item.get('started_at'):
+            continue
+        try:
+            started = datetime.strptime(item['started_at'], '%Y-%m-%d %H:%M:%S')
+            item['elapsed'] = max(int(item.get('elapsed') or 0), int((now - started).total_seconds()))
+        except (TypeError, ValueError):
+            pass
+    return payload
+
+
 def _summary_job_log(job_id, message, level='dim'):
     _job_log(summary_job_lock, summary_jobs, job_id, message, level, 500)
 
 def _transfer_job_log(job_id, message, level='dim'):
     _job_log(transfer_job_lock, transfer_jobs, job_id, message, level, 500)
+    _sync_transfer_record_from_job(job_id)
 
 def _service_close_job_log(job_id, message, level='dim'):
     _job_log(service_close_job_lock, service_close_jobs, job_id, message, level, 1000)
@@ -4302,6 +4431,7 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
             job = transfer_jobs.get(job_id)
             if job:
                 job['order_no'] = str(order_no).strip()
+        _sync_transfer_record_from_job(job_id)
 
     log(f"开始提交移库：{transfer_type}，分销商 {distributor}", 'info')
     try:
@@ -4492,6 +4622,226 @@ def _run_service_close_job(job_id, workers, orders):
                 job['error'] = error
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"批量结单出错：{error}", "error")
+
+def _run_background_query_job(job_id, workers):
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if not job:
+            return
+        item_queue = queue.Queue()
+        for item_index in range(len(job.get('items') or [])):
+            item_queue.put(item_index)
+        retry_limit = _normalize_retry_limit(job.get('retry_limit'))
+        total = int(job.get('total') or 0)
+    _background_query_job_log(
+        job_id,
+        f"后台批量查询开始：共 {total} 个条码，使用 {len(workers)} 个查询通道",
+        'info',
+    )
+
+    def stop_requested():
+        with background_query_job_lock:
+            current = background_query_jobs.get(job_id)
+            return bool(not current or current.get('stop_requested'))
+
+    def mark_terminal(item_index, state, status, success, attempts, error=''):
+        now = datetime.now()
+        with background_query_job_lock:
+            current = background_query_jobs.get(job_id)
+            if not current:
+                return
+            item = current['items'][item_index]
+            if item.get('state') in {'success', 'error', 'stopped'}:
+                return
+            item['state'] = state
+            item['status'] = status
+            item['attempts'] = int(attempts or 0)
+            item['retries'] = max(0, int(attempts or 0) - 1)
+            item['finished_at'] = now.strftime('%Y-%m-%d %H:%M:%S')
+            if item.get('started_at'):
+                try:
+                    started = datetime.strptime(item['started_at'], '%Y-%m-%d %H:%M:%S')
+                    item['elapsed'] = max(0, int((now - started).total_seconds()))
+                except (TypeError, ValueError):
+                    pass
+            current['completed'] = int(current.get('completed') or 0) + 1
+            if success:
+                current['success_count'] = int(current.get('success_count') or 0) + 1
+            else:
+                current['failed_count'] = int(current.get('failed_count') or 0) + 1
+                barcode = item.get('barcode') or ''
+                if barcode and barcode not in current['failed_barcodes']:
+                    current['failed_barcodes'].append(barcode)
+        if error:
+            _background_query_item_log(job_id, item_index, error, 'warn' if state == 'stopped' else 'error')
+
+    def verify_worker(worker, slot_label):
+        if worker.logged_in:
+            return True
+        if worker.remembered_logged_in:
+            _background_query_job_log(job_id, f"{slot_label} 正在恢复 CRM 登录状态", 'info')
+            success, message = worker.check_login_status()
+            if success and worker.logged_in:
+                _background_query_job_log(job_id, f"{slot_label} CRM 登录状态有效", 'success')
+                return True
+            _background_query_job_log(
+                job_id,
+                f"{slot_label} CRM 登录状态恢复失败：{message or '会话无效'}",
+                'error',
+            )
+            return False
+        _background_query_job_log(job_id, f"{slot_label} CRM 未登录，跳过该通道", 'error')
+        return False
+
+    def run_worker(worker, slot_id, slot_label):
+        try:
+            worker.clear_stop()
+        except Exception:
+            pass
+        if not verify_worker(worker, slot_label):
+            return
+        while not stop_requested():
+            try:
+                item_index = item_queue.get_nowait()
+            except queue.Empty:
+                return
+            with background_query_job_lock:
+                current = background_query_jobs.get(job_id)
+                if not current or current.get('stop_requested'):
+                    item_queue.put(item_index)
+                    return
+                item = current['items'][item_index]
+                item['slot_id'] = slot_id
+                item['slot_label'] = slot_label
+                item['state'] = 'running'
+                item['status'] = '正在查询 CRM'
+                item['started_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            _background_query_item_log(job_id, item_index, '后台通道已领取条码', 'info')
+
+            barcode = item.get('barcode') or ''
+            success = False
+            result = ''
+            attempts = retry_limit + 1
+            attempt = 0
+            for attempt in range(1, attempts + 1):
+                if stop_requested() or worker.is_stop_requested():
+                    break
+                if attempt > 1:
+                    _background_query_item_log(
+                        job_id,
+                        item_index,
+                        f"第 {attempt - 1}/{retry_limit} 次重试中",
+                        'warn',
+                    )
+                success, result = worker.query_barcode(
+                    barcode,
+                    lambda message, level='dim': _background_query_item_log(
+                        job_id,
+                        item_index,
+                        message,
+                        level,
+                    ),
+                )
+                if success:
+                    break
+                if attempt <= retry_limit and not stop_requested():
+                    _background_query_item_log(
+                        job_id,
+                        item_index,
+                        f"查询失败，将重试 {attempt}/{retry_limit}：{_brief_batch_error(result)}",
+                        'warn',
+                    )
+                    time.sleep(2)
+
+            if stop_requested() or worker.is_stop_requested():
+                mark_terminal(
+                    item_index,
+                    'stopped',
+                    '查询已停止',
+                    False,
+                    attempt,
+                    '用户手动停止了查询',
+                )
+                item_queue.task_done()
+                return
+            if success:
+                update_barcode_query_slot(barcode, slot_id)
+                mark_terminal(item_index, 'success', '查询成功', True, attempt)
+                _background_query_item_log(job_id, item_index, '查询完成，结果已保存', 'success')
+            else:
+                mark_terminal(
+                    item_index,
+                    'error',
+                    '查询失败',
+                    False,
+                    attempts,
+                    _brief_batch_error(result) or '未获得有效查询结果',
+                )
+            item_queue.task_done()
+
+    threads = [
+        threading.Thread(
+            target=run_worker,
+            args=(worker, slot_id, slot_label),
+            daemon=True,
+        )
+        for worker, slot_id, slot_label in workers
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    stopped = stop_requested()
+    remaining_state = 'stopped' if stopped else 'error'
+    remaining_status = '查询已停止' if stopped else '无可用查询通道'
+    remaining_message = '用户手动停止了查询' if stopped else '没有可用的查询通道完成该条码'
+    with background_query_job_lock:
+        current = background_query_jobs.get(job_id)
+        remaining_indexes = [
+            index
+            for index, item in enumerate((current or {}).get('items') or [])
+            if item.get('state') in {'waiting', 'running'}
+        ]
+    for item_index in remaining_indexes:
+        mark_terminal(
+            item_index,
+            remaining_state,
+            remaining_status,
+            False,
+            0,
+            remaining_message,
+        )
+
+    for worker, _slot_id, _slot_label in workers:
+        try:
+            worker.clear_stop()
+        except Exception:
+            pass
+
+    with background_query_job_lock:
+        current = background_query_jobs.get(job_id)
+        if not current:
+            return
+        current['running'] = False
+        current['done'] = True
+        current['success'] = bool(
+            not current.get('stop_requested')
+            and int(current.get('failed_count') or 0) == 0
+        )
+        current['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        success_count = int(current.get('success_count') or 0)
+        failed_count = int(current.get('failed_count') or 0)
+    _background_query_job_log(
+        job_id,
+        (
+            f"后台批量查询已停止：成功 {success_count} 个，失败 {failed_count} 个"
+            if stopped
+            else f"后台批量查询完成：成功 {success_count} 个，失败 {failed_count} 个"
+        ),
+        'warn' if stopped or failed_count else 'success',
+    )
+
 
 def _batch_stop_requested(job_id, idx):
     with batch_job_lock:
@@ -5647,6 +5997,15 @@ def _query_slot_label(slot_id):
         return f"查询{slots.index(slot_id) + 1}"
     return slot_id or "查询通道"
 
+
+def _transfer_slot_label(slot_id):
+    with crm_pool.pool_lock:
+        slots = list(crm_pool.transfer_slots)
+    if slot_id in slots:
+        return f"移库{slots.index(slot_id) + 1}"
+    return slot_id or "移库通道"
+
+
 def _query_slot_has_running_batch(slot_id):
     with batch_job_lock:
         job_id = latest_batch_job_by_slot.get(slot_id)
@@ -6264,6 +6623,76 @@ def clear_transfer_records():
         with _transfer_records_connection() as connection:
             cursor = connection.execute("DELETE FROM transfer_records")
             return cursor.rowcount
+
+
+def _sync_transfer_record_from_job(job_id):
+    with transfer_job_lock:
+        job = transfer_jobs.get(job_id)
+        if not job:
+            return None
+        snapshot = {
+            key: value
+            for key, value in job.items()
+            if key != 'summary'
+        }
+        snapshot['logs'] = list(job.get('logs') or [])
+    record_id = str(snapshot.get('record_id') or '').strip()
+    if not record_id:
+        return None
+
+    result = snapshot.get('result') or {}
+    order_no = snapshot.get('order_no') or (
+        result.get('order_no') if isinstance(result, dict) else ''
+    )
+    logs = snapshot.get('logs') or []
+    latest_message = next(
+        (
+            str(row.get('message') or '').strip()
+            for row in reversed(logs)
+            if str(row.get('message') or '').strip()
+        ),
+        '',
+    )
+    if snapshot.get('running'):
+        state = 'running'
+        status = latest_message or '正在生成 CRM 移库单'
+    elif snapshot.get('done'):
+        state = 'success' if snapshot.get('success') else 'error'
+        status = '移库成功' if snapshot.get('success') else '移库失败'
+    else:
+        state = 'waiting'
+        status = latest_message or '等待处理'
+
+    elapsed = 0
+    started_at = str(snapshot.get('started_at') or '')
+    finished_at = str(snapshot.get('finished_at') or '')
+    try:
+        started = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
+        finished = (
+            datetime.strptime(finished_at, '%Y-%m-%d %H:%M:%S')
+            if finished_at
+            else datetime.now()
+        )
+        elapsed = max(0, int((finished - started).total_seconds()))
+    except (TypeError, ValueError):
+        pass
+
+    return upsert_transfer_record({
+        'record_id': record_id,
+        'job_id': snapshot.get('job_id') or job_id,
+        'slot_id': snapshot.get('slot_id') or '',
+        'slot_label': snapshot.get('slot_label') or snapshot.get('slot_id') or '',
+        'order_no': order_no or '',
+        'state': state,
+        'status': status,
+        'distributor': snapshot.get('distributor') or '',
+        'started_at': started_at,
+        'finished_at': finished_at,
+        'elapsed': elapsed,
+        'transfer_type': snapshot.get('transfer_type') or '',
+        'remark': snapshot.get('remark') or '',
+        'logs': logs,
+    })
 
 
 def load_distributor_history():
@@ -7214,6 +7643,7 @@ def api_crm_transfer():
     distributor = str(data.get('distributor') or '').strip()
     transfer_type = str(data.get('transfer_type') or '移出').strip()
     remark = str(data.get('remark') or '').strip()
+    record_id = str(data.get('record_id') or '').strip() or f"transfer-{uuid.uuid4().hex}"
 
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需移库' if excluded else '请先选择要移库的条码', 'excluded': excluded})
@@ -7248,6 +7678,8 @@ def api_crm_transfer():
             return jsonify({'success': False, 'error': f'{slot_id} 已有移库任务正在执行，请等待完成后再提交'})
         job = _empty_transfer_job(slot_id, summary, distributor, transfer_type, remark)
         job.update({
+            'record_id': record_id,
+            'slot_label': _transfer_slot_label(slot_id),
             'running': True,
             'done': False,
             'success': False,
@@ -7259,6 +7691,7 @@ def api_crm_transfer():
         transfer_jobs[job['job_id']] = job
         latest_transfer_job_by_slot[slot_id] = job['job_id']
 
+    _sync_transfer_record_from_job(job['job_id'])
     threading.Thread(
         target=_run_transfer_job,
         args=(job['job_id'], worker, summary, distributor, transfer_type, remark),
@@ -7269,6 +7702,7 @@ def api_crm_transfer():
         'success': True,
         'started': True,
         'job_id': job['job_id'],
+        'record_id': record_id,
         'slot_id': slot_id,
         'message': '移库任务已开始，请查看日志',
         'summary': summary,
@@ -7906,6 +8340,120 @@ def api_crm_query():
         })
     else:
         return jsonify({'success': False, 'error': result})
+
+
+def _current_background_query_owner():
+    account = current_account() or {}
+    return str(account.get('id') or account.get('username') or '')
+
+
+@app.route("/api/crm/background-batch/start", methods=["POST"])
+def api_crm_background_batch_start():
+    data = request.get_json(silent=True) or {}
+    owner = _current_background_query_owner()
+    barcodes = normalize_input_barcodes(data.get('barcodes') or [])
+    barcodes, excluded = filter_disassembly_barcodes(barcodes)
+    if not barcodes:
+        return jsonify({
+            'success': False,
+            'error': '输入的条码都是拆机条码，无需查询' if excluded else '条码不能为空',
+            'excluded': excluded,
+        }), 400
+
+    requested_slot_ids = data.get('slot_ids') or []
+    if not isinstance(requested_slot_ids, list):
+        return jsonify({'success': False, 'error': '查询通道格式错误'}), 400
+    valid_slot_ids = set(crm_pool.query_slots)
+    slot_ids = []
+    for slot_id in requested_slot_ids:
+        slot_id = str(slot_id or '').strip()
+        if slot_id in valid_slot_ids and slot_id not in slot_ids:
+            slot_ids.append(slot_id)
+    if not slot_ids:
+        return jsonify({'success': False, 'error': '请至少选择一个查询通道'}), 400
+
+    with background_query_job_lock:
+        running_job_id = latest_background_query_job_by_owner.get(owner)
+        running_job = background_query_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有后台批量查询正在运行',
+                'job_id': running_job_id,
+            }), 409
+
+    workers = []
+    for slot_id in slot_ids:
+        worker = crm_pool.get(slot_id, 'query')
+        try:
+            worker.clear_stop()
+        except Exception:
+            pass
+        workers.append((worker, slot_id, _query_slot_label(slot_id)))
+
+    job = _empty_background_query_job(
+        owner,
+        barcodes,
+        slot_ids,
+        data.get('retry_limit', DEFAULT_BATCH_RETRY_LIMIT),
+    )
+    job.update({
+        'running': True,
+        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    })
+    with background_query_job_lock:
+        background_query_jobs[job['job_id']] = job
+        latest_background_query_job_by_owner[owner] = job['job_id']
+
+    threading.Thread(
+        target=_run_background_query_job,
+        args=(job['job_id'], workers),
+        daemon=True,
+    ).start()
+    with background_query_job_lock:
+        payload = _background_query_status_payload(background_query_jobs.get(job['job_id']))
+    payload['excluded'] = excluded
+    return jsonify(payload)
+
+
+@app.route("/api/crm/background-batch/status", methods=["GET"])
+def api_crm_background_batch_status():
+    owner = _current_background_query_owner()
+    job_id = str(request.args.get('job_id') or '').strip()
+    with background_query_job_lock:
+        if not job_id:
+            job_id = latest_background_query_job_by_owner.get(owner) or ''
+        job = background_query_jobs.get(job_id)
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '后台查询任务不存在'}), 404
+        return jsonify(_background_query_status_payload(job))
+
+
+@app.route("/api/crm/background-batch/stop", methods=["POST"])
+def api_crm_background_batch_stop():
+    data = request.get_json(silent=True) or {}
+    owner = _current_background_query_owner()
+    job_id = str(data.get('job_id') or '').strip()
+    with background_query_job_lock:
+        if not job_id:
+            job_id = latest_background_query_job_by_owner.get(owner) or ''
+        job = background_query_jobs.get(job_id)
+        if not job or job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '没有正在运行的后台查询'}), 404
+        if not job.get('running'):
+            return jsonify(_background_query_status_payload(job))
+        job['stop_requested'] = True
+        slot_ids = list(job.get('slot_ids') or [])
+        _append_job_log_unlocked(job, '用户请求停止后台批量查询', 'warn', BATCH_LOG_LIMIT)
+
+    for slot_id in slot_ids:
+        try:
+            crm_pool.get(slot_id, 'query').request_stop()
+        except Exception:
+            pass
+    with background_query_job_lock:
+        return jsonify(_background_query_status_payload(background_query_jobs.get(job_id)))
+
 
 @app.route("/api/crm/batch/start", methods=["POST"])
 def api_crm_batch_start():
