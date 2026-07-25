@@ -586,5 +586,23 @@ class FrontendContractTest(unittest.TestCase):
         )
 
 
+    def test_transfer_records_use_durable_api_and_explicit_delete_actions(self):
+        transfer = self.source("transfer.html")
+        self.assertIn("/api/transfer-records", transfer)
+        self.assertIn("DELETE", transfer)
+        self.assertIn("loadTransferRealtimeRecords", transfer)
+        self.assertIn("migrateLegacyTransferRecords", transfer)
+
+    def test_shared_navigation_uses_stable_short_labels(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        for label in ("查询", "结果", "移库", "匹配", "设置"):
+            self.assertIn(f"'label': '{label}'", app_source)
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+        for label in ("查询", "结果", "移库", "匹配", "设置"):
+            self.assertIn(f"'{label}'", aurora)
+        self.assertIn("aurora-nav-label", aurora)
+        self.assertNotIn("anchor.textContent =", aurora)
+
+
 if __name__ == "__main__":
     unittest.main()

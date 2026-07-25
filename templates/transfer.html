@@ -304,10 +304,41 @@ function isLoggedInMessage(message) {
 function restoreTransferRealtimeRecords() {
     try {
         const rows = JSON.parse(sessionStorage.getItem(TRANSFER_REALTIME_STORAGE_KEY) || '[]');
-        transferRealtimeRecords = Array.isArray(rows) ? rows : [];
+        return Array.isArray(rows) ? rows : [];
     } catch (e) {
-        transferRealtimeRecords = [];
+        return [];
     }
+}
+
+async function persistTransferRealtimeRecord(record) {
+    if (!record || !record.record_id) return null;
+    const response = await fetch('/api/transfer-records', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(record)
+    }).then(res => res.json()).catch(() => null);
+    return response && response.success ? response.record : null;
+}
+
+async function migrateLegacyTransferRecords(legacyRows) {
+    if (!Array.isArray(legacyRows) || !legacyRows.length) return [];
+    await Promise.all(legacyRows.map(row => persistTransferRealtimeRecord(row)));
+    const response = await fetch('/api/transfer-records').then(res => res.json()).catch(() => null);
+    return response && response.success && Array.isArray(response.records) ? response.records : legacyRows;
+}
+
+async function loadTransferRealtimeRecords() {
+    const response = await fetch('/api/transfer-records').then(res => res.json()).catch(() => null);
+    if (!response || !response.success) {
+        transferRealtimeRecords = restoreTransferRealtimeRecords();
+        renderTransferRealtimeRecords();
+        return;
+    }
+    let rows = Array.isArray(response.records) ? response.records : [];
+    if (!rows.length) rows = await migrateLegacyTransferRecords(restoreTransferRealtimeRecords());
+    transferRealtimeRecords = rows;
+    saveTransferRealtimeRecords();
+    renderTransferRealtimeRecords();
 }
 
 function transferRecordId() {
@@ -340,6 +371,8 @@ function createTransferRealtimeRecord(slotId, distributor) {
         state: 'running',
         status: '正在创建移库任务',
         distributor: distributor || '',
+        transfer_type: document.getElementById('transferType')?.value || '移出',
+        remark: document.getElementById('transferRemark')?.value.trim() || '',
         started_at: new Date().toISOString(),
         finished_at: '',
         elapsed: 0,
@@ -349,6 +382,7 @@ function createTransferRealtimeRecord(slotId, distributor) {
     sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
+    persistTransferRealtimeRecord(record);
     return record;
 }
 
@@ -396,6 +430,7 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     if (record.finished_at) record.elapsed = transferElapsed(record);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
+    persistTransferRealtimeRecord(record);
     refreshTransferChannelLog(record);
 }
 
@@ -447,13 +482,28 @@ function refreshTransferChannelLog(record) {
     }, '通道完整移库日志');
 }
 
-function deleteTransferRealtimeRecord(recordId) {
+async function deleteTransferRealtimeRecord(recordId) {
+    const record = findTransferRecord(recordId);
+    if (!record || !confirm(`确定删除移库记录：${record.order_no || record.slot_label || recordId}？`)) return;
+    const response = await fetch(`/api/transfer-records/${encodeURIComponent(recordId)}`, {method: 'DELETE'})
+        .then(res => res.json()).catch(() => null);
+    if (!response || !response.success) {
+        alert(response?.error || '删除移库记录失败');
+        return;
+    }
     transferRealtimeRecords = transferRealtimeRecords.filter(row => row.record_id !== recordId);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
 }
 
-function clearTransferRealtimeRecords() {
+async function clearTransferRealtimeRecords() {
+    if (!transferRealtimeRecords.length || !confirm('确定清空全部移库记录？清空后不可恢复。')) return;
+    const response = await fetch('/api/transfer-records', {method: 'DELETE'})
+        .then(res => res.json()).catch(() => null);
+    if (!response || !response.success) {
+        alert(response?.error || '清空移库记录失败');
+        return;
+    }
     transferRealtimeRecords = [];
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
@@ -1136,6 +1186,7 @@ async function submitTransfer() {
             activeRecord.finished_at = new Date().toISOString();
             saveTransferRealtimeRecords();
             renderTransferRealtimeRecords();
+            persistTransferRealtimeRecord(activeRecord);
             document.getElementById('submitBtn').disabled = false;
         }
         return;
@@ -1144,6 +1195,7 @@ async function submitTransfer() {
     if (jobId) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, jobId);
     activeRecord.job_id = jobId;
     saveTransferRealtimeRecords();
+    persistTransferRealtimeRecord(activeRecord);
     submittedTransferDistributor = distributor;
     if (slotId !== currentTransferSlot) return;
     currentTransferJobId = jobId;
@@ -1166,6 +1218,7 @@ function appendLog(message, level='dim', recordId='') {
         record.logs = record.logs.slice(-160);
         saveTransferRealtimeRecords();
         renderTransferRealtimeRecords();
+        persistTransferRealtimeRecord(record);
     }
     if (window.globalLogAppend) window.globalLogAppend(message, level);
 }
@@ -1404,8 +1457,8 @@ async function loadQueriedDealerHistory() {
 }
 
 (async function initPage() {
-    restoreTransferRealtimeRecords();
     await loadSlots();
+    await loadTransferRealtimeRecords();
     const targetSlot = sessionStorage.getItem('transferTargetSlot') || '';
     if (targetSlot && transferSlots.some(slot => slot.id === targetSlot)) {
         currentTransferSlot = targetSlot;

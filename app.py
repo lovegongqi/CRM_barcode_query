@@ -4679,6 +4679,7 @@ PRODUCT_LIBRARY_FILE = os.path.join(CONFIG_DIR, "product_library.json")
 ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
+TRANSFER_RECORDS_DB_FILE = os.path.join(CONFIG_DIR, "transfer_records.sqlite3")
 RESULTS_DIR = os.path.join(DATA_BASE_DIR, "results")
 TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
@@ -6118,6 +6119,153 @@ def queried_dealer_history():
                 dealers[dealer] = True
     return list(dealers.keys())
 
+TRANSFER_RECORDS_LOCK = threading.RLock()
+def _transfer_records_connection():
+    os.makedirs(os.path.dirname(TRANSFER_RECORDS_DB_FILE), exist_ok=True)
+    connection = sqlite3.connect(TRANSFER_RECORDS_DB_FILE)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transfer_records (
+            record_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL DEFAULT '',
+            slot_id TEXT NOT NULL DEFAULT '',
+            slot_label TEXT NOT NULL DEFAULT '',
+            order_no TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL DEFAULT 'running',
+            status TEXT NOT NULL DEFAULT '',
+            distributor TEXT NOT NULL DEFAULT '',
+            started_at TEXT NOT NULL DEFAULT '',
+            finished_at TEXT NOT NULL DEFAULT '',
+            elapsed INTEGER NOT NULL DEFAULT 0,
+            transfer_type TEXT NOT NULL DEFAULT '',
+            remark TEXT NOT NULL DEFAULT '',
+            logs_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    return connection
+
+
+def _normalize_transfer_record(record):
+    record = record if isinstance(record, dict) else {}
+    record_id = str(record.get("record_id") or "").strip()
+    if not record_id:
+        return None
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logs = record.get("logs")
+    if not isinstance(logs, list):
+        logs = []
+    try:
+        elapsed = max(0, int(record.get("elapsed") or 0))
+    except (TypeError, ValueError):
+        elapsed = 0
+    return {
+        "record_id": record_id,
+        "job_id": str(record.get("job_id") or ""),
+        "slot_id": str(record.get("slot_id") or ""),
+        "slot_label": str(record.get("slot_label") or ""),
+        "order_no": str(record.get("order_no") or ""),
+        "state": str(record.get("state") or "running"),
+        "status": str(record.get("status") or ""),
+        "distributor": str(record.get("distributor") or ""),
+        "started_at": str(record.get("started_at") or ""),
+        "finished_at": str(record.get("finished_at") or ""),
+        "elapsed": elapsed,
+        "transfer_type": str(record.get("transfer_type") or ""),
+        "remark": str(record.get("remark") or ""),
+        "logs": logs[-160:],
+        "created_at": str(record.get("created_at") or now),
+        "updated_at": now,
+    }
+
+
+def _transfer_row_to_dict(row):
+    item = dict(row)
+    try:
+        item["logs"] = json.loads(item.pop("logs_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        item["logs"] = []
+    return item
+
+
+def load_transfer_records():
+    with TRANSFER_RECORDS_LOCK:
+        with _transfer_records_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM transfer_records ORDER BY datetime(updated_at) DESC, rowid DESC"
+            ).fetchall()
+    return [_transfer_row_to_dict(row) for row in rows]
+
+
+def upsert_transfer_record(record):
+    normalized = _normalize_transfer_record(record)
+    if not normalized:
+        raise ValueError("移库记录编号不能为空")
+    with TRANSFER_RECORDS_LOCK:
+        with _transfer_records_connection() as connection:
+            existing = connection.execute(
+                "SELECT created_at FROM transfer_records WHERE record_id = ?",
+                (normalized["record_id"],),
+            ).fetchone()
+            if existing and existing["created_at"]:
+                normalized["created_at"] = existing["created_at"]
+            connection.execute(
+                """
+                INSERT INTO transfer_records (
+                    record_id, job_id, slot_id, slot_label, order_no, state, status,
+                    distributor, started_at, finished_at, elapsed, transfer_type, remark,
+                    logs_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(record_id) DO UPDATE SET
+                    job_id=excluded.job_id,
+                    slot_id=excluded.slot_id,
+                    slot_label=excluded.slot_label,
+                    order_no=excluded.order_no,
+                    state=excluded.state,
+                    status=excluded.status,
+                    distributor=excluded.distributor,
+                    started_at=excluded.started_at,
+                    finished_at=excluded.finished_at,
+                    elapsed=excluded.elapsed,
+                    transfer_type=excluded.transfer_type,
+                    remark=excluded.remark,
+                    logs_json=excluded.logs_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    normalized["record_id"], normalized["job_id"], normalized["slot_id"],
+                    normalized["slot_label"], normalized["order_no"], normalized["state"],
+                    normalized["status"], normalized["distributor"], normalized["started_at"],
+                    normalized["finished_at"], normalized["elapsed"], normalized["transfer_type"],
+                    normalized["remark"], json.dumps(normalized["logs"], ensure_ascii=False),
+                    normalized["created_at"], normalized["updated_at"],
+                ),
+            )
+    normalized.pop("updated_at", None)
+    normalized.pop("created_at", None)
+    return normalized
+
+
+def delete_transfer_record(record_id):
+    record_id = str(record_id or "").strip()
+    if not record_id:
+        return False
+    with TRANSFER_RECORDS_LOCK:
+        with _transfer_records_connection() as connection:
+            cursor = connection.execute("DELETE FROM transfer_records WHERE record_id = ?", (record_id,))
+            return cursor.rowcount > 0
+
+
+def clear_transfer_records():
+    with TRANSFER_RECORDS_LOCK:
+        with _transfer_records_connection() as connection:
+            cursor = connection.execute("DELETE FROM transfer_records")
+            return cursor.rowcount
+
+
 def load_distributor_history():
     own_dealer = own_dealer_name()
     if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
@@ -6430,11 +6578,11 @@ def save_remembered_crm_credentials(remember, username="", password=""):
     return True
 
 PAGE_LINKS = [
-    {'permission': 'crm', 'label': '在线查询', 'href': '/crm'},
-    {'permission': 'results', 'label': '结果管理', 'href': '/'},
+    {'permission': 'crm', 'label': '查询', 'href': '/crm'},
+    {'permission': 'results', 'label': '结果', 'href': '/'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
-    {'permission': 'product-library', 'label': '条码匹配', 'href': '/product-library'},
-    {'permission': 'accounts', 'label': '账号管理', 'href': '/accounts'},
+    {'permission': 'product-library', 'label': '匹配', 'href': '/product-library'},
+    {'permission': 'accounts', 'label': '设置', 'href': '/accounts'},
 ]
 
 DESKTOP_PAGE_LINKS = [
@@ -6452,7 +6600,7 @@ def visible_page_links():
     permissions = set(row.get('permissions') or [])
     links = [link for link in page_links if link['permission'] in permissions]
     if not any(link['permission'] == 'accounts' for link in links):
-        links.append({'permission': 'account-self', 'label': '设置' if IS_DESKTOP_APP else '账号管理', 'href': '/accounts'})
+        links.append({'permission': 'account-self', 'label': '设置', 'href': '/accounts'})
     return links
 
 def is_admin_account():
@@ -6968,6 +7116,33 @@ def api_delete_distributor_history():
         'dealers': combined_distributor_history(),
         'can_delete': True,
     })
+
+@app.route("/api/transfer-records", methods=["GET"])
+def api_transfer_records():
+    return jsonify({'success': True, 'records': load_transfer_records()})
+
+
+@app.route("/api/transfer-records", methods=["POST"])
+def api_upsert_transfer_record():
+    data = request.get_json(silent=True) or {}
+    try:
+        record = upsert_transfer_record(data)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    return jsonify({'success': True, 'record': record})
+
+
+@app.route("/api/transfer-records/<record_id>", methods=["DELETE"])
+def api_delete_transfer_record(record_id):
+    if not delete_transfer_record(record_id):
+        return jsonify({'success': False, 'error': '移库记录不存在'}), 404
+    return jsonify({'success': True, 'record_id': record_id})
+
+
+@app.route("/api/transfer-records", methods=["DELETE"])
+def api_clear_transfer_records():
+    return jsonify({'success': True, 'deleted': clear_transfer_records()})
+
 
 @app.route("/api/transfer/summary/start", methods=["POST"])
 def api_transfer_summary_start():
