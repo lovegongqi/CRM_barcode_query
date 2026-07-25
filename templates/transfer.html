@@ -56,6 +56,22 @@
         th, td { border-bottom:1px solid #e5e7eb; padding:8px 10px; text-align:left; vertical-align:top; }
         th { background:#f8fafc; color:#475569; }
         .summary { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; margin-top:12px; display:none; }
+        .summary-product-list { display:grid; gap:8px; padding:10px; }
+        .summary-product-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; width:100%; padding:11px 12px; border:1px solid #d9e1ec; border-radius:7px; background:#fff; color:#202938; text-align:left; cursor:pointer; }
+        .summary-product-row:hover, .summary-product-row:focus-visible { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.12); outline:none; }
+        .summary-product-name { min-width:0; display:grid; gap:3px; }
+        .summary-product-name strong { overflow-wrap:anywhere; }
+        .summary-product-name small { color:#667085; }
+        .summary-product-quantity { white-space:nowrap; color:#1d4ed8; font-weight:800; }
+        .summary-product-open { color:#64748b; font-size:12px; white-space:nowrap; }
+        .summary-failure-row { margin:0 10px 10px; width:calc(100% - 20px); padding:10px 12px; border:1px solid #fecaca; border-radius:7px; background:#fff1f2; color:#991b1b; text-align:left; cursor:pointer; }
+        .summary-failure-row:hover, .summary-failure-row:focus-visible { border-color:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,.12); outline:none; }
+        .summary-detail-modal { width:min(900px, 100%); max-height:min(82vh, 760px); background:#fff; border-radius:8px; box-shadow:0 24px 72px rgba(15,23,42,.28); overflow:hidden; display:flex; flex-direction:column; }
+        .summary-detail-body { min-height:0; overflow:auto; padding:18px; }
+        .summary-detail-meta { display:flex; flex-wrap:wrap; gap:8px 16px; color:#475569; font-size:13px; margin-bottom:12px; }
+        .summary-detail-table-wrap { overflow:auto; border:1px solid #e2e8f0; border-radius:6px; }
+        .summary-detail-table { min-width:560px; }
+        .summary-detail-empty { color:#64748b; padding:14px; }
         .note { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; color:#475569; font-size:12px; line-height:1.6; padding:10px 12px; margin-top:10px; }
         .blocked { background:#fff1f2; border-color:#fecaca; color:#991b1b; }
         .log { background:#0f172a; color:#d4d4d4; border-radius:8px; padding:12px; font-family:"Courier New", monospace; font-size:12px; max-height:260px; overflow:auto; line-height:1.7; }
@@ -228,8 +244,19 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="transferSummaryDetailModal" onclick="if(event.target.id==='transferSummaryDetailModal')closeTransferSummaryDetail()">
+    <div class="summary-detail-modal">
+        <div class="login-modal-head">
+            <h3 id="transferSummaryDetailTitle">汇总明细</h3>
+            <button class="modal-close" type="button" onclick="closeTransferSummaryDetail()">×</button>
+        </div>
+        <div class="summary-detail-body" id="transferSummaryDetailBody"></div>
+    </div>
+</div>
+
 <script>
 let lastSummary = null;
+let transferSummaryData = null;
 let pollTimer = null;
 let previewTimer = null;
 let lastRenderedLogKey = '';
@@ -636,6 +663,7 @@ function resetTransferActionUi() {
     document.getElementById('previewBtn').disabled = false;
     document.getElementById('previewBtn').textContent = '汇总预览';
     lastSummary = null;
+    transferSummaryData = null;
 }
 
 function parseBarcodes() {
@@ -849,10 +877,18 @@ function clearForm() {
 function renderSummary(summary) {
     const box = document.getElementById('summaryBox');
     const transferSummaryCard = document.getElementById('transferSummaryCard');
+    transferSummaryData = summary || {};
     mergeDistributorHistory((summary.details || []).flatMap(row => [row.current_dealer, row.service_dealer]));
     const totalQty = (summary.groups || []).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
-    const rows = (summary.groups || []).map(row => `
-        <tr><td>${(row.matched_prefixes || []).map(escapeHtml).join('<br>') || '-'}</td><td>${escapeHtml(row.product_model || row.product_name || '')}</td><td>${escapeHtml(row.product_name)}</td><td>${escapeHtml(row.product_code)}</td><td>${row.quantity || 0}</td><td>${(row.barcodes || []).map(escapeHtml).join('<br>')}</td></tr>
+    const rows = (summary.groups || []).map((row, index) => `
+        <button type="button" class="summary-product-row" onclick="openTransferSummaryProduct(${index})">
+            <span class="summary-product-name">
+                <strong>${escapeHtml(row.product_name || row.product_model || '未命名产品')}</strong>
+                <small>${escapeHtml(row.product_model || row.product_code || '')}</small>
+            </span>
+            <span class="summary-product-quantity">数量 ${Number(row.quantity || 0)}</span>
+            <span class="summary-product-open">查看条码 →</span>
+        </button>
     `).join('');
     const details = (summary.details || []).map(row => `
         <tr><td>${escapeHtml(row.barcode)}</td><td>${escapeHtml(row.matched_prefix || '')}</td><td>${escapeHtml(row.product_model || row.product_name || '')}</td><td>${escapeHtml(row.product_name || '')}</td><td>${escapeHtml(row.product_code || '')}</td><td>${escapeHtml(row.current_dealer || '未查询，按条码匹配')}</td><td><span class="pill">${escapeHtml(row.source === 'product_library' ? '条码匹配' : row.source === 'query_result' ? '查询结果' : '未匹配')}</span></td></tr>
@@ -864,7 +900,8 @@ function renderSummary(summary) {
         return `<tr><td>${escapeHtml(bc)}</td><td>${escapeHtml(reason)}</td></tr>`;
     }).join('');
     box.innerHTML = `
-        <table><thead><tr><th>匹配前缀</th><th>产品型号</th><th>产品名称</th><th>产品编码</th><th>数量</th><th>条码</th></tr></thead><tbody>${rows || '<tr><td colspan="6">无可移库明细</td></tr>'}</tbody></table>
+        <div class="summary-product-list">${rows || '<div class="summary-detail-empty">无可移库产品</div>'}</div>
+        ${(summary.failure_details || []).length ? `<button type="button" class="summary-failure-row" onclick="openTransferSummaryFailures()">汇总失败/排除条码 ${(summary.failure_details || []).length} 个，点击查看失败原因 →</button>` : ''}
         <div class="note">已选条码 ${summary.total || 0} 个，产品 ${(summary.groups || []).length} 条，数量合计 ${totalQty}。</div>
         <table><thead><tr><th>条码</th><th>匹配前缀</th><th>产品型号</th><th>产品名称</th><th>产品编码</th><th>当前所属</th><th>来源</th></tr></thead><tbody>${details}</tbody></table>
         ${blockedRows ? `<div class="note blocked">以下条码方向不匹配，仅提示。确认后仍会提交移库。</div><table><thead><tr><th>条码</th><th>提示</th></tr></thead><tbody>${blockedRows}</tbody></table>` : ''}
@@ -875,6 +912,52 @@ function renderSummary(summary) {
         `产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个`;
     transferSummaryCard.hidden = false;
     box.style.display = '';
+}
+
+function closeTransferSummaryDetail() {
+    document.getElementById('transferSummaryDetailModal')?.classList.remove('show');
+}
+
+function openTransferSummaryProduct(index) {
+    const summary = transferSummaryData || {};
+    const product = (summary.groups || [])[index];
+    if (!product) return;
+    const modal = document.getElementById('transferSummaryDetailModal');
+    const title = document.getElementById('transferSummaryDetailTitle');
+    const body = document.getElementById('transferSummaryDetailBody');
+    title.textContent = '产品条码明细';
+    body.innerHTML = `
+        <div class="summary-detail-meta">
+            <span>产品名称：<strong>${escapeHtml(product.product_name || product.product_model || '未命名产品')}</strong></span>
+            <span>产品型号：${escapeHtml(product.product_model || '—')}</span>
+            <span>产品编码：${escapeHtml(product.product_code || '—')}</span>
+            <span>数量：${Number(product.quantity || 0)}</span>
+        </div>
+        <div class="summary-detail-table-wrap">
+            <table class="summary-detail-table">
+                <thead><tr><th>#</th><th>条码</th></tr></thead>
+                <tbody>${(product.barcodes || []).map((barcode, rowIndex) => `<tr><td>${rowIndex + 1}</td><td><code>${escapeHtml(barcode)}</code></td></tr>`).join('') || '<tr><td colspan="2" class="summary-detail-empty">暂无条码</td></tr>'}</tbody>
+            </table>
+        </div>`;
+    modal.classList.add('show');
+}
+
+function openTransferSummaryFailures() {
+    const summary = transferSummaryData || {};
+    const failures = summary.failure_details || [];
+    const modal = document.getElementById('transferSummaryDetailModal');
+    const title = document.getElementById('transferSummaryDetailTitle');
+    const body = document.getElementById('transferSummaryDetailBody');
+    title.textContent = '汇总失败条码';
+    body.innerHTML = `
+        <div class="summary-detail-meta"><span>失败/排除条码：<strong>${failures.length}</strong> 个</span></div>
+        <div class="summary-detail-table-wrap">
+            <table class="summary-detail-table">
+                <thead><tr><th>#</th><th>条码</th><th>类别</th><th>失败原因</th></tr></thead>
+                <tbody>${failures.map((row, index) => `<tr><td>${index + 1}</td><td><code>${escapeHtml(row.barcode)}</code></td><td>${escapeHtml(row.category || '失败')}</td><td>${escapeHtml(row.reason || '未提供原因')}</td></tr>`).join('') || '<tr><td colspan="4" class="summary-detail-empty">暂无失败条码</td></tr>'}</tbody>
+            </table>
+        </div>`;
+    modal.classList.add('show');
 }
 
 async function ensureCrmLoggedIn(actionText) {

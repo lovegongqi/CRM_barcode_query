@@ -499,6 +499,25 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("失败条码填入并自动开始查询", source)
         self.assertIn("formatBatchElapsed", source)
 
+    def test_query_page_discovers_latest_job_across_browsers(self):
+        source = self.source("crm.html")
+        self.assertIn("querySharedSyncTimer", source)
+        self.assertIn("pollMultiBatchStatus({latest: true})", source)
+        self.assertIn("params.set('latest', '1')", source)
+
+    def test_product_library_renders_online_query_logs_in_live_result_area(self):
+        source = self.source("product_library.html")
+        self.assertIn('id="lookupBox" class="note" aria-live="polite" aria-atomic="false"', source)
+        self.assertIn("function renderLibraryQueryInlineStatus(data)", source)
+        self.assertIn("renderLibraryQueryInlineStatus(data)", source)
+
+    def test_transfer_summary_has_product_and_failure_detail_drilldown(self):
+        source = self.source("transfer.html")
+        self.assertIn('id="transferSummaryDetailModal"', source)
+        self.assertIn("openTransferSummaryProduct", source)
+        self.assertIn("openTransferSummaryFailures", source)
+        self.assertIn("failure_details", source)
+
     def test_results_page_omits_legacy_file_storage_footer(self):
         source = self.source("index.html")
         self.assertNotIn("查询结果文件保存在 barcode/ 目录下", source)

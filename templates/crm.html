@@ -243,6 +243,7 @@
         let multiBatchJobs = {};
         let currentBackgroundQueryJobId = sessionStorage.getItem('crm_background_query_job_id') || '';
         let multiBatchPollTimer = null;
+        let querySharedSyncTimer = null;
         let isMultiBatchPolling = false;
         let pendingLoginSlots = [];
         let currentLoginJobId = sessionStorage.getItem('crm_bulk_login_job_query') || '';
@@ -1134,6 +1135,9 @@
 
         function applyBackgroundQueryStatus(data) {
             if (!data || !data.success || !data.job_id) return false;
+            if (currentBackgroundQueryJobId && currentBackgroundQueryJobId !== data.job_id) {
+                lastBatchLogSeq = 0;
+            }
             currentBackgroundQueryJobId = data.job_id;
             sessionStorage.setItem('crm_background_query_job_id', currentBackgroundQueryJobId);
             const items = (data.items || []).map(item => ({
@@ -1242,12 +1246,16 @@
             }
         }
 
-        async function pollMultiBatchStatus() {
+        async function pollMultiBatchStatus(options={}) {
             if (isMultiBatchPolling) return;
             isMultiBatchPolling = true;
             try {
                 const params = new URLSearchParams();
-                if (currentBackgroundQueryJobId) params.set('job_id', currentBackgroundQueryJobId);
+                if (options.latest) {
+                    params.set('latest', '1');
+                } else if (currentBackgroundQueryJobId) {
+                    params.set('job_id', currentBackgroundQueryJobId);
+                }
                 const response = await fetch('/api/crm/background-batch/status?' + params.toString());
                 const data = await response.json();
                 if (!data.success || !data.job_id) {
@@ -1288,6 +1296,15 @@
             } finally {
                 isMultiBatchPolling = false;
             }
+        }
+
+        function startQuerySharedSync() {
+            if (querySharedSyncTimer) clearInterval(querySharedSyncTimer);
+            querySharedSyncTimer = setInterval(() => {
+                if (!isMultiBatchRunning && !batchStartPending) {
+                    pollMultiBatchStatus({latest: true});
+                }
+            }, 2000);
         }
 
         async function stopBatch() {
@@ -1346,12 +1363,13 @@
         if (currentLoginJobId) {
             startBulkLoginPolling();
         }
-        pollMultiBatchStatus();
+        pollMultiBatchStatus({latest: true});
+        startQuerySharedSync();
 
         document.addEventListener('visibilitychange', () => {
-            if (!document.hidden) pollMultiBatchStatus();
+            if (!document.hidden) pollMultiBatchStatus({latest: true});
         });
-        window.addEventListener('pageshow', pollMultiBatchStatus);
+        window.addEventListener('pageshow', () => pollMultiBatchStatus({latest: true}));
 
         // 页面加载时自动填入保存的用户名
         loadSavedCrmCredentials();

@@ -152,6 +152,65 @@ class BackgroundJobTests(unittest.TestCase):
             ["stopped", "stopped", "stopped"],
         )
 
+    def test_latest_query_discovery_replaces_stale_job_id(self):
+        stale = app_module._empty_background_query_job(
+            "admin",
+            ["7925000000101"],
+            ["query-1"],
+            0,
+        )
+        stale.update({"done": True, "finished_at": "2026-07-25 10:00:00"})
+        latest = app_module._empty_background_query_job(
+            "admin",
+            ["7925000000102"],
+            ["query-1"],
+            0,
+        )
+        latest.update({"done": True, "finished_at": "2026-07-25 10:01:00"})
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs[stale["job_id"]] = stale
+            app_module.background_query_jobs[latest["job_id"]] = latest
+            app_module.latest_background_query_job_by_owner["admin"] = latest["job_id"]
+
+        response = self.client.get(
+            "/api/crm/background-batch/status",
+            query_string={"job_id": stale["job_id"], "latest": "1"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["job_id"], latest["job_id"])
+
+    def test_transfer_summary_failure_details_include_reasons(self):
+        summary = {
+            "missing": [],
+            "incomplete": ["INC-001"],
+            "excluded": ["MISS-001", "DIS-001"],
+            "excluded_unmatched": ["MISS-001"],
+        }
+
+        details = app_module._refresh_transfer_summary_failure_details(summary)
+
+        self.assertEqual(
+            details,
+            [
+                {
+                    "barcode": "INC-001",
+                    "category": "incomplete",
+                    "reason": "条码缺少产品名称或产品编码，无法自动汇总",
+                },
+                {
+                    "barcode": "MISS-001",
+                    "category": "missing",
+                    "reason": "在线查询后仍无产品信息，已临时排除",
+                },
+                {
+                    "barcode": "DIS-001",
+                    "category": "excluded",
+                    "reason": "拆机条码，已排除",
+                },
+            ],
+        )
+
     def test_transfer_job_persists_final_state_without_frontend(self):
         tempdir = tempfile.TemporaryDirectory()
         original_db = app_module.TRANSFER_RECORDS_DB_FILE

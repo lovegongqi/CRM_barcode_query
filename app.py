@@ -4299,9 +4299,56 @@ def _summary_error_from_result(summary):
         return '部分条码缺少产品名称或产品编码，无法自动汇总'
     return ''
 
+def _refresh_transfer_summary_failure_details(summary):
+    summary = summary if isinstance(summary, dict) else {}
+    rows = []
+    seen = set()
+    excluded_unmatched = {
+        _clean_export_value(barcode)
+        for barcode in summary.get('excluded_unmatched', [])
+        if _clean_export_value(barcode)
+    }
+
+    def append(barcode, category, reason):
+        barcode = _clean_export_value(barcode)
+        if not barcode or barcode in seen:
+            return
+        seen.add(barcode)
+        rows.append({
+            'barcode': barcode,
+            'category': category,
+            'reason': reason,
+        })
+
+    for barcode in summary.get('incomplete', []) or []:
+        append(
+            barcode,
+            'incomplete',
+            '条码缺少产品名称或产品编码，无法自动汇总',
+        )
+    for barcode in summary.get('missing', []) or []:
+        append(
+            barcode,
+            'missing',
+            (
+                '在线查询后仍无产品信息，已临时排除'
+                if _clean_export_value(barcode) in excluded_unmatched
+                else '条码匹配未匹配，请先添加前缀规则或查询一次该产品条码'
+            ),
+        )
+    for barcode in summary.get('excluded', []) or []:
+        if _clean_export_value(barcode) in excluded_unmatched:
+            append(barcode, 'missing', '在线查询后仍无产品信息，已临时排除')
+        else:
+            append(barcode, 'excluded', '拆机条码，已排除')
+
+    summary['failure_details'] = rows
+    return rows
+
 def _exclude_unmatched_transfer_barcodes(summary):
     missing = [_clean_export_value(x) for x in summary.get('missing', []) if _clean_export_value(x)]
     if not missing:
+        _refresh_transfer_summary_failure_details(summary)
         return []
     missing_set = set(missing)
     summary['details'] = [
@@ -4319,6 +4366,7 @@ def _exclude_unmatched_transfer_barcodes(summary):
         if barcode not in excluded:
             excluded.append(barcode)
     summary['excluded_unmatched'] = missing
+    _refresh_transfer_summary_failure_details(summary)
     return missing
 
 def _log_transfer_summary_products(log, summary):
@@ -6389,7 +6437,7 @@ def build_transfer_summary(selected_barcodes, transfer_type="移出", distributo
         grouped[key]['quantity'] += 1
         grouped[key]['barcodes'].append(barcode)
 
-    return {
+    summary = {
         'total': len(wanted),
         'details': details,
         'groups': list(grouped.values()),
@@ -6398,6 +6446,8 @@ def build_transfer_summary(selected_barcodes, transfer_type="移出", distributo
         'blocked': blocked,
         'excluded': excluded,
     }
+    _refresh_transfer_summary_failure_details(summary)
+    return summary
 
 def selected_latest_service_orders(selected_barcodes):
     wanted = normalize_input_barcodes(selected_barcodes)
@@ -8420,8 +8470,9 @@ def api_crm_background_batch_start():
 def api_crm_background_batch_status():
     owner = _current_background_query_owner()
     job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
     with background_query_job_lock:
-        if not job_id:
+        if prefer_latest or not job_id:
             job_id = latest_background_query_job_by_owner.get(owner) or ''
         job = background_query_jobs.get(job_id)
         if job and job.get('owner') != owner:

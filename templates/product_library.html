@@ -34,6 +34,11 @@
         .lookup-value { min-width:0; overflow-wrap:anywhere; word-break:break-word; }
         .lookup-result-table { table-layout:fixed; width:100%; }
         .lookup-result-table th, .lookup-result-table td { overflow-wrap:anywhere; word-break:break-word; }
+        .library-inline-query { display:grid; gap:6px; }
+        .library-inline-query-head { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+        .library-inline-query-meta { color:#64748b; font-size:12px; }
+        .library-inline-query-logs { background:#0f172a; color:#d4d4d4; border-radius:6px; padding:8px 10px; max-height:150px; overflow:auto; font-family:"Courier New", monospace; font-size:12px; line-height:1.7; }
+        .library-inline-query-logs .info { color:#4fc3f7; } .library-inline-query-logs .success { color:#81c784; } .library-inline-query-logs .error { color:#e57373; } .library-inline-query-logs .warn { color:#ffb74d; } .library-inline-query-logs .dim { color:#94a3b8; }
         .library-form { display:grid; grid-template-columns: .7fr 1fr 1.2fr auto; gap:8px; align-items:end; margin-bottom:12px; }
         .search-form { display:grid; grid-template-columns: 1fr auto auto auto; gap:8px; align-items:end; margin-bottom:12px; }
         .auth-form { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
@@ -106,7 +111,7 @@
             {% endif %}
             <button class="btn btn-secondary" onclick="clearUnifiedSearch()">清空</button>
         </div>
-        <div id="lookupBox" class="note">输入条码可识别机器；输入型号、产品名称或产品编码可查编码。在线查询需要输入完整条码。</div>
+        <div id="lookupBox" class="note" aria-live="polite" aria-atomic="false">输入条码可识别机器；输入型号、产品名称或产品编码可查编码。在线查询需要输入完整条码。</div>
         <section class="aurora-library-activity" id="libraryQueryActivity" hidden>
             <div class="aurora-realtime-head">
                 <h2>实时查询动态</h2>
@@ -358,6 +363,7 @@ async function confirmQueryBarcode() {
         finished_at: '',
         logs: [{time: new Date().toLocaleTimeString(), message: data.message || '条码查询已开始', level: 'info'}]
     };
+    renderLibraryQueryInlineStatus(libraryQueryActivityData);
     renderLibraryQueryActivity();
     if (queryTimer) clearInterval(queryTimer);
     queryTimer = setInterval(pollQueryStatus, 1000);
@@ -400,6 +406,28 @@ function libraryQueryStatus(data) {
     return {text: last.message || '正在查询 CRM', state: 'running'};
 }
 
+function renderLibraryQueryInlineStatus(data) {
+    const box = document.getElementById('lookupBox');
+    if (!box || !data || (!data.barcode && !(data.logs || []).length)) return;
+    const status = libraryQueryStatus(data);
+    const elapsed = libraryQueryElapsed(data);
+    const logs = (data.logs || []).slice(-6);
+    box.innerHTML = `
+        <div class="library-inline-query">
+            <div class="library-inline-query-head">
+                <strong>在线查询动态：${escapeHtml(data.barcode || '')}</strong>
+                <span class="pill">${escapeHtml(status.text)}</span>
+            </div>
+            <div class="library-inline-query-meta">
+                查询通道：${escapeHtml(data.slot_label || '自动调度')} ·
+                耗时：${elapsed ? escapeHtml(`${elapsed} 秒`) : '进行中'}
+            </div>
+            <div class="library-inline-query-logs">
+                ${logs.map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') || '<div class="dim">等待 CRM 返回日志...</div>'}
+            </div>
+        </div>`;
+}
+
 function renderLibraryQueryActivity() {
     const panel = document.getElementById('libraryQueryActivity');
     const body = document.getElementById('libraryQueryActivityRows');
@@ -436,12 +464,17 @@ function renderQueryLogs(logs, data=null) {
     box.innerHTML = logs.map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('');
     box.scrollTop = box.scrollHeight;
     libraryQueryActivityData = Object.assign({}, libraryQueryActivityData || {}, data || {}, {logs});
+    renderLibraryQueryInlineStatus(libraryQueryActivityData);
     renderLibraryQueryActivity();
     if (window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
 }
 
 async function pollQueryStatus() {
-    const data = await fetch('/api/product-library/query/status').then(res => res.json());
+    const data = await fetch('/api/product-library/query/status').then(res => res.json()).catch(() => null);
+    if (!data || !data.success) {
+        appendQueryLog('在线查询状态读取失败，稍后自动重试', 'warn');
+        return;
+    }
     renderQueryLogs(data.logs || [], data);
     if (!data.done) return;
     clearInterval(queryTimer);
