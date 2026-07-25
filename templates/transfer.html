@@ -273,6 +273,7 @@ let lastLoginLogSeq = 0;
 let transferRealtimeRecords = [];
 let transferRealtimeRefreshTimer = null;
 let transferRealtimeRefreshPending = false;
+let transferRecordsRevision = '';
 const TRANSFER_REALTIME_STORAGE_KEY = 'crm_transfer_realtime_records_v2';
 const BUSINESS_CONFIG = {{ business_config|tojson }};
 const OWN_DEALER_NAME = BUSINESS_CONFIG.own_dealer_name || '江西省天麓工贸有限公司';
@@ -372,17 +373,23 @@ async function loadTransferRealtimeRecords() {
     }
     let rows = Array.isArray(response.records) ? response.records : [];
     if (!rows.length) rows = await migrateLegacyTransferRecords(restoreTransferRealtimeRecords());
+    transferRecordsRevision = response.revision || '';
     transferRealtimeRecords = rows;
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
 }
 
 async function refreshTransferRealtimeRecordsFromServer() {
+    if (document.hidden) return;
     if (transferRealtimeRefreshPending) return;
     transferRealtimeRefreshPending = true;
     try {
-        const response = await fetch('/api/transfer-records').then(res => res.json()).catch(() => null);
-        if (!response || !response.success || !Array.isArray(response.records)) return;
+        const params = new URLSearchParams();
+        if (transferRecordsRevision) params.set('revision', transferRecordsRevision);
+        const response = await fetch('/api/transfer-records?' + params.toString()).then(res => res.json()).catch(() => null);
+        if (!response || !response.success || response.unchanged) return;
+        if (!Array.isArray(response.records)) return;
+        transferRecordsRevision = response.revision || '';
         transferRealtimeRecords = response.records;
         saveTransferRealtimeRecords();
         renderTransferRealtimeRecords();
@@ -390,6 +397,20 @@ async function refreshTransferRealtimeRecordsFromServer() {
     } finally {
         transferRealtimeRefreshPending = false;
     }
+}
+
+function scheduleTransferRealtimeRefresh(delay=null) {
+    if (transferRealtimeRefreshTimer) clearTimeout(transferRealtimeRefreshTimer);
+    transferRealtimeRefreshTimer = null;
+    if (document.hidden) return;
+    const hasActiveRecord = transferRealtimeRecords.some(record =>
+        ['running', 'waiting'].includes(String(record && record.state || '').toLowerCase())
+    );
+    const nextDelay = delay == null ? (hasActiveRecord ? 1000 : 5000) : delay;
+    transferRealtimeRefreshTimer = setTimeout(async () => {
+        await refreshTransferRealtimeRecordsFromServer();
+        scheduleTransferRealtimeRefresh();
+    }, nextDelay);
 }
 
 function transferRecordId() {
@@ -433,6 +454,7 @@ function createTransferRealtimeRecord(slotId, distributor) {
     sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
+    scheduleTransferRealtimeRefresh(1000);
     return record;
 }
 
@@ -541,6 +563,7 @@ async function deleteTransferRealtimeRecord(recordId) {
         return;
     }
     transferRealtimeRecords = transferRealtimeRecords.filter(row => row.record_id !== recordId);
+    transferRecordsRevision = '';
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
 }
@@ -554,6 +577,7 @@ async function clearTransferRealtimeRecords() {
         return;
     }
     transferRealtimeRecords = [];
+    transferRecordsRevision = '';
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
 }
@@ -1074,7 +1098,7 @@ function renderBulkLoginStatus(data) {
 }
 
 async function pollBulkLoginStatus() {
-    if (!currentLoginJobId) return;
+    if (document.hidden || !currentLoginJobId) return;
     const params = new URLSearchParams({scope: 'transfer', job_id: currentLoginJobId});
     const data = await fetch('/api/crm/bulk-login/status?' + params.toString()).then(r => r.json()).catch(() => null);
     if (data && data.success) renderBulkLoginStatus(data);
@@ -1247,6 +1271,7 @@ function startSummaryPolling(slotId=currentTransferSlot, jobId=currentSummaryJob
 }
 
 async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummaryJobId) {
+    if (document.hidden) return;
     const params = new URLSearchParams({slot_id: slotId, job_id: jobId || ''});
     const data = await fetch('/api/transfer/summary/status?' + params.toString()).then(res => res.json());
     if (data.job_id) sessionStorage.setItem(`crm_summary_job_id_${slotId}`, data.job_id);
@@ -1353,6 +1378,7 @@ function startTransferPolling(slotId=currentTransferSlot, jobId=currentTransferJ
 }
 
 async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId, recordId='') {
+    if (document.hidden) return;
     const params = new URLSearchParams({slot_id: slotId, job_id: jobId || ''});
     const res = await fetch('/api/crm/transfer/status?' + params.toString());
     const data = await res.json();
@@ -1570,7 +1596,7 @@ async function loadQueriedDealerHistory() {
 (async function initPage() {
     await loadSlots();
     await loadTransferRealtimeRecords();
-    transferRealtimeRefreshTimer = setInterval(refreshTransferRealtimeRecordsFromServer, 1000);
+    scheduleTransferRealtimeRefresh();
     const targetSlot = sessionStorage.getItem('transferTargetSlot') || '';
     if (targetSlot && transferSlots.some(slot => slot.id === targetSlot)) {
         currentTransferSlot = targetSlot;
@@ -1592,14 +1618,21 @@ async function loadQueriedDealerHistory() {
 })();
 
 document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        if (transferRealtimeRefreshTimer) clearTimeout(transferRealtimeRefreshTimer);
+        transferRealtimeRefreshTimer = null;
+        return;
+    }
     if (!document.hidden) {
         refreshTransferRealtimeRecordsFromServer();
+        scheduleTransferRealtimeRefresh(1000);
         resumeBackgroundJobs();
     }
 });
 
 window.addEventListener('pageshow', () => {
     refreshTransferRealtimeRecordsFromServer();
+    scheduleTransferRealtimeRefresh(1000);
     resumeBackgroundJobs();
 });
 </script>

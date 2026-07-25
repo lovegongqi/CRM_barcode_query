@@ -210,6 +210,7 @@ loadLibrary();
 let lookupTimer = null;
 let queryTimer = null;
 let libraryQueryActivityData = null;
+let lastLibraryQueryLogSeq = 0;
 
 function normalizeSearchText(text) {
     return String(text || '').toLowerCase().replace(/\s+/g, '');
@@ -363,6 +364,7 @@ async function confirmQueryBarcode() {
         finished_at: '',
         logs: [{time: new Date().toLocaleTimeString(), message: data.message || '条码查询已开始', level: 'info'}]
     };
+    lastLibraryQueryLogSeq = 0;
     renderLibraryQueryInlineStatus(libraryQueryActivityData);
     renderLibraryQueryActivity();
     if (queryTimer) clearInterval(queryTimer);
@@ -469,13 +471,35 @@ function renderQueryLogs(logs, data=null) {
     if (window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
 }
 
+function mergeLibraryQueryLogs(rows) {
+    const current = Array.isArray(libraryQueryActivityData && libraryQueryActivityData.logs)
+        ? libraryQueryActivityData.logs
+        : [];
+    const seen = new Set(current.map(row => Number(row.id || 0)).filter(Boolean));
+    for (const row of (rows || [])) {
+        const id = Number(row.id || 0);
+        if (id && seen.has(id)) continue;
+        current.push(row);
+        if (id) {
+            seen.add(id);
+            lastLibraryQueryLogSeq = Math.max(lastLibraryQueryLogSeq, id);
+        }
+    }
+    return current.slice(-300);
+}
+
 async function pollQueryStatus() {
-    const data = await fetch('/api/product-library/query/status').then(res => res.json()).catch(() => null);
+    if (document.hidden) return;
+    const params = new URLSearchParams();
+    params.set('since', String(lastLibraryQueryLogSeq));
+    const data = await fetch('/api/product-library/query/status?' + params.toString()).then(res => res.json()).catch(() => null);
     if (!data || !data.success) {
         appendQueryLog('在线查询状态读取失败，稍后自动重试', 'warn');
         return;
     }
-    renderQueryLogs(data.logs || [], data);
+    const logs = mergeLibraryQueryLogs(data.logs || []);
+    libraryQueryActivityData = Object.assign({}, libraryQueryActivityData || {}, data, {logs});
+    renderQueryLogs(logs, libraryQueryActivityData);
     if (!data.done) return;
     clearInterval(queryTimer);
     queryTimer = null;
@@ -492,6 +516,7 @@ async function restoreQueryStatus() {
     const data = await fetch('/api/product-library/query/status').then(res => res.json()).catch(() => null);
     if (!data || !data.success) return;
     if (data.barcode || data.running || data.done) {
+        lastLibraryQueryLogSeq = Number(data.log_seq || 0);
         libraryQueryActivityData = data;
         renderQueryLogs(data.logs || [], data);
     }
@@ -502,6 +527,11 @@ async function restoreQueryStatus() {
 }
 
 restoreQueryStatus();
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && libraryQueryActivityData && libraryQueryActivityData.running) {
+        pollQueryStatus();
+    }
+});
 
 </script>
 </body>

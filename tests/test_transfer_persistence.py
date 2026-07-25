@@ -89,6 +89,32 @@ class TransferPersistenceTests(unittest.TestCase):
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(self.client.get("/api/transfer-records").get_json()["records"], [])
 
+    def test_transfer_records_api_skips_unchanged_payloads(self):
+        initial = self.client.get("/api/transfer-records").get_json()
+        unchanged = self.client.get(
+            "/api/transfer-records",
+            query_string={"revision": initial["revision"]},
+        ).get_json()
+
+        self.assertTrue(initial["revision"])
+        self.assertEqual(
+            unchanged,
+            {
+                "success": True,
+                "unchanged": True,
+                "revision": initial["revision"],
+            },
+        )
+
+        self.client.post("/api/transfer-records", json=self.record("revision-test"))
+        changed = self.client.get(
+            "/api/transfer-records",
+            query_string={"revision": initial["revision"]},
+        ).get_json()
+
+        self.assertNotEqual(changed["revision"], initial["revision"])
+        self.assertEqual(changed["records"][0]["record_id"], "revision-test")
+
     def test_unauthenticated_transfer_record_api_is_protected(self):
         client = app_module.app.test_client()
         response = client.get("/api/transfer-records")

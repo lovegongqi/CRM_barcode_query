@@ -490,6 +490,17 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertIn(label, source)
         self.assertIn("getServicePresenceStatus", source)
 
+    def test_results_page_uses_revision_and_chunked_rendering(self):
+        source = self.source("index.html")
+        self.assertIn("let resultDataRevision = ''", source)
+        self.assertIn("let resultsLoadPending = false", source)
+        self.assertIn("const RESULT_RENDER_CHUNK_SIZE = 100", source)
+        self.assertIn("let resultRenderGeneration = 0", source)
+        self.assertIn("requestAnimationFrame(renderChunk)", source)
+        self.assertIn("params.set('revision', resultDataRevision)", source)
+        self.assertIn("document.hidden && !clearSelection", source)
+        self.assertNotIn("fetch('/api/filter-options')", source)
+
     def test_query_summary_includes_failure_count_and_requeue_button(self):
         source = self.source("crm.html")
         self.assertIn('id="queryBatchSummary"', source)
@@ -505,11 +516,37 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("pollMultiBatchStatus({latest: true})", source)
         self.assertIn("params.set('latest', '1')", source)
 
+    def test_query_realtime_table_only_renders_actionable_rows(self):
+        source = self.source("crm.html")
+        self.assertIn("function queryVisibleItems(items)", source)
+        self.assertIn("['running', 'error', 'stopped'].includes", source)
+        self.assertIn("当前无查询中或失败条码", source)
+
     def test_product_library_renders_online_query_logs_in_live_result_area(self):
         source = self.source("product_library.html")
         self.assertIn('id="lookupBox" class="note" aria-live="polite" aria-atomic="false"', source)
         self.assertIn("function renderLibraryQueryInlineStatus(data)", source)
         self.assertIn("renderLibraryQueryInlineStatus(data)", source)
+
+    def test_product_library_query_logs_are_incremental_and_visibility_aware(self):
+        source = self.source("product_library.html")
+        self.assertIn("let lastLibraryQueryLogSeq = 0", source)
+        self.assertIn("function mergeLibraryQueryLogs(rows)", source)
+        self.assertIn("params.set('since', String(lastLibraryQueryLogSeq))", source)
+        self.assertIn("if (document.hidden) return", source)
+
+    def test_shared_logs_are_bounded_lazy_and_debounced(self):
+        source = (STATIC / "log_modal.js").read_text(encoding="utf-8")
+        self.assertIn("const MAX_HISTORY = 1000", source)
+        self.assertIn("const MAX_RENDERED_HISTORY = 500", source)
+        self.assertIn("function schedulePersistHistory()", source)
+        self.assertIn("overlay.classList.contains('show')", source)
+        self.assertIn("logHistory.slice(-MAX_RENDERED_HISTORY)", source)
+
+    def test_work_page_polling_skips_hidden_tabs(self):
+        for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
+            with self.subTest(filename=filename):
+                self.assertIn("document.hidden", self.source(filename))
 
     def test_transfer_summary_has_product_and_failure_detail_drilldown(self):
         source = self.source("transfer.html")
@@ -621,10 +658,12 @@ class FrontendContractTest(unittest.TestCase):
     def test_transfer_records_refresh_independently_of_slot_switching(self):
         transfer = self.source("transfer.html")
         self.assertIn("refreshTransferRealtimeRecordsFromServer", transfer)
-        self.assertRegex(
-            transfer,
-            r"setInterval\(refreshTransferRealtimeRecordsFromServer,\s*1000\)",
-        )
+        self.assertIn("let transferRecordsRevision = ''", transfer)
+        self.assertIn("function scheduleTransferRealtimeRefresh(delay=null)", transfer)
+        self.assertIn("response.unchanged", transfer)
+        self.assertIn("params.set('revision', transferRecordsRevision)", transfer)
+        self.assertIn("? 1000 : 5000", transfer)
+        self.assertIn("if (document.hidden)", transfer)
 
     def test_transfer_summary_has_a_dedicated_product_quantity_card(self):
         transfer = self.source("transfer.html")

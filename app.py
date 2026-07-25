@@ -17,6 +17,7 @@ import threading
 import queue
 import uuid
 import shutil
+import hashlib
 from collections import OrderedDict
 from flask import Flask, render_template, request, jsonify, send_from_directory, Response, session, redirect
 from datetime import datetime
@@ -3676,6 +3677,7 @@ library_query_job = {
     'slot_id': '',
     'slot_label': '',
     'error': '',
+    'log_seq': 0,
     'logs': [],
     'started_at': '',
     'finished_at': '',
@@ -3967,12 +3969,17 @@ def _background_query_status_payload(job):
         if key not in {'owner', 'barcodes'}
     }
     payload['success'] = True
-    payload['items'] = json.loads(json.dumps(job.get('items') or [], ensure_ascii=False))
+    all_items = job.get('items') or []
+    visible_items = [
+        item for item in all_items
+        if item.get('state') in {'running', 'error', 'stopped'}
+    ]
+    payload['items'] = json.loads(json.dumps(visible_items, ensure_ascii=False))
     payload['logs'] = list(job.get('logs') or [])
     payload['failed_barcodes'] = list(job.get('failed_barcodes') or [])
     payload['slot_ids'] = list(job.get('slot_ids') or [])
     payload['pending_count'] = sum(
-        1 for item in payload['items'] if item.get('state') == 'waiting'
+        1 for item in all_items if item.get('state') == 'waiting'
     )
     now = datetime.now()
     for item in payload['items']:
@@ -4174,7 +4181,9 @@ def _run_bulk_login_job(job_id, username, password):
 
 def _library_query_log(message, level='dim'):
     with library_query_lock:
+        library_query_job['log_seq'] = int(library_query_job.get('log_seq') or 0) + 1
         library_query_job['logs'].append({
+            'id': library_query_job['log_seq'],
             'time': datetime.now().strftime('%H:%M:%S'),
             'message': message,
             'level': level,
@@ -6529,6 +6538,22 @@ def queried_dealer_history():
     return list(dealers.keys())
 
 TRANSFER_RECORDS_LOCK = threading.RLock()
+TRANSFER_RECORDS_PROCESS_TOKEN = uuid.uuid4().hex
+transfer_records_revision_counter = 0
+
+
+def _transfer_records_revision():
+    with TRANSFER_RECORDS_LOCK:
+        return f"{TRANSFER_RECORDS_PROCESS_TOKEN}:{transfer_records_revision_counter}"
+
+
+def _bump_transfer_records_revision():
+    global transfer_records_revision_counter
+    with TRANSFER_RECORDS_LOCK:
+        transfer_records_revision_counter += 1
+        return f"{TRANSFER_RECORDS_PROCESS_TOKEN}:{transfer_records_revision_counter}"
+
+
 def _transfer_records_connection():
     os.makedirs(os.path.dirname(TRANSFER_RECORDS_DB_FILE), exist_ok=True)
     connection = sqlite3.connect(TRANSFER_RECORDS_DB_FILE)
@@ -6653,6 +6678,7 @@ def upsert_transfer_record(record):
                     normalized["created_at"], normalized["updated_at"],
                 ),
             )
+            _bump_transfer_records_revision()
     normalized.pop("updated_at", None)
     normalized.pop("created_at", None)
     return normalized
@@ -6665,6 +6691,8 @@ def delete_transfer_record(record_id):
     with TRANSFER_RECORDS_LOCK:
         with _transfer_records_connection() as connection:
             cursor = connection.execute("DELETE FROM transfer_records WHERE record_id = ?", (record_id,))
+            if cursor.rowcount > 0:
+                _bump_transfer_records_revision()
             return cursor.rowcount > 0
 
 
@@ -6672,6 +6700,8 @@ def clear_transfer_records():
     with TRANSFER_RECORDS_LOCK:
         with _transfer_records_connection() as connection:
             cursor = connection.execute("DELETE FROM transfer_records")
+            if cursor.rowcount > 0:
+                _bump_transfer_records_revision()
             return cursor.rowcount
 
 
@@ -7190,7 +7220,48 @@ def unarchive_barcode(barcode):
     except Exception as e:
         return False, str(e)
 
-def scan_barcodes():
+barcode_snapshot_lock = threading.RLock()
+barcode_snapshot_cache = {
+    'signature': None,
+    'revision': '',
+    'barcodes': [],
+    'filters': [],
+}
+
+
+def _barcode_scan_signature():
+    rows = []
+    for scope, directory in (('active', BARCODE_DIR), ('archived', ARCHIVE_DIR)):
+        if not os.path.exists(directory):
+            continue
+        for filename in sorted(os.listdir(directory)):
+            if not filename.endswith('.html'):
+                continue
+            filepath = os.path.join(directory, filename)
+            try:
+                stat = os.stat(filepath)
+            except OSError:
+                continue
+            rows.append((scope, filename, stat.st_size, stat.st_mtime_ns))
+    try:
+        data_stat = os.stat(DATA_FILE)
+        data_signature = (data_stat.st_size, data_stat.st_mtime_ns)
+    except OSError:
+        data_signature = (0, 0)
+    return tuple(rows), data_signature
+
+
+def _reset_barcode_snapshot_cache():
+    with barcode_snapshot_lock:
+        barcode_snapshot_cache.update({
+            'signature': None,
+            'revision': '',
+            'barcodes': [],
+            'filters': [],
+        })
+
+
+def _scan_barcodes_uncached():
     barcodes = []
     seen = set()
 
@@ -7231,6 +7302,30 @@ def scan_barcodes():
     barcodes.sort(key=lambda x: x['mtime'], reverse=True)
     return barcodes
 
+
+def _barcode_snapshot():
+    signature = _barcode_scan_signature()
+    with barcode_snapshot_lock:
+        if barcode_snapshot_cache.get('signature') == signature:
+            return dict(barcode_snapshot_cache)
+
+        barcodes = _scan_barcodes_uncached()
+        revision = hashlib.sha1(
+            repr(signature).encode('utf-8', errors='replace')
+        ).hexdigest()
+        barcode_snapshot_cache.update({
+            'signature': signature,
+            'revision': revision,
+            'barcodes': barcodes,
+            'filters': list(get_filter_options(barcodes).values()),
+        })
+        return dict(barcode_snapshot_cache)
+
+
+def scan_barcodes():
+    return _barcode_snapshot()['barcodes']
+
+
 def scan_archived():
     barcodes = []
     if not os.path.exists(ARCHIVE_DIR):
@@ -7267,10 +7362,21 @@ def index():
 
 @app.route("/api/barcodes", methods=["GET"])
 def api_get_barcodes():
-    barcodes = scan_barcodes()
+    snapshot = _barcode_snapshot()
+    barcodes = snapshot['barcodes']
+    revision = snapshot['revision']
+    if request.args.get('revision') == revision:
+        return jsonify({
+            'success': True,
+            'unchanged': True,
+            'revision': revision,
+            'total': len(barcodes),
+        })
     return jsonify({
         'success': True,
+        'revision': revision,
         'total': len(barcodes),
+        'filters': snapshot['filters'],
         'barcodes': [{
             'barcode': b['barcode'],
             'filename': b['filename'],
@@ -7308,12 +7414,12 @@ def api_get_archived():
 
 @app.route("/api/filter-options", methods=["GET"])
 def api_get_filter_options():
-    barcodes = scan_barcodes()
-    options = get_filter_options(barcodes)
+    snapshot = _barcode_snapshot()
     return jsonify({
         'success': True,
-        'filters': list(options.values()),
-        'total': len(barcodes),
+        'filters': snapshot['filters'],
+        'total': len(snapshot['barcodes']),
+        'revision': snapshot['revision'],
     })
 
 @app.route("/api/barcodes/<barcode>", methods=["GET"])
@@ -7598,7 +7704,18 @@ def api_delete_distributor_history():
 
 @app.route("/api/transfer-records", methods=["GET"])
 def api_transfer_records():
-    return jsonify({'success': True, 'records': load_transfer_records()})
+    revision = _transfer_records_revision()
+    if request.args.get('revision') == revision:
+        return jsonify({
+            'success': True,
+            'unchanged': True,
+            'revision': revision,
+        })
+    return jsonify({
+        'success': True,
+        'records': load_transfer_records(),
+        'revision': revision,
+    })
 
 
 @app.route("/api/transfer-records", methods=["POST"])
@@ -7960,6 +8077,7 @@ def api_product_library_query_start():
             'success': False,
             'barcode': barcode,
             'error': '',
+            'log_seq': 0,
             'logs': [],
             'slot_id': slot_id,
             'slot_label': slot_label,
@@ -7973,7 +8091,15 @@ def api_product_library_query_start():
 
 @app.route("/api/product-library/query/status")
 def api_product_library_query_status():
+    try:
+        since = max(0, int(request.args.get('since') or 0))
+    except (TypeError, ValueError):
+        since = 0
     with library_query_lock:
+        logs = [
+            row for row in library_query_job['logs']
+            if int(row.get('id') or 0) > since
+        ]
         return jsonify({
             'success': True,
             'running': library_query_job['running'],
@@ -7983,7 +8109,8 @@ def api_product_library_query_status():
             'slot_id': library_query_job.get('slot_id', ''),
             'slot_label': library_query_job.get('slot_label', ''),
             'error': library_query_job['error'],
-            'logs': list(library_query_job['logs']),
+            'log_seq': library_query_job.get('log_seq', 0),
+            'logs': logs,
             'started_at': library_query_job['started_at'],
             'finished_at': library_query_job['finished_at'],
         })

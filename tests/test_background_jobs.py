@@ -115,10 +115,7 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(finished["completed"], 3)
         self.assertEqual(finished["success_count"], 3)
         self.assertEqual(finished["failed_count"], 0)
-        self.assertEqual(
-            [item["state"] for item in finished["items"]],
-            ["success", "success", "success"],
-        )
+        self.assertEqual(finished["items"], [])
 
     def test_manual_stop_counts_running_and_waiting_barcodes_as_failures(self):
         worker = FakeQueryWorker("query-1", delay=2)
@@ -180,6 +177,37 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["job_id"], latest["job_id"])
 
+    def test_background_query_status_only_returns_actionable_rows(self):
+        job = app_module._empty_background_query_job(
+            "admin",
+            ["WAIT", "RUN", "SUCCESS", "ERROR", "STOPPED"],
+            ["query-1"],
+            0,
+        )
+        for item, state in zip(
+            job["items"],
+            ["waiting", "running", "success", "error", "stopped"],
+        ):
+            item["state"] = state
+        job.update({
+            "completed": 3,
+            "success_count": 1,
+            "failed_count": 2,
+            "failed_barcodes": ["ERROR", "STOPPED"],
+        })
+
+        payload = app_module._background_query_status_payload(job)
+
+        self.assertEqual(
+            [item["barcode"] for item in payload["items"]],
+            ["RUN", "ERROR", "STOPPED"],
+        )
+        self.assertEqual(payload["pending_count"], 1)
+        self.assertEqual(payload["total"], 5)
+        self.assertEqual(payload["completed"], 3)
+        self.assertEqual(payload["success_count"], 1)
+        self.assertEqual(payload["failed_count"], 2)
+
     def test_transfer_summary_failure_details_include_reasons(self):
         summary = {
             "missing": [],
@@ -210,6 +238,25 @@ class BackgroundJobTests(unittest.TestCase):
                 },
             ],
         )
+
+    def test_product_library_query_status_returns_logs_since_sequence(self):
+        with app_module.library_query_lock:
+            app_module.library_query_job.update({
+                "logs": [],
+                "log_seq": 0,
+                "barcode": "162501010001",
+            })
+        app_module._library_query_log("第一条", "info")
+        app_module._library_query_log("第二条", "success")
+
+        response = self.client.get(
+            "/api/product-library/query/status",
+            query_string={"since": 1},
+        )
+
+        payload = response.get_json()
+        self.assertEqual([row["id"] for row in payload["logs"]], [2])
+        self.assertEqual(payload["log_seq"], 2)
 
     def test_transfer_job_persists_final_state_without_frontend(self):
         tempdir = tempfile.TemporaryDirectory()

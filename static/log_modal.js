@@ -1,12 +1,14 @@
 (function () {
     const STORAGE_KEY_PREFIX = 'crm_page_log_history';
-    const MAX_HISTORY = 8000;
+    const MAX_HISTORY = 1000;
+    const MAX_RENDERED_HISTORY = 500;
     let button = null;
     let overlay = null;
     let body = null;
     let historyLoaded = false;
     let logHistory = [];
     let seenKeys = new Set();
+    let persistTimer = null;
 
     function currentLogScope() {
         const path = window.location.pathname || '/';
@@ -50,12 +52,12 @@
         document.body.appendChild(button);
         document.body.appendChild(overlay);
         loadHistory();
-        renderHistory();
     }
 
     function openGlobalLogModal() {
         ensureLogModal();
         overlay.classList.add('show');
+        renderHistory();
     }
 
     function closeGlobalLogModal() {
@@ -66,6 +68,8 @@
         ensureLogModal();
         logHistory = [];
         seenKeys = new Set();
+        if (persistTimer) clearTimeout(persistTimer);
+        persistTimer = null;
         persistHistory();
         body.innerHTML = '<div class="dim">等待操作...</div>';
     }
@@ -92,6 +96,14 @@
         } catch (e) {}
     }
 
+    function schedulePersistHistory() {
+        if (persistTimer) clearTimeout(persistTimer);
+        persistTimer = setTimeout(() => {
+            persistTimer = null;
+            persistHistory();
+        }, 200);
+    }
+
     function renderHistory() {
         ensureLogModal();
         body.innerHTML = '';
@@ -99,7 +111,7 @@
             body.innerHTML = '<div class="dim">等待操作...</div>';
             return;
         }
-        for (const row of [...logHistory].reverse()) {
+        for (const row of [...logHistory.slice(-MAX_RENDERED_HISTORY)].reverse()) {
             appendLogLine(row.message, row.level, row.time);
         }
         body.scrollTop = 0;
@@ -111,7 +123,7 @@
         line.className = normalizeLevel(level || 'dim');
         line.textContent = `[${time || new Date().toLocaleTimeString()}] ${message || ''}`;
         body.insertBefore(line, body.firstChild);
-        while (body.children.length > 8000) {
+        while (body.children.length > MAX_RENDERED_HISTORY) {
             body.removeChild(body.lastChild);
         }
         body.scrollTop = 0;
@@ -138,8 +150,10 @@
                 if (row.key) seenKeys.delete(row.key);
             }
         }
-        persistHistory();
-        appendLogLine(entry.message, entry.level, entry.time);
+        schedulePersistHistory();
+        if (overlay.classList.contains('show')) {
+            appendLogLine(entry.message, entry.level, entry.time);
+        }
     }
 
     function appendGlobalLogRow(row) {

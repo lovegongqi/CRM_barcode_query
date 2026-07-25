@@ -1332,6 +1332,10 @@
         let pendingTransferPayload = null;
         let allBarcodes = [];
         var selectedBarcodes = new Set();
+        let resultDataRevision = '';
+        let resultsLoadPending = false;
+        const RESULT_RENDER_CHUNK_SIZE = 100;
+        let resultRenderGeneration = 0;
         var filterConfigs = [];
         var activeFilters = {};
         let serviceCloseTimer = null;
@@ -1652,13 +1656,19 @@
 
         function renderList(barcodes) {
             const container = document.getElementById('barcodeList');
+            const generation = ++resultRenderGeneration;
             if (barcodes.length === 0) {
                 container.innerHTML = `<div class="empty-state"><p>没有符合条件的条码</p></div>`;
                 return;
             }
 
-            let html = '';
-            for (const item of barcodes) {
+            container.innerHTML = '';
+            let offset = 0;
+            function renderChunk() {
+                if (generation !== resultRenderGeneration) return;
+                let html = '';
+                const chunk = barcodes.slice(offset, offset + RESULT_RENDER_CHUNK_SIZE);
+                for (const item of chunk) {
                 const f = item.fields || {};
                 const _sr2raw = Array.isArray(f['sr2']) ? (f['sr2'][0] || {}) : (f['sr2'] || {});
                 const _sr10raw = Array.isArray(f['sr10']) ? (f['sr10'][0] || {}) : (f['sr10'] || {});
@@ -1711,8 +1721,12 @@
                         </div>
                     </div>
                 `;
+                }
+                container.insertAdjacentHTML('beforeend', html);
+                offset += chunk.length;
+                if (offset < barcodes.length) requestAnimationFrame(renderChunk);
             }
-            container.innerHTML = html;
+            renderChunk();
         }
 
         function parseServiceDate(value) {
@@ -2340,39 +2354,37 @@ ${section(9, '移机单', 'moveid1', [
                 .then(d => { if (d.success) loadAllData(); else showToast(d.error); });
         }
 
-        function loadAllData(clearSelection = true) {
+        async function loadAllData(clearSelection = true) {
+            if (document.hidden && !clearSelection) return;
+            if (resultsLoadPending) return;
+            resultsLoadPending = true;
             if (clearSelection) selectedBarcodes.clear();
-            fetch('/api/barcodes')
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        allBarcodes = data.barcodes || [];
-                        document.getElementById('totalCount').textContent = allBarcodes.length;
-                        document.getElementById('filteredCount').textContent = allBarcodes.length;
-                        applyFilters();
-                    } else {
-                        allBarcodes = [];
-                        document.getElementById('totalCount').textContent = 0;
-                        document.getElementById('filteredCount').textContent = 0;
-                        document.getElementById('barcodeList').innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || '加载条码失败')}</p></div>`;
-                        showToast(data.error || '加载条码失败');
-                    }
-                })
-                .catch(err => {
-                    console.error(err);
-                    document.getElementById('barcodeList').innerHTML = `<div class="empty-state"><p>加载条码失败：${escapeHtml(err.message || err)}</p></div>`;
-                });
-
-            fetch('/api/filter-options')
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success && data.filters) {
-                        buildFilterUI(data.filters);
-                    } else if (data.error) {
-                        document.getElementById('filterArea').innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error)}</p></div>`;
-                    }
-                })
-                .catch(err => console.error(err));
+            try {
+                const params = new URLSearchParams();
+                if (resultDataRevision) params.set('revision', resultDataRevision);
+                const response = await fetch('/api/barcodes?' + params.toString());
+                const data = await response.json();
+                if (!data.success) {
+                    allBarcodes = [];
+                    document.getElementById('totalCount').textContent = 0;
+                    document.getElementById('filteredCount').textContent = 0;
+                    document.getElementById('barcodeList').innerHTML = `<div class="empty-state"><p>${escapeHtml(data.error || '加载条码失败')}</p></div>`;
+                    showToast(data.error || '加载条码失败');
+                    return;
+                }
+                if (data.unchanged) return;
+                resultDataRevision = data.revision || '';
+                allBarcodes = data.barcodes || [];
+                document.getElementById('totalCount').textContent = allBarcodes.length;
+                document.getElementById('filteredCount').textContent = allBarcodes.length;
+                if (data.filters) buildFilterUI(data.filters);
+                applyFilters();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('barcodeList').innerHTML = `<div class="empty-state"><p>加载条码失败：${escapeHtml(err.message || err)}</p></div>`;
+            } finally {
+                resultsLoadPending = false;
+            }
         }
 
         document.getElementById('detailModal').addEventListener('click', e => {
@@ -2382,6 +2394,9 @@ ${section(9, '移机单', 'moveid1', [
 
         loadAllData();
         setInterval(() => loadAllData(false), 30000);
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) loadAllData(false);
+        });
 
         // ===== 查询功能（CRM 集成） =====
         let isBatchRunning = false;
@@ -2492,6 +2507,7 @@ ${section(9, '移机单', 'moveid1', [
         }
 
         async function checkStatus() {
+            if (document.hidden) return;
             try {
                 refreshAppAccountStatus();
                 const r = await fetch('/api/crm/status');
@@ -2694,6 +2710,7 @@ ${section(9, '移机单', 'moveid1', [
         }
 
         async function pollBatchStatus() {
+            if (document.hidden) return;
             const r = await fetch('/api/crm/batch/status?since=' + encodeURIComponent(lastBatchLogSeq));
             const d = await r.json();
             appendBatchLogs(d.logs || []);

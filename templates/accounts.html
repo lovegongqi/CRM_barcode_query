@@ -451,7 +451,7 @@ function renderBulkLoginJob(data) {
 }
 
 async function pollBulkLoginJob() {
-    if (!currentBulkCrmLoginJobId) return;
+    if (document.hidden || !currentBulkCrmLoginJobId) return;
     const params = new URLSearchParams({scope: 'all', job_id: currentBulkCrmLoginJobId});
     const data = await fetch('/api/crm/bulk-login/status?' + params.toString()).then(res => res.json()).catch(() => null);
     if (data && data.success) renderBulkLoginJob(data);
@@ -601,6 +601,10 @@ async function changePassword() {
     document.getElementById('newPassword').value = '';
     alert('密码已修改');
 }
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && currentBulkCrmLoginJobId) pollBulkLoginJob();
+});
 
 loadAccounts();
 </script>

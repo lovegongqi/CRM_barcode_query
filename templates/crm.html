@@ -484,9 +484,15 @@
             return `${secs}秒`;
         }
 
+        function queryVisibleItems(items) {
+            return (Array.isArray(items) ? items : [])
+                .filter(item => ['running', 'error', 'stopped'].includes(String(item && item.state || '').toLowerCase()));
+        }
+
         function queryDisplayItems() {
-            const active = Array.isArray(multiBatchJobs && multiBatchJobs.items) ? multiBatchJobs.items : [];
-            return active.length ? active : lastQueryItems;
+            const active = queryVisibleItems(multiBatchJobs && multiBatchJobs.items);
+            if (multiBatchJobs && multiBatchJobs.job_id) return active;
+            return queryVisibleItems(lastQueryItems);
         }
 
         function queryItemByBarcode(barcode) {
@@ -544,7 +550,7 @@
             if (!body) return;
             const items = queryDisplayItems();
             if (!items.length) {
-                body.innerHTML = '<tr><td colspan="6"><div class="aurora-empty">输入条码并开始查询后，将在这里逐条显示实时状态</div></td></tr>';
+                body.innerHTML = '<tr><td colspan="6"><div class="aurora-empty">当前无查询中或失败条码</div></td></tr>';
                 return;
             }
             body.innerHTML = items.map((item, index) => {
@@ -670,7 +676,10 @@
             const completed = multiBatchJobs.completed || 0;
             const success = multiBatchJobs.successCount || 0;
             const failed = multiBatchJobs.failedCount || 0;
-            const pending = Math.max(0, (multiBatchJobs.pending || []).length);
+            const pending = Math.max(
+                0,
+                Number(multiBatchJobs.pendingCount ?? (multiBatchJobs.pending || []).length)
+            );
             const failedBarcodes = Array.from(new Set(multiBatchJobs.failedBarcodes || []));
             const notices = (multiBatchJobs.notices || []).slice(-3);
             const startedMs = Number(multiBatchJobs.startedAtMs || 0) || Date.parse(multiBatchJobs.started_at || '');
@@ -848,6 +857,7 @@
         }
 
         async function checkStatus() {
+            if (document.hidden) return;
             try {
                 refreshAppAccountStatus();
                 await loadSlots();
@@ -971,7 +981,7 @@
         }
 
         async function pollBulkLoginStatus() {
-            if (!currentLoginJobId) return;
+            if (document.hidden || !currentLoginJobId) return;
             const params = new URLSearchParams({scope: 'query', job_id: currentLoginJobId});
             const data = await fetch('/api/crm/bulk-login/status?' + params.toString()).then(r => r.json()).catch(() => null);
             if (data && data.success) renderBulkLoginStatus(data);
@@ -1140,7 +1150,7 @@
             }
             currentBackgroundQueryJobId = data.job_id;
             sessionStorage.setItem('crm_background_query_job_id', currentBackgroundQueryJobId);
-            const items = (data.items || []).map(item => ({
+            const items = queryVisibleItems((data.items || []).map(item => ({
                 barcode: item.barcode || '',
                 order: Number(item.order || 0),
                 slot_id: item.slot_id || '',
@@ -1152,7 +1162,7 @@
                 startedAt: item.started_at ? Date.parse(item.started_at.replace(' ', 'T')) : 0,
                 elapsed: Number(item.elapsed || 0),
                 logs: Array.isArray(item.logs) ? item.logs : []
-            }));
+            })));
             const slots = {};
             items.filter(item => item.state === 'running' && item.slot_id).forEach(item => {
                 slots[item.slot_id] = {
@@ -1174,7 +1184,8 @@
                 job_id: data.job_id,
                 running: !!data.running,
                 done: !!data.done,
-                pending: items.filter(item => item.state === 'waiting').map(item => item.barcode),
+                pending: [],
+                pendingCount: Number(data.pending_count || 0),
                 items,
                 slots,
                 total: Number(data.total || items.length),
@@ -1247,6 +1258,7 @@
         }
 
         async function pollMultiBatchStatus(options={}) {
+            if (document.hidden) return;
             if (isMultiBatchPolling) return;
             isMultiBatchPolling = true;
             try {
@@ -1301,7 +1313,7 @@
         function startQuerySharedSync() {
             if (querySharedSyncTimer) clearInterval(querySharedSyncTimer);
             querySharedSyncTimer = setInterval(() => {
-                if (!isMultiBatchRunning && !batchStartPending) {
+                if (!document.hidden && !isMultiBatchRunning && !batchStartPending) {
                     pollMultiBatchStatus({latest: true});
                 }
             }, 2000);
