@@ -370,6 +370,12 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="settings"\] \.settings-primary-grid\s*\{[^}]*grid-template-columns:',
         )
 
+    def test_settings_bulk_login_buttons_show_each_slot_latest_message(self):
+        template = self.source("accounts.html")
+        self.assertIn("mergeBulkCrmSlotProgress(data.slots || [])", template)
+        self.assertIn("slot.login_message", template)
+        self.assertIn("slot-pill-current", template)
+
     def test_frozen_warehouse_option_sits_below_its_name_field(self):
         template = self.source("accounts.html")
         field = re.search(

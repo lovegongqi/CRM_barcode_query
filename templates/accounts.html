@@ -42,8 +42,12 @@
         .bulk-login-grid .remember-inline input { width:auto; }
         .bulk-captcha-row { display:grid; grid-template-columns:1fr auto; gap:12px; align-items:end; margin-top:12px; }
         .slot-status-list { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
-        .slot-pill { display:inline-flex; align-items:center; gap:6px; padding:5px 8px; border:1px solid #d9e1ec; border-radius:999px; background:#f8fafc; color:#475569; font-size:12px; font-weight:800; }
+        .slot-pill { display:inline-flex; align-items:center; gap:7px; min-height:44px; padding:6px 8px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; color:#475569; font-size:12px; font-weight:800; }
         .slot-pill .dot { margin-right:0; }
+        .slot-pill .dot.amber { background:#f59e0b; }
+        .slot-pill-copy { display:flex; flex-direction:column; min-width:0; line-height:1.25; }
+        .slot-pill-label, .slot-pill-current { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .slot-pill-current { color:#94a3b8; font-size:10px; font-weight:700; }
         .log-box { background:#0f172a; color:#d4d4d4; border-radius:8px; padding:12px; font-family:"Courier New",monospace; font-size:12px; line-height:1.7; max-height:220px; overflow:auto; }
         .log-box .info { color:#4fc3f7; } .log-box .success { color:#81c784; } .log-box .error { color:#e57373; } .log-box .warn { color:#ffb74d; } .log-box .dim { color:#94a3b8; }
         .actions { display:flex; gap:8px; justify-content:flex-end; flex-wrap:wrap; }
@@ -265,11 +269,58 @@ function renderBulkCrmSlots() {
         return;
     }
     box.innerHTML = bulkCrmSlots.map(slot => {
-        const logged = !!slot.logged_in;
-        const dot = logged ? 'green' : 'red';
-        const text = logged ? '已登录' : (slot.browser_running ? '未登录' : '未启动');
-        return `<span class="slot-pill"><span class="dot ${dot}"></span>${escapeHtml(slot.label)} ${escapeHtml(text)}</span>`;
+        const status = slot.login_status || '';
+        const logged = !!slot.logged_in || status === 'logged_in';
+        const active = ['pending', 'opening', 'waiting_captcha', 'submitting_captcha'].includes(status);
+        const dot = logged ? 'green' : (active ? 'amber' : 'red');
+        const fallback = logged ? '已登录' : (slot.browser_running ? '未登录' : '未启动');
+        const statusText = {
+            pending: '等待登录',
+            opening: '正在打开登录页',
+            waiting_captcha: '等待验证码',
+            submitting_captcha: '正在提交验证码',
+            logged_in: '登录成功',
+            failed: '登录失败'
+        }[status] || fallback;
+        const current = slot.login_message || statusText;
+        const title = `${slot.label || slot.id}：${current}`;
+        return `<span class="slot-pill" title="${escapeHtml(title)}">
+            <span class="dot ${dot}"></span>
+            <span class="slot-pill-copy">
+                <span class="slot-pill-label">${escapeHtml(slot.label || slot.id)}</span>
+                <span class="slot-pill-current">${escapeHtml(current)}</span>
+            </span>
+        </span>`;
     }).join('');
+}
+
+function mergeBulkCrmSlotProgress(jobSlots) {
+    const progressRows = Array.isArray(jobSlots) ? jobSlots : [];
+    const progressById = new Map(progressRows.map(slot => [slot.id, slot]));
+    const currentById = new Map(bulkCrmSlots.map(slot => [slot.id, slot]));
+    bulkCrmSlots = bulkCrmSlots.map(slot => {
+        const progress = progressById.get(slot.id);
+        if (!progress) return slot;
+        return {
+            ...slot,
+            logged_in: progress.status === 'logged_in' || slot.logged_in,
+            login_status: progress.status || '',
+            login_message: progress.message || ''
+        };
+    });
+    progressRows.forEach(progress => {
+        if (currentById.has(progress.id)) return;
+        bulkCrmSlots.push({
+            id: progress.id,
+            label: progress.label || progress.id,
+            kind: progress.kind || 'query',
+            logged_in: progress.status === 'logged_in',
+            browser_running: false,
+            login_status: progress.status || '',
+            login_message: progress.message || ''
+        });
+    });
+    renderBulkCrmSlots();
 }
 
 async function loadBulkCrmSlots() {
@@ -279,7 +330,14 @@ async function loadBulkCrmSlots() {
         renderBulkCrmSlots();
         return;
     }
-    bulkCrmSlots = [...(data.query || []), ...(data.transfer || [])];
+    const progressById = new Map(bulkCrmSlots.map(slot => [slot.id, {
+        login_status: slot.login_status || '',
+        login_message: slot.login_message || ''
+    }]));
+    bulkCrmSlots = [...(data.query || []), ...(data.transfer || [])].map(slot => ({
+        ...slot,
+        ...(progressById.get(slot.id) || {})
+    }));
     renderBulkCrmSlots();
 }
 
@@ -365,6 +423,7 @@ function renderBulkLoginJob(data) {
     if (currentBulkCrmLoginJobId) sessionStorage.setItem('crm_bulk_login_job_all', currentBulkCrmLoginJobId);
     (data.logs || []).forEach(appendBulkLoginServerLog);
     pendingBulkCrmSlots = data.pending_slots || [];
+    mergeBulkCrmSlotProgress(data.slots || []);
     document.getElementById('bulkCrmLoginBtn').disabled = !!data.running;
     document.getElementById('bulkCrmLoginBtn').textContent = data.running ? '登录中...' : '批量登录';
     if (data.waiting_captcha) {
