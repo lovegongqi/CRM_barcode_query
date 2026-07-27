@@ -671,6 +671,29 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("汇总产品数量明细", transfer)
         self.assertIn("transferSummaryCard.hidden = false", transfer)
 
+    def test_transfer_summary_reveals_product_name_and_quantity_rows(self):
+        transfer = self.source("transfer.html")
+        self.assertIn('class="summary-product-list"', transfer)
+        self.assertIn("row.product_name", transfer)
+        self.assertIn("row.quantity", transfer)
+        self.assertIn("box.style.display = 'block'", transfer)
+
+    def test_transfer_summary_uses_product_rows_without_duplicate_detail_table(self):
+        transfer = self.source("transfer.html")
+        self.assertIn(".summary-product-row {", transfer)
+        self.assertIn("background:rgba(15, 31, 52, .82)", transfer)
+        self.assertNotIn("const details = (summary.details || [])", transfer)
+        self.assertNotIn('已选条码 ${summary.total || 0} 个，产品 ${(summary.groups || []).length} 条，数量合计 ${totalQty}。', transfer)
+        self.assertNotIn("<th>条码</th><th>匹配前缀</th><th>产品型号</th><th>产品名称</th>", transfer)
+
+    def test_transfer_summary_detail_modal_uses_aurora_colors(self):
+        transfer = self.source("transfer.html")
+        self.assertIn(".summary-detail-modal {", transfer)
+        self.assertIn("background:rgba(8, 18, 32, .98)", transfer)
+        self.assertIn("border:1px solid rgba(139,190,220,.28)", transfer)
+        self.assertIn(".summary-detail-table-wrap { overflow:auto; border:1px solid rgba(139,190,220,.22);", transfer)
+        self.assertNotIn(".summary-detail-modal { width:min(900px, 100%); max-height:min(82vh, 760px); background:#fff;", transfer)
+
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         for label in ("查询", "结果", "移库", "匹配", "设置"):

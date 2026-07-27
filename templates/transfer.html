@@ -57,21 +57,26 @@
         th { background:#f8fafc; color:#475569; }
         .summary { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; margin-top:12px; display:none; }
         .summary-product-list { display:grid; gap:8px; padding:10px; }
-        .summary-product-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; width:100%; padding:11px 12px; border:1px solid #d9e1ec; border-radius:7px; background:#fff; color:#202938; text-align:left; cursor:pointer; }
-        .summary-product-row:hover, .summary-product-row:focus-visible { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.12); outline:none; }
+        .summary-product-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; width:100%; padding:11px 12px; border:1px solid rgba(139,190,220,.18); border-radius:7px; background:rgba(15, 31, 52, .82); color:#d7edf4; text-align:left; cursor:pointer; }
+        .summary-product-row:hover, .summary-product-row:focus-visible { border-color:rgba(87,227,255,.56); box-shadow:0 0 0 3px rgba(62,198,230,.12); background:rgba(20,44,70,.9); outline:none; }
         .summary-product-name { min-width:0; display:grid; gap:3px; }
         .summary-product-name strong { overflow-wrap:anywhere; }
-        .summary-product-name small { color:#667085; }
-        .summary-product-quantity { white-space:nowrap; color:#1d4ed8; font-weight:800; }
-        .summary-product-open { color:#64748b; font-size:12px; white-space:nowrap; }
+        .summary-product-name small { color:#89a9bd; }
+        .summary-product-quantity { white-space:nowrap; color:#67dfff; font-weight:800; }
+        .summary-product-open { color:#aeeefa; font-size:12px; white-space:nowrap; }
         .summary-failure-row { margin:0 10px 10px; width:calc(100% - 20px); padding:10px 12px; border:1px solid #fecaca; border-radius:7px; background:#fff1f2; color:#991b1b; text-align:left; cursor:pointer; }
         .summary-failure-row:hover, .summary-failure-row:focus-visible { border-color:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,.12); outline:none; }
-        .summary-detail-modal { width:min(900px, 100%); max-height:min(82vh, 760px); background:#fff; border-radius:8px; box-shadow:0 24px 72px rgba(15,23,42,.28); overflow:hidden; display:flex; flex-direction:column; }
+        .summary-detail-modal { width:min(900px, 100%); max-height:min(82vh, 760px); background:rgba(8, 18, 32, .98); border:1px solid rgba(139,190,220,.28); border-radius:8px; box-shadow:0 24px 72px rgba(0,0,0,.48); overflow:hidden; display:flex; flex-direction:column; color:#d7edf4; }
+        .summary-detail-modal .login-modal-head { background:rgba(15, 31, 52, .9); border-bottom-color:rgba(139,190,220,.22); }
+        .summary-detail-modal .modal-close { color:#aeeefa; }
         .summary-detail-body { min-height:0; overflow:auto; padding:18px; }
-        .summary-detail-meta { display:flex; flex-wrap:wrap; gap:8px 16px; color:#475569; font-size:13px; margin-bottom:12px; }
-        .summary-detail-table-wrap { overflow:auto; border:1px solid #e2e8f0; border-radius:6px; }
+        .summary-detail-meta { display:flex; flex-wrap:wrap; gap:8px 16px; color:#aeeefa; font-size:13px; margin-bottom:12px; }
+        .summary-detail-table-wrap { overflow:auto; border:1px solid rgba(139,190,220,.22); border-radius:6px; }
         .summary-detail-table { min-width:560px; }
-        .summary-detail-empty { color:#64748b; padding:14px; }
+        .summary-detail-table th { background:rgba(46, 70, 103, .78); border-bottom-color:rgba(139,190,220,.18); color:#aeeefa; }
+        .summary-detail-table td { border-bottom-color:rgba(139,190,220,.14); color:#d7edf4; }
+        .summary-detail-table code { color:#67dfff; }
+        .summary-detail-empty { color:#89a9bd; padding:14px; }
         .note { background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; color:#475569; font-size:12px; line-height:1.6; padding:10px 12px; margin-top:10px; }
         .blocked { background:#fff1f2; border-color:#fecaca; color:#991b1b; }
         .log { background:#0f172a; color:#d4d4d4; border-radius:8px; padding:12px; font-family:"Courier New", monospace; font-size:12px; max-height:260px; overflow:auto; line-height:1.7; }
@@ -914,9 +919,6 @@ function renderSummary(summary) {
             <span class="summary-product-open">查看条码 →</span>
         </button>
     `).join('');
-    const details = (summary.details || []).map(row => `
-        <tr><td>${escapeHtml(row.barcode)}</td><td>${escapeHtml(row.matched_prefix || '')}</td><td>${escapeHtml(row.product_model || row.product_name || '')}</td><td>${escapeHtml(row.product_name || '')}</td><td>${escapeHtml(row.product_code || '')}</td><td>${escapeHtml(row.current_dealer || '未查询，按条码匹配')}</td><td><span class="pill">${escapeHtml(row.source === 'product_library' ? '条码匹配' : row.source === 'query_result' ? '查询结果' : '未匹配')}</span></td></tr>
-    `).join('');
     const blockedRows = (summary.blocked || []).map(row => `<tr><td>${escapeHtml(row.barcode)}</td><td>${escapeHtml(row.reason)}</td></tr>`).join('');
     const missingRows = (summary.missing || []).map(bc => `<tr><td>${escapeHtml(bc)}</td><td>条码匹配未匹配，请先添加前缀规则或查询一次该产品条码</td></tr>`).join('');
     const excludedRows = (summary.excluded || []).map(bc => {
@@ -926,8 +928,6 @@ function renderSummary(summary) {
     box.innerHTML = `
         <div class="summary-product-list">${rows || '<div class="summary-detail-empty">无可移库产品</div>'}</div>
         ${(summary.failure_details || []).length ? `<button type="button" class="summary-failure-row" onclick="openTransferSummaryFailures()">汇总失败/排除条码 ${(summary.failure_details || []).length} 个，点击查看失败原因 →</button>` : ''}
-        <div class="note">已选条码 ${summary.total || 0} 个，产品 ${(summary.groups || []).length} 条，数量合计 ${totalQty}。</div>
-        <table><thead><tr><th>条码</th><th>匹配前缀</th><th>产品型号</th><th>产品名称</th><th>产品编码</th><th>当前所属</th><th>来源</th></tr></thead><tbody>${details}</tbody></table>
         ${blockedRows ? `<div class="note blocked">以下条码方向不匹配，仅提示。确认后仍会提交移库。</div><table><thead><tr><th>条码</th><th>提示</th></tr></thead><tbody>${blockedRows}</tbody></table>` : ''}
         ${missingRows ? `<div class="note blocked">以下条码无法识别产品。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${missingRows}</tbody></table>` : ''}
         ${excludedRows ? `<div class="note blocked">以下条码不会参与本次移库。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${excludedRows}</tbody></table>` : ''}
@@ -935,7 +935,7 @@ function renderSummary(summary) {
     document.getElementById('transferSummaryTotal').textContent =
         `产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个`;
     transferSummaryCard.hidden = false;
-    box.style.display = '';
+    box.style.display = 'block';
 }
 
 function closeTransferSummaryDetail() {
