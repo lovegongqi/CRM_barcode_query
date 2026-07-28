@@ -56,6 +56,9 @@
         th, td { border-bottom:1px solid #e5e7eb; padding:8px 10px; text-align:left; vertical-align:top; }
         th { background:#f8fafc; color:#475569; }
         .summary { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; margin-top:12px; display:none; }
+        .summary-header-actions { display:flex; align-items:center; gap:8px; min-width:0; }
+        .transfer-summary-card.is-collapsed .aurora-realtime-head { margin-bottom:0; }
+        .transfer-summary-card.is-collapsed .summary { display:none !important; }
         .summary-product-list { display:grid; gap:8px; padding:10px; }
         .summary-product-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; width:100%; padding:11px 12px; border:1px solid rgba(139,190,220,.18); border-radius:7px; background:rgba(15, 31, 52, .82); color:#d7edf4; text-align:left; cursor:pointer; }
         .summary-product-row:hover, .summary-product-row:focus-visible { border-color:rgba(87,227,255,.56); box-shadow:0 0 0 3px rgba(62,198,230,.12); background:rgba(20,44,70,.9); outline:none; }
@@ -175,7 +178,10 @@
             <div class="card transfer-summary-card" id="transferSummaryCard" hidden>
                 <div class="aurora-realtime-head">
                     <h2>汇总产品数量明细</h2>
-                    <span class="aurora-live-badge" id="transferSummaryTotal"></span>
+                    <div class="summary-header-actions">
+                        <span class="aurora-live-badge" id="transferSummaryTotal"></span>
+                        <button type="button" class="aurora-live-action" id="transferSummaryToggle" onclick="toggleTransferSummary()" aria-expanded="true" aria-controls="summaryBox" title="收起汇总明细">收起</button>
+                    </div>
                 </div>
                 <div class="summary" id="summaryBox"></div>
             </div>
@@ -262,6 +268,7 @@
 <script>
 let lastSummary = null;
 let transferSummaryData = null;
+let transferSummaryAutoCollapseJobId = '';
 let pollTimer = null;
 let previewTimer = null;
 let lastRenderedLogKey = '';
@@ -685,6 +692,7 @@ function stopActivePolling() {
 function resetTransferActionUi() {
     const transferSummaryCard = document.getElementById('transferSummaryCard');
     transferSummaryCard.hidden = true;
+    transferSummaryCard.classList.remove('is-collapsed');
     document.getElementById('summaryBox').style.display = 'none';
     document.getElementById('summaryBox').innerHTML = '';
     document.getElementById('transferSummaryTotal').textContent = '';
@@ -693,6 +701,7 @@ function resetTransferActionUi() {
     document.getElementById('previewBtn').textContent = '汇总预览';
     lastSummary = null;
     transferSummaryData = null;
+    transferSummaryAutoCollapseJobId = '';
 }
 
 function parseBarcodes() {
@@ -936,6 +945,20 @@ function renderSummary(summary) {
         `产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个`;
     transferSummaryCard.hidden = false;
     box.style.display = 'block';
+}
+
+function setTransferSummaryCollapsed(collapsed) {
+    const transferSummaryCard = document.getElementById('transferSummaryCard');
+    const toggle = document.getElementById('transferSummaryToggle');
+    transferSummaryCard.classList.toggle('is-collapsed', Boolean(collapsed));
+    toggle.textContent = collapsed ? '展开' : '收起';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.title = collapsed ? '展开汇总明细' : '收起汇总明细';
+}
+
+function toggleTransferSummary() {
+    const transferSummaryCard = document.getElementById('transferSummaryCard');
+    setTransferSummaryCollapsed(!transferSummaryCard.classList.contains('is-collapsed'));
 }
 
 function closeTransferSummaryDetail() {
@@ -1396,6 +1419,10 @@ async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId
         if (data.transfer_success) {
             saveDistributorHistory((data.transfer && data.transfer.distributor) || submittedTransferDistributor);
             submittedTransferDistributor = '';
+            if (transferSummaryAutoCollapseJobId !== data.job_id) {
+                setTransferSummaryCollapsed(true);
+                transferSummaryAutoCollapseJobId = data.job_id || currentTransferJobId;
+            }
         }
         document.getElementById('submitBtn').disabled = false;
     }
@@ -1437,6 +1464,10 @@ async function restoreTransferStatus() {
         if (data.transfer_success) {
             saveDistributorHistory((data.transfer && data.transfer.distributor) || submittedTransferDistributor);
             submittedTransferDistributor = '';
+            if (transferSummaryAutoCollapseJobId !== data.job_id) {
+                setTransferSummaryCollapsed(true);
+                transferSummaryAutoCollapseJobId = data.job_id || currentTransferJobId;
+            }
         }
         submitBtn.disabled = !lastSummary;
         return true;

@@ -678,6 +678,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("row.quantity", transfer)
         self.assertIn("box.style.display = 'block'", transfer)
 
+    def test_transfer_summary_can_collapse_after_a_successful_transfer(self):
+        transfer = self.source("transfer.html")
+        self.assertIn('id="transferSummaryToggle"', transfer)
+        self.assertIn("function setTransferSummaryCollapsed(collapsed)", transfer)
+        self.assertIn("setTransferSummaryCollapsed(true)", transfer)
+        self.assertIn("transferSummaryCard.classList.toggle('is-collapsed', Boolean(collapsed))", transfer)
+
     def test_transfer_summary_uses_product_rows_without_duplicate_detail_table(self):
         transfer = self.source("transfer.html")
         self.assertIn(".summary-product-row {", transfer)
