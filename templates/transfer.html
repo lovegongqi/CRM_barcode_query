@@ -1358,6 +1358,8 @@ async function submitTransfer() {
     submittedTransferDistributor = distributor;
     if (slotId !== currentTransferSlot) return;
     currentTransferJobId = jobId;
+    setTransferSummaryCollapsed(true);
+    transferSummaryAutoCollapseJobId = jobId;
     startTransferPolling(slotId, jobId, activeRecord.record_id);
 }
 

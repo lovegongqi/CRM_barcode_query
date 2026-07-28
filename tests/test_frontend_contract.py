@@ -685,6 +685,12 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("setTransferSummaryCollapsed(true)", transfer)
         self.assertIn("transferSummaryCard.classList.toggle('is-collapsed', Boolean(collapsed))", transfer)
 
+    def test_transfer_summary_collapses_when_submission_is_accepted(self):
+        transfer = self.source("transfer.html")
+        submit = transfer.split("async function submitTransfer()", 1)[1].split("function appendLog", 1)[0]
+        self.assertIn("setTransferSummaryCollapsed(true)", submit)
+        self.assertLess(submit.index("setTransferSummaryCollapsed(true)"), submit.index("startTransferPolling"))
+
     def test_transfer_summary_uses_product_rows_without_duplicate_detail_table(self):
         transfer = self.source("transfer.html")
         self.assertIn(".summary-product-row {", transfer)
