@@ -65,12 +65,11 @@ class FrontendContractTest(unittest.TestCase):
             r"\.aurora-logo\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px",
         )
 
-    def test_mobile_query_select_all_stays_on_one_line(self):
-        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
-        desktop_css = css.split("@media (max-width: 720px)", 1)[0]
+    def test_settings_query_channel_options_wrap(self):
+        settings = self.source("accounts.html")
         self.assertRegex(
-            desktop_css,
-            r"\.aurora-channel-select-all\s*\{[^}]*display:\s*flex;[^}]*white-space:\s*nowrap",
+            settings,
+            r"\.runtime-query-slots\s*\{[^}]*display:flex;[^}]*flex-wrap:wrap",
         )
 
     def test_logged_in_navigation_is_fixed_on_mobile(self):
@@ -88,7 +87,6 @@ class FrontendContractTest(unittest.TestCase):
             mobile_css,
             r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
         )
-        self.assertRegex(css, r"\.aurora-channel-picker\s*\{[^}]*position:\s*relative")
 
     def test_mobile_results_actions_use_equal_three_by_three_grid(self):
         results = self.source("index.html")
@@ -156,10 +154,9 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="results"\] \.date-clear-btn\s*\{[^}]*width:\s*100%[^}]*grid-column:\s*1\s*/\s*-1',
         )
 
-    def test_query_channels_use_one_shared_dropdown_at_all_widths(self):
+    def test_query_channels_are_managed_in_settings(self):
         query = self.source("crm.html")
-        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
-        desktop_css = css.split("@media (max-width: 720px)", 1)[0]
+        settings = self.source("accounts.html")
         for token in (
             'id="querySlotMobileTrigger"',
             'id="querySlotMobileMenu"',
@@ -169,21 +166,10 @@ class FrontendContractTest(unittest.TestCase):
             "selectedQuerySlotIds",
         ):
             with self.subTest(token=token):
-                self.assertIn(token, query)
-        self.assertNotIn('id="querySlotSelector"', query)
-        self.assertNotIn("document.getElementById('querySlotSelector')", query)
-        self.assertNotRegex(
-            desktop_css,
-            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*none",
-        )
-        self.assertRegex(
-            desktop_css,
-            r"\.aurora-channel-mobile-trigger\s*\{[^}]*display:\s*inline-flex",
-        )
-        self.assertRegex(
-            desktop_css,
-            r"\.aurora-channel-mobile-menu\s*\{[^}]*position:\s*absolute",
-        )
+                self.assertNotIn(token, query)
+        self.assertIn('id="runtimeQuerySlots"', settings)
+        self.assertIn("toggleRuntimeQuerySlot", settings)
+        self.assertIn("query_slot_ids", settings)
 
     def test_query_batch_summary_is_persisted_and_replaces_static_badge(self):
         query = self.source("crm.html")
@@ -277,9 +263,17 @@ class FrontendContractTest(unittest.TestCase):
             r'td:nth-child\(3\),[\s\S]*?th:nth-child\(5\),[\s\S]*?td:nth-child\(5\)\s*\{[^}]*display:\s*none',
         )
 
-    def test_query_actions_use_two_mobile_rows(self):
+    def test_mobile_query_actions_keep_start_and_clear_on_first_row(self):
+        query = self.source("crm.html")
+        settings = self.source("accounts.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertNotIn('id="retryLimitInput"', query)
+        self.assertNotIn('class="aurora-channel-picker"', query)
+        self.assertIn('id="batchRetryLimit"', settings)
+        self.assertIn('id="runtimeQuerySlots"', settings)
+        self.assertIn('batch_retry_limit', settings)
+        self.assertIn('query_slot_ids', settings)
         self.assertRegex(
             mobile_css,
             r'body\[data-aurora-page="query"\] \.query-actions\s*\{[^}]*display:\s*grid;[^}]*'
@@ -287,8 +281,20 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="query"\] \.query-actions \.btn,\s*\n\s*'
-            r'body\[data-aurora-page="query"\] \.query-actions \.retry-group\s*\{[^}]*width:\s*100%',
+            r'body\[data-aurora-page="query"\] #batchQueryBtn\s*\{[^}]*order:\s*1',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="query"\] \.query-actions \.btn-secondary\s*\{[^}]*order:\s*2',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="query"\] #stopBatchBtn\s*\{[^}]*order:\s*3;[^}]*'
+            r'grid-column:\s*1\s*/\s*-1',
+        )
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="query"\] \.card-head\s*\{[^}]*border-bottom:\s*0',
         )
 
     def test_desktop_navigation_sits_below_the_page_title(self):

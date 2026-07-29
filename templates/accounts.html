@@ -35,6 +35,10 @@
         .stepper input { width:80px; height:36px; text-align:center; font-weight:800; }
         .stepper button { min-width:36px; min-height:36px; padding:0 10px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; font-weight:900; cursor:pointer; }
         .business-config-grid { display:grid; grid-template-columns:minmax(220px,1fr) minmax(220px,1fr); gap:12px; align-items:start; margin-top:12px; }
+        .runtime-query-settings { display:grid; grid-template-columns:160px minmax(0,1fr); gap:12px; align-items:start; margin-top:12px; }
+        .runtime-query-slots { display:flex; gap:8px; flex-wrap:wrap; }
+        .runtime-query-slot { display:flex; align-items:center; gap:7px; min-height:36px; padding:7px 9px; margin:0; border:1px solid #cfd8e3; border-radius:6px; color:#334155; background:#f8fafc; font-size:12px; }
+        .runtime-query-slot input { width:auto; }
         .frozen-warehouse-field .inline-check { display:flex; align-items:center; gap:7px; margin:9px 0 0; }
         .frozen-warehouse-field .inline-check input { width:auto; }
         .bulk-login-grid { display:grid; grid-template-columns:minmax(160px,1fr) minmax(160px,1fr) auto auto; gap:12px; align-items:end; }
@@ -58,7 +62,7 @@
         table { width:100%; border-collapse:collapse; font-size:13px; }
         th, td { border-bottom:1px solid #e5e7eb; padding:8px 10px; text-align:left; vertical-align:top; }
         th { background:#f8fafc; color:#475569; }
-        @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .bulk-login-grid, .bulk-captcha-row { grid-template-columns:1fr; } }
+        @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .runtime-query-settings, .bulk-login-grid, .bulk-captcha-row { grid-template-columns:1fr; } }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
     <link rel="stylesheet" href="/static/aurora.css">
@@ -118,6 +122,13 @@
                 </div>
             </div>
             <button class="btn btn-primary" onclick="saveRuntimeConfig()">保存配置</button>
+        </div>
+        <div class="runtime-query-settings">
+            <div><label>查询失败重试上限</label><input id="batchRetryLimit" type="number" min="0" max="5" value="5"></div>
+            <div>
+                <label>在线查询通道</label>
+                <div class="runtime-query-slots" id="runtimeQuerySlots"></div>
+            </div>
         </div>
         <div class="business-config-grid">
             <div><label>本公司经销商名称</label><input id="ownDealerName" placeholder="例如：江西省天麓工贸有限公司"></div>
@@ -201,6 +212,8 @@ let pendingBulkCrmSlots = [];
 let currentBulkCrmLoginJobId = sessionStorage.getItem('crm_bulk_login_job_all') || '';
 let bulkLoginPollTimer = null;
 let lastBulkLoginLogSeq = 0;
+let runtimeQuerySlots = [];
+let selectedRuntimeQuerySlotIds = [];
 
 function applyCrmCredentialValues(remember, username='', password='', usernameId='bulkCrmUsername', passwordId='bulkCrmPassword', rememberId='bulkRememberCrmLogin') {
     const rememberEl = document.getElementById(rememberId);
@@ -480,14 +493,46 @@ async function loadRuntimeConfig() {
     document.getElementById('runtimeConfigCard').style.display = '';
     document.getElementById('queryWorkerCount').value = config.query_workers || 2;
     document.getElementById('transferWorkerCount').value = config.transfer_workers || 2;
+    document.getElementById('batchRetryLimit').value = config.batch_retry_limit ?? 5;
     document.getElementById('ownDealerName').value = config.own_dealer_name || '';
     document.getElementById('frozenWarehouseName').value = config.frozen_warehouse_name || '';
     document.getElementById('frozenWarehouseSaveOnly').checked = config.frozen_warehouse_save_only !== false;
+    const slotsData = await fetch('/api/crm/slots').then(res => res.json()).catch(() => null);
+    runtimeQuerySlots = slotsData && slotsData.success ? (slotsData.query || []) : [];
+    const configuredSlots = Array.isArray(config.query_slot_ids) ? config.query_slot_ids : [];
+    selectedRuntimeQuerySlotIds = configuredSlots.filter(slotId => runtimeQuerySlots.some(slot => slot.id === slotId));
+    if (!selectedRuntimeQuerySlotIds.length) selectedRuntimeQuerySlotIds = runtimeQuerySlots.map(slot => slot.id);
+    renderRuntimeQuerySlots();
+}
+
+function renderRuntimeQuerySlots() {
+    const box = document.getElementById('runtimeQuerySlots');
+    if (!box) return;
+    if (!runtimeQuerySlots.length) {
+        box.textContent = '暂无查询通道';
+        return;
+    }
+    box.innerHTML = runtimeQuerySlots.map(slot => {
+        const selected = selectedRuntimeQuerySlotIds.includes(slot.id);
+        const label = String(slot.label || slot.id).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;', "'":'&#39;'}[ch]));
+        return `<label class="runtime-query-slot"><input type="checkbox" value="${slot.id}" ${selected ? 'checked' : ''} onchange="toggleRuntimeQuerySlot(this.value, this.checked)">${label}</label>`;
+    }).join('');
+}
+
+function toggleRuntimeQuerySlot(slotId, checked) {
+    if (checked) selectedRuntimeQuerySlotIds = [...new Set([...selectedRuntimeQuerySlotIds, slotId])];
+    else selectedRuntimeQuerySlotIds = selectedRuntimeQuerySlotIds.filter(id => id !== slotId);
+    if (!selectedRuntimeQuerySlotIds.length) {
+        selectedRuntimeQuerySlotIds = runtimeQuerySlots.map(slot => slot.id);
+        alert('至少保留一个查询通道，已恢复全选');
+    }
+    renderRuntimeQuerySlots();
 }
 
 async function saveRuntimeConfig() {
     const queryWorkers = Number.parseInt(document.getElementById('queryWorkerCount').value, 10);
     const transferWorkers = Number.parseInt(document.getElementById('transferWorkerCount').value, 10);
+    const batchRetryLimit = Number.parseInt(document.getElementById('batchRetryLimit').value, 10);
     const ownDealerName = document.getElementById('ownDealerName').value.trim();
     const frozenWarehouseName = document.getElementById('frozenWarehouseName').value.trim();
     const frozenWarehouseSaveOnly = document.getElementById('frozenWarehouseSaveOnly').checked;
@@ -497,6 +542,8 @@ async function saveRuntimeConfig() {
         body: JSON.stringify({
             query_workers: queryWorkers,
             transfer_workers: transferWorkers,
+            batch_retry_limit: batchRetryLimit,
+            query_slot_ids: selectedRuntimeQuerySlotIds,
             own_dealer_name: ownDealerName,
             frozen_warehouse_name: frozenWarehouseName,
             frozen_warehouse_save_only: frozenWarehouseSaveOnly,
@@ -506,9 +553,11 @@ async function saveRuntimeConfig() {
     const config = data.config || {};
     document.getElementById('queryWorkerCount').value = config.query_workers || queryWorkers;
     document.getElementById('transferWorkerCount').value = config.transfer_workers || transferWorkers;
+    document.getElementById('batchRetryLimit').value = config.batch_retry_limit ?? batchRetryLimit;
     document.getElementById('ownDealerName').value = config.own_dealer_name || ownDealerName;
     document.getElementById('frozenWarehouseName').value = config.frozen_warehouse_name || frozenWarehouseName;
     document.getElementById('frozenWarehouseSaveOnly').checked = config.frozen_warehouse_save_only !== false;
+    await loadRuntimeConfig();
     loadBulkCrmSlots();
     alert('系统配置已更新');
 }

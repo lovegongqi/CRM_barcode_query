@@ -5212,6 +5212,8 @@ def load_runtime_config():
     defaults = {
         "query_workers": _normalize_worker_count(os.environ.get("CRM_QUERY_WORKERS"), 10),
         "transfer_workers": _normalize_worker_count(os.environ.get("CRM_TRANSFER_WORKERS"), 5),
+        "batch_retry_limit": _normalize_retry_limit(os.environ.get("CRM_BATCH_RETRY_LIMIT", DEFAULT_BATCH_RETRY_LIMIT)),
+        "query_slot_ids": [],
         "own_dealer_name": _runtime_text_value(os.environ.get("CRM_OWN_DEALER_NAME"), DEFAULT_OWN_DEALER_NAME),
         "frozen_warehouse_name": _runtime_text_value(os.environ.get("CRM_FROZEN_WAREHOUSE_NAME"), DEFAULT_FROZEN_WAREHOUSE_NAME),
         "frozen_warehouse_save_only": _runtime_bool_value(os.environ.get("CRM_FROZEN_WAREHOUSE_SAVE_ONLY"), True),
@@ -5223,6 +5225,12 @@ def load_runtime_config():
             if isinstance(data, dict):
                 defaults["query_workers"] = _normalize_worker_count(data.get("query_workers"), defaults["query_workers"])
                 defaults["transfer_workers"] = _normalize_worker_count(data.get("transfer_workers"), defaults["transfer_workers"])
+                defaults["batch_retry_limit"] = _normalize_retry_limit(data.get("batch_retry_limit", defaults["batch_retry_limit"]))
+                slot_ids = data.get("query_slot_ids")
+                if isinstance(slot_ids, list):
+                    defaults["query_slot_ids"] = list(dict.fromkeys(
+                        str(slot_id).strip() for slot_id in slot_ids if str(slot_id).strip()
+                    ))
                 defaults["own_dealer_name"] = _runtime_text_value(data.get("own_dealer_name"), defaults["own_dealer_name"])
                 defaults["frozen_warehouse_name"] = _runtime_text_value(data.get("frozen_warehouse_name"), defaults["frozen_warehouse_name"])
                 defaults["frozen_warehouse_save_only"] = _runtime_bool_value(data.get("frozen_warehouse_save_only"), defaults["frozen_warehouse_save_only"])
@@ -5236,6 +5244,12 @@ def save_runtime_config(config):
     payload = {
         "query_workers": _normalize_worker_count(config.get("query_workers"), current.get("query_workers", 10)),
         "transfer_workers": _normalize_worker_count(config.get("transfer_workers"), current.get("transfer_workers", 5)),
+        "batch_retry_limit": _normalize_retry_limit(config.get("batch_retry_limit", current.get("batch_retry_limit", DEFAULT_BATCH_RETRY_LIMIT))),
+        "query_slot_ids": list(dict.fromkeys(
+            str(slot_id).strip()
+            for slot_id in config.get("query_slot_ids", current.get("query_slot_ids", []))
+            if str(slot_id).strip()
+        )),
         "own_dealer_name": _runtime_text_value(config.get("own_dealer_name"), current.get("own_dealer_name", DEFAULT_OWN_DEALER_NAME)),
         "frozen_warehouse_name": _runtime_text_value(config.get("frozen_warehouse_name"), current.get("frozen_warehouse_name", DEFAULT_FROZEN_WAREHOUSE_NAME)),
         "frozen_warehouse_save_only": _runtime_bool_value(config.get("frozen_warehouse_save_only"), current.get("frozen_warehouse_save_only", True)),
@@ -5256,6 +5270,16 @@ def frozen_warehouse_name():
 
 def frozen_warehouse_save_only():
     return bool(business_config().get("frozen_warehouse_save_only", True))
+
+def batch_retry_limit():
+    return _normalize_retry_limit(business_config().get("batch_retry_limit", DEFAULT_BATCH_RETRY_LIMIT))
+
+def configured_query_slot_ids():
+    configured = set(business_config().get("query_slot_ids") or [])
+    with crm_pool.pool_lock:
+        available = list(crm_pool.query_slots)
+    selected = [slot_id for slot_id in available if slot_id in configured]
+    return selected or available
 
 FIELD_IDS = {
     'newisclosed1': '结单状态',
@@ -8223,6 +8247,8 @@ def api_runtime_config_save():
     config = save_runtime_config({
         'query_workers': query_workers,
         'transfer_workers': transfer_workers,
+        'batch_retry_limit': data.get('batch_retry_limit', current.get('batch_retry_limit', DEFAULT_BATCH_RETRY_LIMIT)),
+        'query_slot_ids': data.get('query_slot_ids', current.get('query_slot_ids', [])),
         'own_dealer_name': data.get('own_dealer_name', current.get('own_dealer_name', DEFAULT_OWN_DEALER_NAME)),
         'frozen_warehouse_name': data.get('frozen_warehouse_name', current.get('frozen_warehouse_name', DEFAULT_FROZEN_WAREHOUSE_NAME)),
         'frozen_warehouse_save_only': data.get('frozen_warehouse_save_only', current.get('frozen_warehouse_save_only', True)),
@@ -8537,17 +8563,9 @@ def api_crm_background_batch_start():
             'excluded': excluded,
         }), 400
 
-    requested_slot_ids = data.get('slot_ids') or []
-    if not isinstance(requested_slot_ids, list):
-        return jsonify({'success': False, 'error': '查询通道格式错误'}), 400
-    valid_slot_ids = set(crm_pool.query_slots)
-    slot_ids = []
-    for slot_id in requested_slot_ids:
-        slot_id = str(slot_id or '').strip()
-        if slot_id in valid_slot_ids and slot_id not in slot_ids:
-            slot_ids.append(slot_id)
+    slot_ids = configured_query_slot_ids()
     if not slot_ids:
-        return jsonify({'success': False, 'error': '请至少选择一个查询通道'}), 400
+        return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
 
     with background_query_job_lock:
         running_job_id = latest_background_query_job_by_owner.get(owner)
@@ -8572,7 +8590,7 @@ def api_crm_background_batch_start():
         owner,
         barcodes,
         slot_ids,
-        data.get('retry_limit', DEFAULT_BATCH_RETRY_LIMIT),
+        batch_retry_limit(),
     )
     job.update({
         'running': True,
@@ -8641,7 +8659,7 @@ def api_crm_batch_start():
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
-    retry_limit = _normalize_retry_limit(data.get('retry_limit', DEFAULT_BATCH_RETRY_LIMIT))
+    retry_limit = batch_retry_limit()
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需查询' if excluded else '条码不能为空', 'excluded': excluded})
 

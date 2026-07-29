@@ -91,6 +91,10 @@ class BackgroundJobTests(unittest.TestCase):
             "query-2": FakeQueryWorker("query-2"),
         }
         with mock.patch.object(
+            app_module,
+            "business_config",
+            return_value={"batch_retry_limit": 0, "query_slot_ids": list(workers)},
+        ), mock.patch.object(
             app_module.crm_pool,
             "get",
             side_effect=lambda slot_id=None, kind="query": workers[slot_id],
@@ -117,9 +121,43 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(finished["failed_count"], 0)
         self.assertEqual(finished["items"], [])
 
+    def test_background_query_uses_runtime_retry_limit(self):
+        workers = {"query-1": FakeQueryWorker("query-1")}
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module,
+            "RUNTIME_CONFIG_FILE",
+            os.path.join(tempdir, "runtime_config.json"),
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            side_effect=lambda slot_id=None, kind="query": workers[slot_id],
+        ):
+            app_module.save_runtime_config({
+                "batch_retry_limit": 2,
+                "query_slot_ids": ["query-1"],
+            })
+            response = self.client.post(
+                "/api/crm/background-batch/start",
+                json={
+                    "barcodes": ["7925000000009"],
+                    "slot_ids": ["query-1"],
+                    "retry_limit": 0,
+                },
+            )
+
+            self.assertEqual(response.status_code, 200)
+            started = response.get_json()
+            self.assertEqual(started["retry_limit"], 2)
+            self.assertEqual(started["slot_ids"], ["query-1"])
+            self.wait_for_query(started["job_id"])
+
     def test_manual_stop_counts_running_and_waiting_barcodes_as_failures(self):
         worker = FakeQueryWorker("query-1", delay=2)
         with mock.patch.object(
+            app_module,
+            "business_config",
+            return_value={"batch_retry_limit": 0, "query_slot_ids": ["query-1"]},
+        ), mock.patch.object(
             app_module.crm_pool,
             "get",
             side_effect=lambda slot_id=None, kind="query": worker,
