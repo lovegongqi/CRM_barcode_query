@@ -264,17 +264,17 @@ class FrontendContractTest(unittest.TestCase):
         mobile_css = css.split("@media (max-width: 720px)", 1)[1]
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="crm"\] \.aurora-query-table\s*\{[^}]*min-width:\s*100%',
+            r'body\[data-aurora-page="query"\] \.aurora-query-table\s*\{[^}]*min-width:\s*100%',
         )
         self.assertIn(
-            'body[data-aurora-page="crm"] .aurora-query-table th:nth-child(1),\n'
-            '    body[data-aurora-page="crm"] .aurora-query-table td:nth-child(1),',
+            'body[data-aurora-page="query"] .aurora-query-table th:nth-child(1),\n'
+            '    body[data-aurora-page="query"] .aurora-query-table td:nth-child(1),',
             mobile_css,
         )
-        self.assertIn(
-            'body[data-aurora-page="crm"] .aurora-query-table th:nth-child(3),\n'
-            '    body[data-aurora-page="crm"] .aurora-query-table td:nth-child(3) { display: none; }',
+        self.assertRegex(
             mobile_css,
+            r'body\[data-aurora-page="query"\] \.aurora-query-table th:nth-child\(3\),[\s\S]*?'
+            r'td:nth-child\(3\),[\s\S]*?th:nth-child\(5\),[\s\S]*?td:nth-child\(5\)\s*\{[^}]*display:\s*none',
         )
 
     def test_desktop_navigation_sits_below_the_page_title(self):
