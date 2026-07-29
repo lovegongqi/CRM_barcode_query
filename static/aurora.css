@@ -998,6 +998,32 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     body[data-aurora-page] table { font-size: 11px !important; }
     body[data-aurora-page] th, body[data-aurora-page] td { padding: 8px 7px !important; }
 
+    body[data-aurora-page="query"] .query-actions {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        align-items: end;
+        gap: 10px 8px;
+    }
+    body[data-aurora-page="query"] .query-actions .btn,
+    body[data-aurora-page="query"] .query-actions .retry-group {
+        width: 100%;
+        min-width: 0;
+    }
+    body[data-aurora-page="query"] .query-actions .btn {
+        min-height: 42px;
+        padding: 7px 6px;
+        font-size: 12px;
+        white-space: nowrap;
+    }
+    body[data-aurora-page="query"] .query-actions .retry-group { gap: 4px; }
+    body[data-aurora-page="query"] .query-actions .retry-group label { font-size: 11px; }
+    body[data-aurora-page="query"] .query-actions .retry-group input {
+        width: 100%;
+        min-width: 0;
+        height: 42px;
+        padding: 7px 10px;
+    }
+
     body[data-aurora-page="transfer"] .grid { grid-template-columns: minmax(0, 1fr); }
     body[data-aurora-page="transfer"] .grid > div { min-width: 0; }
     body[data-aurora-page="transfer"] .card,
