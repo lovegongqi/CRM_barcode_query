@@ -259,6 +259,24 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="transfer"\] \.aurora-realtime\s*\{[^}]*max-height:\s*520px',
         )
 
+    def test_query_realtime_table_compacts_to_four_columns_on_mobile(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="crm"\] \.aurora-query-table\s*\{[^}]*min-width:\s*100%',
+        )
+        self.assertIn(
+            'body[data-aurora-page="crm"] .aurora-query-table th:nth-child(1),\n'
+            '    body[data-aurora-page="crm"] .aurora-query-table td:nth-child(1),',
+            mobile_css,
+        )
+        self.assertIn(
+            'body[data-aurora-page="crm"] .aurora-query-table th:nth-child(3),\n'
+            '    body[data-aurora-page="crm"] .aurora-query-table td:nth-child(3) { display: none; }',
+            mobile_css,
+        )
+
     def test_desktop_navigation_sits_below_the_page_title(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn("--aurora-nav-height:", css)
