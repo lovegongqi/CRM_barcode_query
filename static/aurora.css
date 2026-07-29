@@ -1043,7 +1043,23 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     .aurora-log-panel { max-height: 82vh; border-radius: 20px 20px 14px 14px; }
     .aurora-channel-mobile-menu { width: min(290px, calc(100% - 20px)); max-height: 320px; }
     .aurora-query-table { min-width: 1000px; }
-    body[data-aurora-page="transfer"] .aurora-transfer-table { min-width: 680px; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table { min-width: 100%; table-layout: fixed; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(1),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(1),
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(2),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(2),
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(6),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(6) { display: none; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(3),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(3) { width: 35%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(4),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(4) { width: 25%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(5),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(5) { width: 28%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(7),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(7) { width: 12%; text-align: right; white-space: nowrap; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(3) code { white-space: normal; overflow-wrap: anywhere; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(4) .aurora-status-button { width: 100%; min-width: 0; justify-content: center; padding: 4px 3px; font-size: 10px; white-space: nowrap; }
     .aurora-library-query-table { min-width: 620px; }
     .aurora-results-grid-head { display: none !important; }
     body[data-aurora-page="results"] .aurora-results-grid {

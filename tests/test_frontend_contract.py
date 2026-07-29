@@ -242,7 +242,17 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="transfer"\] \.aurora-transfer-table\s*\{[^}]*min-width:\s*680px',
+            r'body\[data-aurora-page="transfer"\] \.aurora-transfer-table\s*\{[^}]*min-width:\s*100%',
+        )
+        self.assertIn(
+            'body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(1),\n'
+            '    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(1),',
+            mobile_css,
+        )
+        self.assertIn(
+            'body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(6),\n'
+            '    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(6) { display: none; }',
+            mobile_css,
         )
         self.assertRegex(
             mobile_css,
