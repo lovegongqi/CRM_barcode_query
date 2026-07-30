@@ -7172,14 +7172,14 @@ def required_permission_for_path(path):
     return None
 
 def is_public_product_library_request(path, method):
-    return (
-        method == "GET"
-        and (
-            path == "/product-library"
-            or path == "/api/product-library"
-            or path == "/api/product-library/lookup"
-        )
-    )
+    if method == "GET":
+        return path in {
+            "/product-library",
+            "/api/product-library",
+            "/api/product-library/lookup",
+            "/api/product-library/query/status",
+        }
+    return method == "POST" and path == "/api/product-library/query/start"
 
 @app.before_request
 def require_app_login():
@@ -8048,7 +8048,6 @@ def product_library_page():
         "product_library.html",
         nav_links=visible_page_links(),
         account=current_account_public(),
-        can_online_query=account_has_permission("product-library"),
     )
 
 @app.route("/accounts")

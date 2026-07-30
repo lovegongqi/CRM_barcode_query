@@ -45,7 +45,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertEqual(login.status_code, 200)
         self.assertIn(b'id="loginBtn"', login.data)
 
-    def test_anonymous_product_lookup_is_public_but_online_query_is_protected(self):
+    def test_anonymous_product_lookup_and_online_query_are_public(self):
         client = app_module.app.test_client()
 
         library = client.get("/api/product-library")
@@ -60,7 +60,11 @@ class FrontendRouteSmokeTest(unittest.TestCase):
             "/api/product-library/query/start",
             json={"barcode": "162501010001"},
         )
-        self.assertEqual(online_query.status_code, 401)
+        self.assertEqual(online_query.status_code, 200)
+
+        query_status = client.get("/api/product-library/query/status")
+        self.assertEqual(query_status.status_code, 200)
+        self.assertTrue(query_status.get_json()["success"])
 
         save_rule = client.post(
             "/api/product-library",

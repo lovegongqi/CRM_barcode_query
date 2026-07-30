@@ -187,6 +187,12 @@ class FrontendContractTest(unittest.TestCase):
             source,
         )
 
+    def test_product_library_online_query_is_available_without_tool_login(self):
+        source = self.source("product_library.html")
+        self.assertIn('<button class="btn btn-secondary" onclick="confirmQueryBarcode()">在线查询</button>', source)
+        self.assertNotIn("{% if can_online_query %}", source)
+        self.assertNotIn("CAN_USE_ONLINE_QUERY", source)
+
     def test_mobile_work_page_subtitles_are_hidden_without_affecting_desktop(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         desktop_css, mobile_css = css.split("@media (max-width: 720px)", 1)

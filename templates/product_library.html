@@ -112,9 +112,7 @@
                 <input id="lookupInput" placeholder="输入条码、818ECD、800GPRO、EWD600S" inputmode="latin" lang="en" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="ime-mode:inactive" oninput="scheduleLookup()" onkeydown="if(event.key==='Enter')unifiedSearch()">
             </div>
             <button class="btn btn-primary" onclick="unifiedSearch()">搜索</button>
-            {% if can_online_query %}
             <button class="btn btn-secondary" onclick="confirmQueryBarcode()">在线查询</button>
-            {% endif %}
             <button class="btn btn-secondary" onclick="clearUnifiedSearch()">清空</button>
         </div>
         <div id="lookupBox" class="note" aria-live="polite" aria-atomic="false">输入条码可识别机器；输入型号、产品名称或产品编码可查编码。在线查询需要输入完整条码。</div>
@@ -154,8 +152,6 @@ function escapeHtml(text) {
 }
 
 let productLibraryRows = [];
-const CAN_USE_ONLINE_QUERY = {{ 'true' if can_online_query else 'false' }};
-
 async function loadLibrary() {
     const res = await fetch('/api/product-library');
     const data = await res.json();
@@ -329,18 +325,10 @@ async function lookupBarcode(barcodeValue = '') {
             </div>`;
         return;
     }
-    if (!CAN_USE_ONLINE_QUERY) {
-        box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。当前可使用条码/型号本地搜索。`;
-        return;
-    }
     box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。是否立即查询该条码并自动补充条码匹配？ <button class="btn btn-primary" onclick="confirmQueryBarcode()">确认查询</button>`;
 }
 
 async function confirmQueryBarcode() {
-    if (!CAN_USE_ONLINE_QUERY) {
-        appendQueryLog('当前页面仅支持本地条码/型号搜索', 'warn');
-        return;
-    }
     const barcode = document.getElementById('lookupInput').value.trim();
     if (!barcode) return alert('请输入条码');
     if (!isLikelyBarcode(barcode)) {
