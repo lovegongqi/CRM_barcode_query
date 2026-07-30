@@ -179,6 +179,15 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("captureLastQuerySummary", query)
         self.assertNotIn("AUTO SCHEDULING</span>", query)
 
+    def test_product_library_search_links_to_knowledge_base(self):
+        source = self.source("product_library.html")
+        self.assertIn('class="library-search-head"', source)
+        self.assertIn(
+            '<a class="btn btn-secondary library-knowledge-link" href="http://hk.mlmll.cn" '
+            'target="_blank" rel="noopener noreferrer">前往知识库</a>',
+            source,
+        )
+
     def test_mobile_work_page_subtitles_are_hidden_without_affecting_desktop(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         desktop_css, mobile_css = css.split("@media (max-width: 720px)", 1)

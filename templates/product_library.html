@@ -24,6 +24,9 @@
         .status-text .dot.red { background:#dc2626; }
         .card { background:#fff; border:1px solid #d9e1ec; border-radius:8px; padding:18px; box-shadow:0 8px 24px rgba(15,23,42,.06); margin-bottom:16px; }
         .card h2 { font-size:16px; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #e5e7eb; }
+        .library-search-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid #e5e7eb; }
+        .library-search-head h2 { margin:0; padding:0; border:0; }
+        .library-knowledge-link { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; white-space:nowrap; }
         label { display:block; font-size:12px; color:#667085; font-weight:700; margin-bottom:6px; }
         input { width:100%; border:1px solid #cfd8e3; border-radius:6px; padding:9px 10px; font-size:14px; outline:none; background:#fff; }
         input:focus { border-color:#2563eb; box-shadow:0 0 0 3px rgba(37,99,235,.12); }
@@ -54,7 +57,7 @@
         th { background:#f8fafc; color:#475569; }
         .header-actions { display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
         .header-actions .btn { text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }
-        @media (max-width: 860px) { .container { padding:14px; } .library-form, .search-form { grid-template-columns:1fr; } }
+        @media (max-width: 860px) { .container { padding:14px; } .library-form, .search-form { grid-template-columns:1fr; } .library-search-head { flex-wrap:wrap; } }
         @media (max-width: 640px) {
             .lookup-line { grid-template-columns:68px minmax(0,1fr); }
             .lookup-result-table, .lookup-result-table tbody, .lookup-result-table tr, .lookup-result-table td { display:block; width:100%; }
@@ -99,7 +102,10 @@
     {% endif %}
 
     <div class="card">
-        <h2>条码/型号搜索</h2>
+        <div class="library-search-head">
+            <h2>条码/型号搜索</h2>
+            <a class="btn btn-secondary library-knowledge-link" href="http://hk.mlmll.cn" target="_blank" rel="noopener noreferrer">前往知识库</a>
+        </div>
         <div class="search-form">
             <div>
                 <label>条码、型号或产品名称</label>
