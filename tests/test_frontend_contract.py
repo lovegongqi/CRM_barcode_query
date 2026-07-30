@@ -183,8 +183,7 @@ class FrontendContractTest(unittest.TestCase):
         source = self.source("product_library.html")
         self.assertIn('class="library-search-head"', source)
         self.assertIn(
-            '<a class="btn btn-secondary library-knowledge-link" href="http://hk.mlmll.cn" '
-            'target="_blank" rel="noopener noreferrer">前往知识库</a>',
+            '<a class="btn btn-secondary library-knowledge-link" href="http://hk.mlmll.cn">前往知识库</a>',
             source,
         )
 
