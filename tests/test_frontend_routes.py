@@ -130,6 +130,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
             ("/static/aurora.css", ("text/css",)),
             ("/static/aurora.js", ("text/javascript", "application/javascript")),
             ("/static/ecowater-logo.png", ("image/png",)),
+            ("/favicon.ico", ("image/x-icon", "image/vnd.microsoft.icon")),
         ):
             with self.subTest(path=path):
                 response = self.client.get(path)

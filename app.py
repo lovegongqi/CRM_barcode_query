@@ -7384,6 +7384,10 @@ def scan_archived():
 def index():
     return render_template("index.html", nav_links=visible_page_links(), business_config=business_config())
 
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/x-icon")
+
 @app.route("/api/barcodes", methods=["GET"])
 def api_get_barcodes():
     snapshot = _barcode_snapshot()
