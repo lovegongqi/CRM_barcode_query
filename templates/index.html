@@ -1877,15 +1877,32 @@
             return Number.isNaN(time) ? 0 : time;
         }
 
+        function getServiceTypePriority(row) {
+            const raw = row && (row.typestr1 || row.servtype1 || row.ordertype1);
+            const text = raw ? String(raw).trim() : '';
+            if (!text) return 0;
+            if (text.includes('安装')) return 3;
+            if (text.includes('维修') || text.includes('保养')) return 2;
+            if (text.includes('退换') || text.includes('置换')) return 1;
+            return 0;
+        }
+
         function getLatestServiceNo(rows) {
             let latest = null;
             (rows || []).forEach((row, index) => {
                 const no = row && row.servno1 ? String(row.servno1).trim() : '';
                 if (!no) return;
                 const dateScore = parseServiceDate(row.servdate1) || parseServiceDateFromNo(no);
-                const score = dateScore || index + 1;
-                if (!latest || score >= latest.score) {
-                    latest = { no, score };
+                const score = dateScore || (index + 1);
+                const typePriority = getServiceTypePriority(row);
+                if (!latest) {
+                    latest = { no, score, typePriority };
+                    return;
+                }
+                if (typePriority > latest.typePriority) {
+                    latest = { no, score, typePriority };
+                } else if (typePriority === latest.typePriority && score >= latest.score) {
+                    latest = { no, score, typePriority };
                 }
             });
             return latest ? latest.no : '';
