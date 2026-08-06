@@ -45,6 +45,34 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertIn('/static/ecowater-logo.png', source)
                 self.assertIn(f'data-aurora-page="{page}"', source)
 
+    def test_service_order_detail_uses_structured_fields_and_product_rows(self):
+        results = self.source("index.html")
+        self.assertIn('id="serviceDetailContent"', results)
+        self.assertIn('function renderServiceOrderDetail(detail)', results)
+        self.assertIn("detail.products || []", results)
+        self.assertIn("product.barcode", results)
+        self.assertIn("detail.fields || []", results)
+        self.assertIn("客户姓名", results)
+        self.assertIn("联系电话", results)
+        self.assertIn("联系地址", results)
+        self.assertIn("<th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th>", results)
+        self.assertNotIn("<th>型号</th>", results)
+        self.assertNotIn("product.product_model", results)
+        self.assertNotIn("service-close-summary-log", results)
+
+    def test_service_order_detail_matches_the_dark_workspace_theme(self):
+        results = self.source("index.html")
+        content_rule = re.search(r"\.service-detail-content\s*\{([^}]*)\}", results, re.S)
+        section_rule = re.search(r"\.service-detail-section\s*\{([^}]*)\}", results, re.S)
+        table_header_rule = re.search(r"\.service-detail-table th\s*\{([^}]*)\}", results, re.S)
+        self.assertIsNotNone(content_rule)
+        self.assertIsNotNone(section_rule)
+        self.assertIsNotNone(table_header_rule)
+        self.assertRegex(content_rule.group(1), r"background:\s*#071426")
+        self.assertRegex(content_rule.group(1), r"color:\s*#e2e8f0")
+        self.assertRegex(section_rule.group(1), r"background:\s*#0c1b2e")
+        self.assertRegex(table_header_rule.group(1), r"background:\s*#12243a")
+
     def test_desktop_logo_scrolls_with_the_page(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         base_rule = re.search(r"\.aurora-logo\s*\{([^}]*)\}", css, re.S)

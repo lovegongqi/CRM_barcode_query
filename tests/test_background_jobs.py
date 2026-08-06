@@ -9,12 +9,14 @@ import app as app_module
 
 
 class FakeQueryWorker:
-    def __init__(self, slot_id, delay=0.01):
+    def __init__(self, slot_id, delay=0.01, logged_in=True):
         self.slot_id = slot_id
-        self.logged_in = True
-        self.remembered_logged_in = True
+        self.logged_in = logged_in
+        self.remembered_logged_in = logged_in
         self.delay = delay
         self.stop_requested = False
+        self.started = threading.Event()
+        self.queried_barcodes = []
 
     def clear_stop(self):
         self.stop_requested = False
@@ -29,6 +31,8 @@ class FakeQueryWorker:
         return True, "已登录"
 
     def query_barcode(self, barcode, log=None, output_dir=None):
+        self.queried_barcodes.append(barcode)
+        self.started.set()
         if log:
             log(f"正在查询：{barcode}", "info")
         deadline = time.time() + self.delay
@@ -52,6 +56,45 @@ class FakeTransferWorker:
         return True, {
             "order_no": "TRSF202607250001",
             "pending_approval": False,
+        }
+
+
+class BlockingServiceCloseWorker:
+    def __init__(self, products=None, detail_url=""):
+        self.slot_id = "query-1"
+        self.products = list(products or [])
+        self.detail_url = detail_url
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def close_service_orders(self, orders, log=None, progress=None):
+        row = orders[0]
+        if log:
+            log("正在搜索服务单", "info")
+        merged = app_module._merge_service_order_products(
+            row,
+            self.products,
+            selected_barcodes=row.get("selected_barcodes") or row.get("barcodes"),
+        )
+        if self.detail_url:
+            merged["detail_url"] = self.detail_url
+        if progress:
+            progress(row=merged)
+        self.started.set()
+        self.release.wait(timeout=2)
+        return True, {
+            "results": [{
+                "service_no": row["service_no"],
+                "barcodes": list(merged.get("barcodes") or []),
+                "selected_barcodes": list(merged.get("selected_barcodes") or []),
+                "related_barcodes": list(merged.get("related_barcodes") or []),
+                "service_products": list(merged.get("service_products") or []),
+                "detail_url": merged.get("detail_url") or "",
+                "customer_names": list(row.get("customer_names") or []),
+                "success": True,
+                "status": "closed",
+                "message": "已结单",
+            }],
         }
 
 
@@ -120,6 +163,71 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(finished["success_count"], 3)
         self.assertEqual(finished["failed_count"], 0)
         self.assertEqual(finished["items"], [])
+
+    def test_background_query_adds_a_slot_that_logs_in_while_job_is_running(self):
+        first = FakeQueryWorker("query-1", delay=0.15)
+        later = FakeQueryWorker("query-2", delay=0.01, logged_in=False)
+        barcodes = [f"79250000001{index:02d}" for index in range(6)]
+        job = app_module._empty_background_query_job(
+            "admin",
+            barcodes,
+            ["query-1", "query-2"],
+            retry_limit=0,
+        )
+        job.update({
+            "running": True,
+            "started_at": "2026-08-06 10:00:00",
+        })
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs[job["job_id"]] = job
+
+        thread = threading.Thread(
+            target=app_module._run_background_query_job,
+            args=(
+                job["job_id"],
+                [
+                    (first, "query-1", "查询1"),
+                    (later, "query-2", "查询2"),
+                ],
+            ),
+        )
+        thread.start()
+
+        try:
+            self.assertTrue(first.started.wait(timeout=1))
+            deadline = time.time() + 1
+            waiting_logged = False
+            while time.time() < deadline:
+                with app_module.background_query_job_lock:
+                    current = app_module.background_query_jobs.get(job["job_id"]) or {}
+                    waiting_logged = any(
+                        "等待登录后自动加入" in row["message"]
+                        for row in current.get("logs") or []
+                    )
+                if waiting_logged:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(waiting_logged)
+            later.logged_in = True
+            later.remembered_logged_in = True
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+            self.assertGreater(len(later.queried_barcodes), 0)
+            finished = app_module._background_query_status_payload(
+                app_module.background_query_jobs[job["job_id"]]
+            )
+            self.assertTrue(finished["done"])
+            self.assertEqual(finished["success_count"], len(barcodes))
+            self.assertTrue(any(
+                "自动加入当前查询队列" in row["message"]
+                for row in finished["logs"]
+            ))
+        finally:
+            first.request_stop()
+            later.request_stop()
+            thread.join(timeout=1)
+            with app_module.background_query_job_lock:
+                app_module.background_query_jobs.pop(job["job_id"], None)
 
     def test_background_query_uses_runtime_retry_limit(self):
         workers = {"query-1": FakeQueryWorker("query-1")}
@@ -340,6 +448,183 @@ class BackgroundJobTests(unittest.TestCase):
                 app_module.transfer_jobs.pop(job["job_id"], None)
             app_module.TRANSFER_RECORDS_DB_FILE = original_db
             tempdir.cleanup()
+
+    def test_service_close_status_returns_one_realtime_row_per_service_order(self):
+        orders = [
+            {
+                "service_no": "FWD202608050001",
+                "barcodes": ["8722507290847", "3402512080268"],
+                "customer_names": ["刘总"],
+                "product_names": ["反渗透净水机"],
+            },
+            {
+                "service_no": "FWD202608050002",
+                "barcodes": ["7132408080189"],
+                "customer_names": ["张晶盛"],
+                "product_names": ["软水机"],
+            },
+        ]
+        worker = BlockingServiceCloseWorker(
+            products=[{
+                "barcode": "435221024H397",
+                "product_name": "关联设备",
+                "product_code": "916200009",
+            }],
+            detail_url="/api/service-orders/FWD202608050001",
+        )
+        job = app_module._empty_service_close_job("query-1", orders)
+        job.update({
+            "running": True,
+            "started_at": "2026-08-05 14:46:40",
+            "slot_ids": ["query-1"],
+        })
+        with app_module.service_close_job_lock:
+            app_module.service_close_jobs[job["job_id"]] = job
+
+        thread = threading.Thread(
+            target=app_module._run_service_close_job,
+            args=(job["job_id"], [(worker, "query-1", "查询1")], orders),
+        )
+        thread.start()
+        self.assertTrue(worker.started.wait(timeout=1))
+
+        try:
+            response = self.client.get(
+                "/api/service-close/status",
+                query_string={"job_id": job["job_id"], "slot_id": "query-1"},
+            )
+            self.assertEqual(response.status_code, 200)
+            rows = response.get_json()["service_rows"]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["service_no"], "FWD202608050001")
+            self.assertEqual(rows[0]["selected_barcodes"], ["8722507290847", "3402512080268"])
+            self.assertEqual(rows[0]["related_barcodes"], ["435221024H397"])
+            self.assertEqual(
+                rows[0]["barcodes"],
+                ["8722507290847", "3402512080268", "435221024H397"],
+            )
+            self.assertEqual(rows[0]["slot_label"], "查询1")
+            self.assertEqual(rows[0]["state"], "running")
+            self.assertEqual(rows[0]["message"], "正在搜索服务单")
+            self.assertEqual(
+                rows[0]["detail_url"],
+                "/api/service-orders/FWD202608050001",
+            )
+            self.assertEqual(rows[1]["state"], "waiting")
+
+            worker.release.set()
+            thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+            finished = self.client.get(
+                "/api/service-close/status",
+                query_string={"job_id": job["job_id"], "slot_id": "query-1"},
+            ).get_json()
+            self.assertEqual(
+                [row["state"] for row in finished["service_rows"]],
+                ["closed", "closed"],
+            )
+            self.assertTrue(all(row["finished_at"] for row in finished["service_rows"]))
+        finally:
+            worker.release.set()
+            thread.join(timeout=2)
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job["job_id"], None)
+
+    def test_service_close_merges_selected_and_detail_product_barcodes(self):
+        row = {
+            "service_no": "FWD202608050003",
+            "barcodes": ["8722507290847"],
+            "customer_names": ["刘总"],
+            "product_names": [],
+        }
+        products = [
+            {
+                "barcode": "8722507290847",
+                "product_name": "反渗透净水机 ERO162A",
+                "product_model": "ERO162A",
+                "product_code": "916200001",
+            },
+            {
+                "barcode": "3402512080268",
+                "product_name": "前置过滤器",
+                "product_code": "916200002",
+            },
+            {
+                "barcode": "7132408080189",
+                "product_name": "软水机",
+                "product_code": "916200003",
+            },
+        ]
+
+        merged = app_module._merge_service_order_products(
+            row,
+            products,
+            selected_barcodes=["8722507290847"],
+        )
+
+        self.assertEqual(merged["selected_barcodes"], ["8722507290847"])
+        self.assertEqual(
+            merged["barcodes"],
+            ["8722507290847", "3402512080268", "7132408080189"],
+        )
+        self.assertEqual(
+            merged["related_barcodes"],
+            ["3402512080268", "7132408080189"],
+        )
+        self.assertEqual(
+            merged["product_names"],
+            ["反渗透净水机 ERO162A", "前置过滤器", "软水机"],
+        )
+        self.assertEqual(merged["service_products"], products)
+
+    def test_service_order_detail_is_saved_and_served_as_json(self):
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module,
+            "SERVICE_ORDER_DIR",
+            tempdir,
+            create=True,
+        ):
+            detail_url = app_module._write_service_order_detail(
+                "FWD202608050003",
+                {
+                    "service_no": "FWD202608050003",
+                    "fields": [
+                        {"label": "客户名称", "value": "刘总"},
+                        {"label": "联系电话", "value": "13800000000"},
+                    ],
+                    "products": [
+                        {
+                            "product_model": "ERO162A",
+                            "product_name": "反渗透净水机",
+                            "product_code": "916200001",
+                            "barcode": "8722507290847",
+                        },
+                        {
+                            "product_model": "",
+                            "product_name": "反渗透净水机 三维净S系列 ERO270-3",
+                            "product_code": "906042841",
+                            "barcode": "8462412200275",
+                        },
+                    ],
+                },
+            )
+
+            self.assertEqual(
+                detail_url,
+                "/api/service-orders/FWD202608050003",
+            )
+            response = self.client.get(detail_url)
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["service_no"], "FWD202608050003")
+            self.assertEqual(payload["fields"][0], {"label": "客户名称", "value": "刘总"})
+            self.assertEqual(payload["products"][0]["product_model"], "ERO162A")
+            self.assertEqual(payload["products"][1]["product_model"], "ERO270-3")
+
+            anonymous = app_module.app.test_client()
+            unauthorized = anonymous.get(detail_url)
+            self.assertEqual(unauthorized.status_code, 401)
 
 
 if __name__ == "__main__":
