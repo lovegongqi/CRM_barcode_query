@@ -6576,6 +6576,18 @@ def _parse_service_date_from_no(service_no):
     except Exception:
         return 0
 
+def _service_type_priority(row):
+    text = _clean_export_value(row.get("typestr1") or row.get("servtype1") or row.get("ordertype1"))
+    if text:
+        if "安装" in text:
+            return 3
+        if "维修" in text or "保养" in text:
+            return 2
+        if "退换" in text or "置换" in text:
+            return 1
+    return 0
+
+
 def _latest_service_record(fields):
     latest = None
     for index, row in enumerate(_service_rows(fields)):
@@ -6583,8 +6595,14 @@ def _latest_service_record(fields):
         if not service_no:
             continue
         score = _parse_service_date(row.get("servdate1")) or _parse_service_date_from_no(service_no) or (index + 1)
-        if latest is None or score >= latest["score"]:
-            latest = {"service_no": service_no, "row": row, "score": score}
+        type_priority = _service_type_priority(row)
+        if latest is None:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
+            continue
+        if type_priority > latest["type_priority"]:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
+        elif type_priority == latest["type_priority"] and score >= latest["score"]:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
     return latest
 
 def _service_row_is_closed(row):
