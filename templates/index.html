@@ -366,6 +366,15 @@
         }
         .modal-close:hover { color: #333; }
         .modal-body { padding: 16px; }
+        .service-detail-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+        .service-detail-section-head h3 { margin: 0; }
+        .service-detail-refresh { background: rgba(0, 200, 220, 0.12); border: 1px solid rgba(0, 200, 220, 0.4); color: #67e8f9; padding: 4px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, transform 0.15s; }
+        .service-detail-refresh:hover:not(:disabled) { background: rgba(0, 200, 220, 0.22); }
+        .service-detail-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+        .service-detail-refresh-icon { display: inline-block; font-size: 14px; line-height: 1; }
+        .service-detail-refresh-icon.spinning { animation: service-detail-spin 0.9s linear infinite; }
+        @keyframes service-detail-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
         .service-detail-content {
             display: none;
             min-height: 360px;
@@ -2444,7 +2453,8 @@
                     <td><span class="service-detail-relation ${selected ? 'is-selected' : 'is-related'}">${selected ? '已选' : (related ? '关联' : '服务单')}</span></td>
                 </tr>`;
             }).join('');
-            const productSection = `<section class="service-detail-section"><h3>产品明细</h3>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
+            const refreshButton = `<button type="button" class="service-detail-refresh" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="refreshServiceOrderProducts(this.dataset.serviceNo)" title="重新打开 CRM 服务单详情并重抓产品明细"><span class="service-detail-refresh-icon">↻</span>重查产品明细</button>`;
+            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><h3>产品明细</h3>${refreshButton}</div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
             content.innerHTML = customerSection + productSection;
         }
 
@@ -2467,6 +2477,33 @@
                 renderServiceOrderDetail(detail);
             } catch (error) {
                 content.innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`;
+            }
+        }
+
+        async function refreshServiceOrderProducts(serviceNo) {
+            if (!serviceNo) {
+                showToast('服务单号为空');
+                return;
+            }
+            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh'));
+            buttons.forEach(btn => { btn.disabled = true; btn.classList.add('is-loading'); btn.dataset.originalText = btn.dataset.originalText || btn.textContent; btn.innerHTML = '<span class="service-detail-refresh-icon spinning">↻</span>重查中…'; });
+            try {
+                const res = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || data.success === false) {
+                    throw new Error(data.error || '重查失败');
+                }
+                showToast(`已重查 ${data.product_count || 0} 个产品明细（${data.slot_label || ''}）`);
+                const detailUrl = data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`;
+                const response = await fetch(detailUrl);
+                const detail = await response.json();
+                if (response.ok && detail && detail.success !== false) {
+                    renderServiceOrderDetail(detail);
+                }
+            } catch (e) {
+                showToast(`重查失败：${e.message || e}`);
+            } finally {
+                buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
             }
         }
 

@@ -1926,8 +1926,32 @@ class CRMSession:
             return False, ""
 
     def _service_detail_products(self):
+        # 先把产品明细相关的可折叠面板展开，并等待表格正文行渲染再抓取
         try:
-            rows = self.page.evaluate("""() => {
+            self.page.evaluate("""() => {
+                const clean = (text) => (text || '').replace(/\\s+/g, '').trim();
+                const clickIfMatch = (el) => {
+                    if (!el) return;
+                    const text = clean(el.innerText || el.textContent || '');
+                    if (text.includes('产品明细') || text.includes('订单产品')) {
+                        if (typeof el.click === 'function') el.click();
+                    }
+                };
+                const scope = document.body || document.documentElement;
+                const panels = Array.from(scope.querySelectorAll('.el-collapse-item, .ant-collapse-item'));
+                for (const panel of panels) {
+                    clickIfMatch(panel.querySelector('.el-collapse-item__header, .ant-collapse-header') || panel);
+                }
+                const headers = Array.from(scope.querySelectorAll('.el-collapse-item__header, .ant-collapse-header, .panel-title, .el-tabs__item, .ant-tabs-tab'));
+                for (const h of headers) clickIfMatch(h);
+                return true;
+            }""")
+        except Exception:
+            pass
+        rows = []
+        for _ in range(10):
+            try:
+                rows = self.page.evaluate("""() => {
                 const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
                 const cellText = (cell) => {
                     const values = Array.from(cell.querySelectorAll('input,textarea,select'))
@@ -1962,7 +1986,7 @@ class CRMSession:
                         const productName = nameIndex >= 0 && nameIndex < cells.length ? cellText(cells[nameIndex]) : '';
                         const productModel = modelIndex >= 0 && modelIndex < cells.length ? cellText(cells[modelIndex]) : '';
                         const productCode = codeIndex >= 0 && codeIndex < cells.length ? cellText(cells[codeIndex]) : '';
-                        const barcodes = barcodeValue.split(/[\\s,，、;；/]+/).map(clean).filter(Boolean);
+                        const barcodes = barcodeValue.split(/[\\s,,,;;/]+/).map(clean).filter(Boolean);
                         for (const barcode of barcodes) {
                             if (!/^[A-Za-z0-9-]{6,40}$/.test(barcode) || seen.has(barcode)) continue;
                             seen.add(barcode);
@@ -1972,7 +1996,12 @@ class CRMSession:
                 }
                 return result;
             }""")
-        except Exception:
+            except Exception:
+                rows = []
+            if rows:
+                break
+            time.sleep(0.5)
+        if not rows:
             return []
         products = []
         seen = set()
@@ -2207,6 +2236,39 @@ class CRMSession:
             except Exception as e:
                 crash_message = self._handle_browser_exception(e)
                 return False, {"error": crash_message or str(e), "results": results}
+
+
+    def refresh_service_order_products(self, service_no, log=None):
+        def emit(message, level='info'):
+            if log:
+                log(message, level)
+
+        try:
+            service_no = _clean_export_value(service_no)
+            if not service_no:
+                return False, {"error": "服务单号为空"}
+
+            with self.lock:
+                if not self.is_alive():
+                    emit("正在恢复 CRM 浏览器会话", "info")
+                    if not self._ensure_browser():
+                        return False, {"error": "浏览器未启动，请先登录 CRM"}
+                if not self.logged_in and not self._is_current_page_logged_in():
+                    return False, {"error": "CRM 当前未登录，请先登录 CRM"}
+
+                ok, message = self._open_service_order_list(emit)
+                if not ok:
+                    return False, {"error": message or "无法打开服务单列表"}
+                ok, message = self._search_service_order(service_no)
+                if not ok:
+                    return False, {"error": message or "未找到服务单"}
+                ok, message = self._open_service_order_detail(service_no)
+                if not ok:
+                    return False, {"error": message or "无法打开服务单详情"}
+                products = self._service_detail_products()
+                return True, {"products": products}
+        except Exception as e:
+            return False, {"error": str(e)}
 
     def _move_create_url(self):
         cfg = load_crm_config()
@@ -3543,6 +3605,11 @@ class CRMWorker:
 
     def close_idle_report_tabs(self, idle_seconds=REPORT_IDLE_TIMEOUT_SECONDS):
         return self._call("close_idle_report_tabs", idle_seconds)
+
+    def refresh_service_order_products(self, service_no, log=None):
+        if log:
+            log(f"CRM 重查产品明细任务已加入队列：{service_no}", "dim")
+        return self._call("refresh_service_order_products", service_no, log)
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
@@ -8365,6 +8432,62 @@ def api_service_order_detail(service_no):
     except Exception:
         return jsonify({"success": False, "error": "服务单详情读取失败"}), 500
     return jsonify(_normalize_service_order_detail(payload, service_no))
+
+
+@app.route("/api/service-orders/<service_no>/refresh-products", methods=["POST"])
+def api_service_order_refresh_products(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({"success": False, "error": "服务单号格式不正确"}), 400
+
+    workers, error = _select_idle_query_workers_desc()
+    if error:
+        return jsonify({"success": False, "error": error})
+
+    worker, slot_id, slot_label = workers[0]
+
+    def emit(message, level="dim"):
+        # 占位：与现有 close_service_orders 同样签名以复用 _service_detail_products 等工具
+        pass
+
+    try:
+        ok, result = worker.refresh_service_order_products(service_no, emit)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"重查失败：{e}"}), 500
+
+    if not ok:
+        return jsonify({"success": False, "error": (result if isinstance(result, str) else str(result)) or "重查失败"})
+
+    products = []
+    if isinstance(result, dict):
+        products = list(result.get("products") or [])
+    elif isinstance(result, list):
+        products = list(result)
+
+    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+    existing = {}
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+
+    if products:
+        existing["products"] = products
+    else:
+        existing["products"] = []
+    existing["service_no"] = _clean_export_value(service_no)
+    _write_service_order_detail(service_no, existing)
+
+    return jsonify({
+        "success": True,
+        "service_no": service_no,
+        "slot_id": slot_id,
+        "slot_label": slot_label,
+        "products": products,
+        "product_count": len(products),
+        "detail_url": f"/api/service-orders/{service_no}",
+    })
 
 @app.route("/barcode/archived/<filename>")
 def serve_archived(filename):
