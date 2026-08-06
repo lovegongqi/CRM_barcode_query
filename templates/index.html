@@ -2295,6 +2295,18 @@
             serviceCloseSlotId = '';
             serviceCloseStartAtMs = Date.now();
             serviceCloseLog(`提交批量结单任务：${barcodes.length} 个条码`, 'info');
+            // 立即用已选条码渲染占位行，避免启动期间面板空白
+            renderServiceCloseStatuses(barcodes.map((bc, idx) => ({
+                service_no: '',
+                barcodes: [bc],
+                selected_barcodes: [bc],
+                related_barcodes: [],
+                customer_names: [],
+                state: 'waiting',
+                message: '启动中，正在加载服务单…',
+                slot_label: '待分配',
+                elapsed: 0,
+            })));
             try {
                 const data = await fetch('/api/service-close/start', {
                     method: 'POST',
@@ -2304,6 +2316,8 @@
                 if (!data.success) {
                     serviceCloseLog(data.error || '批量结单启动失败', 'error');
                     showToast(data.error || '批量结单启动失败');
+                    const list = area.querySelector('.service-close-status-list');
+                    if (list) list.innerHTML = '';
                     if (btn) {
                         btn.disabled = false;
                         btn.textContent = '批量结单';
