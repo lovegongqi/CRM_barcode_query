@@ -366,6 +366,66 @@
         }
         .modal-close:hover { color: #333; }
         .modal-body { padding: 16px; }
+        .service-detail-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+        .service-detail-section-head h3 { margin: 0; }
+        .service-detail-refresh { background: rgba(0, 200, 220, 0.12); border: 1px solid rgba(0, 200, 220, 0.4); color: #67e8f9; padding: 4px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, transform 0.15s; }
+        .service-detail-refresh:hover:not(:disabled) { background: rgba(0, 200, 220, 0.22); }
+        .service-detail-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+        .service-detail-refresh-icon { display: inline-block; font-size: 14px; line-height: 1; }
+        .service-detail-refresh-icon.spinning { animation: service-detail-spin 0.9s linear infinite; }
+        @keyframes service-detail-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+        .service-detail-content {
+            display: none;
+            min-height: 360px;
+            max-height: 75vh;
+            overflow: auto;
+            padding: 18px;
+            background: #071426;
+            color: #e2e8f0;
+        }
+        .service-detail-section {
+            margin-top: 14px;
+            border: 1px solid #1e3a52;
+            border-radius: 10px;
+            background: #0c1b2e;
+            overflow: hidden;
+            box-shadow: 0 10px 28px rgba(2, 8, 23, .24);
+        }
+        .service-detail-section h3 {
+            margin: 0;
+            padding: 10px 14px;
+            border-bottom: 1px solid #1e3a52;
+            background: #12243a;
+            color: #dbeafe;
+            font-size: 14px;
+        }
+        .service-detail-fields {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0;
+        }
+        .service-detail-field {
+            min-width: 0;
+            padding: 10px 14px;
+            border-right: 1px solid #18324a;
+            border-bottom: 1px solid #18324a;
+        }
+        .service-detail-field label { display: block; color: #7dd3fc; font-size: 11px; margin-bottom: 4px; }
+        .service-detail-field div { color: #e2e8f0; font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+        .service-detail-table-wrap { overflow-x: auto; }
+        .service-detail-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        .service-detail-table th, .service-detail-table td { padding: 9px 11px; border-bottom: 1px solid #18324a; text-align: left; white-space: nowrap; }
+        .service-detail-table th { color: #93c5fd; background: #12243a; font-weight: 800; }
+        .service-detail-table td { color: #e2e8f0; background: #0c1b2e; }
+        .service-detail-table tr:last-child td { border-bottom: 0; }
+        .service-detail-relation { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+        .service-detail-relation.is-selected { color: #7dd3fc; background: rgba(14, 165, 233, .16); border: 1px solid rgba(56, 189, 248, .35); }
+        .service-detail-relation.is-related { color: #c4b5fd; background: rgba(139, 92, 246, .16); border: 1px solid rgba(167, 139, 250, .35); }
+        .service-detail-empty { padding: 28px; color: #94a3b8; text-align: center; }
+        @media (max-width: 760px) {
+            .service-detail-fields { grid-template-columns: 1fr; }
+        }
         .transfer-slot-list { display:grid; gap:8px; }
         .transfer-slot-option { width:100%; min-height:42px; border:1px solid #d9e1ec; border-radius:8px; background:#fff; color:#334155; font-size:13px; font-weight:800; cursor:pointer; }
         .transfer-slot-option:hover { border-color:#0f766e; color:#0f766e; }
@@ -385,6 +445,82 @@
         .transfer-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
         .transfer-note { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; color: #475569; font-size: 12px; line-height: 1.6; padding: 10px 12px; }
         .transfer-log { max-height: 180px; margin-top: 12px; display: none; }
+        .query-log.service-close-active { max-height: 360px; font-family: inherit; padding: 10px; }
+        .service-close-status-list { display: grid; gap: 6px; }
+        .service-close-status-row {
+            display: grid;
+            grid-template-columns: minmax(300px, 2fr) 88px minmax(180px, 1.2fr) 70px;
+            gap: 10px;
+            align-items: center;
+            padding: 9px 10px;
+            border: 1px solid rgba(148, 163, 184, .2);
+            border-radius: 8px;
+            background: rgba(15, 23, 42, .72);
+            color: #cbd5e1;
+        }
+        .service-close-order { min-width: 0; }
+        .service-close-order strong { display: block; color: #e2e8f0; font-size: 12px; }
+        .service-close-order-link {
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: #7dd3fc;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+            text-decoration: underline;
+            text-decoration-color: rgba(125, 211, 252, .45);
+            text-underline-offset: 3px;
+        }
+        .service-close-order-link:hover { color: #bae6fd; }
+        .service-close-order-link:disabled {
+            color: #94a3b8;
+            cursor: wait;
+            text-decoration: none;
+        }
+        .service-close-order small { display: block; margin-top: 3px; color: #94a3b8; line-height: 1.45; overflow-wrap: anywhere; }
+        .service-close-barcodes { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+        .service-close-barcode {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 6px;
+            border: 1px solid rgba(148, 163, 184, .28);
+            border-radius: 999px;
+            color: #cbd5e1;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+        }
+        .service-close-barcode em { color: #94a3b8; font-family: inherit; font-size: 9px; font-style: normal; }
+        .service-close-barcode.is-selected { border-color: rgba(56, 189, 248, .5); background: rgba(56, 189, 248, .12); color: #7dd3fc; }
+        .service-close-barcode.is-related { border-color: rgba(167, 139, 250, .42); background: rgba(167, 139, 250, .1); color: #c4b5fd; }
+        .service-close-channel, .service-close-elapsed { color: #94a3b8; font-size: 11px; text-align: center; }
+        .service-close-progress { min-width: 0; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
+        .service-close-state {
+            display: inline-flex;
+            align-items: center;
+            width: fit-content;
+            margin-bottom: 3px;
+            padding: 2px 7px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, .14);
+            color: #cbd5e1;
+            font-size: 10px;
+            font-weight: 800;
+        }
+        .service-close-status-row.is-running { border-color: rgba(56, 189, 248, .42); }
+        .service-close-status-row.is-running .service-close-state { background: rgba(56, 189, 248, .16); color: #7dd3fc; }
+        .service-close-status-row.is-closed { border-color: rgba(34, 197, 94, .38); }
+        .service-close-status-row.is-closed .service-close-state { background: rgba(34, 197, 94, .15); color: #86efac; }
+        .service-close-status-row.is-already-closed .service-close-state { background: rgba(148, 163, 184, .16); color: #cbd5e1; }
+        .service-close-status-row.is-failed { border-color: rgba(248, 113, 113, .42); }
+        .service-close-status-row.is-failed .service-close-state { background: rgba(248, 113, 113, .15); color: #fca5a5; }
+        @media (max-width: 760px) {
+            .service-close-status-row { grid-template-columns: 1fr auto; }
+            .service-close-progress { grid-column: 1 / -1; }
+            .service-close-channel { text-align: right; }
+            .service-close-elapsed { display: none; }
+        }
 
         .rpt-section {
             border: 1px solid #000; margin-bottom: 12px; position: relative;
@@ -1296,6 +1432,7 @@
                 <span class="modal-title-text" id="modalTitle">条码详细信息</span>
                 <button class="modal-close" onclick="closeDetailModal()">✕</button>
             </div>
+            <div id="serviceDetailContent" class="service-detail-content"></div>
             <iframe id="detailFrame" style="width:100%;height:75vh;border:none;background:#fff;" src=""></iframe>
         </div>
     </div>
@@ -1749,15 +1886,32 @@
             return Number.isNaN(time) ? 0 : time;
         }
 
+        function getServiceTypePriority(row) {
+            const raw = row && (row.typestr1 || row.servtype1 || row.ordertype1);
+            const text = raw ? String(raw).trim() : '';
+            if (!text) return 0;
+            if (text.includes('安装')) return 3;
+            if (text.includes('维修') || text.includes('保养')) return 2;
+            if (text.includes('退换') || text.includes('置换')) return 1;
+            return 0;
+        }
+
         function getLatestServiceNo(rows) {
             let latest = null;
             (rows || []).forEach((row, index) => {
                 const no = row && row.servno1 ? String(row.servno1).trim() : '';
                 if (!no) return;
                 const dateScore = parseServiceDate(row.servdate1) || parseServiceDateFromNo(no);
-                const score = dateScore || index + 1;
-                if (!latest || score >= latest.score) {
-                    latest = { no, score };
+                const score = dateScore || (index + 1);
+                const typePriority = getServiceTypePriority(row);
+                if (!latest) {
+                    latest = { no, score, typePriority };
+                    return;
+                }
+                if (typePriority > latest.typePriority) {
+                    latest = { no, score, typePriority };
+                } else if (typePriority === latest.typePriority && score >= latest.score) {
+                    latest = { no, score, typePriority };
                 }
             });
             return latest ? latest.no : '';
@@ -1985,23 +2139,66 @@
         }
 
         function serviceCloseLog(message, level='dim', time='') {
-            const area = document.getElementById('transferLogMain');
-            area.style.display = 'block';
-            const line = document.createElement('div');
-            line.className = level;
-            line.textContent = `[${time || new Date().toLocaleTimeString()}] ${message}`;
-            area.appendChild(line);
-            while (area.children.length > 1000) area.removeChild(area.firstChild);
-            area.scrollTop = area.scrollHeight;
             if (window.globalLogAppend) window.globalLogAppend(message, level, time || '');
         }
 
         function appendServiceCloseLogs(logs) {
             if (!logs || logs.length === 0) return;
             logs.forEach(row => {
-                serviceCloseLog(row.message || '', row.level || 'dim', row.time || '');
+                const message = row.message || '';
+                serviceCloseLog(message, row.level || 'dim', row.time || '');
                 lastServiceCloseLogSeq = Math.max(lastServiceCloseLogSeq, Number(row.id || 0));
             });
+        }
+
+        function serviceCloseStateMeta(state) {
+            const states = {
+                waiting: ['等待', 'is-waiting'],
+                running: ['处理中', 'is-running'],
+                closed: ['新结单', 'is-closed'],
+                already_closed: ['原已结单', 'is-already-closed'],
+                failed: ['失败', 'is-failed'],
+            };
+            return states[state] || [state || '等待', 'is-waiting'];
+        }
+
+        function renderServiceCloseStatuses(rows) {
+            const area = document.getElementById('transferLogMain');
+            area.style.display = 'block';
+            area.classList.add('service-close-active');
+            let list = area.querySelector('.service-close-status-list');
+            if (!list) {
+                list = document.createElement('div');
+                list.className = 'service-close-status-list';
+                area.appendChild(list);
+            }
+            list.innerHTML = (rows || []).map(row => {
+                const [stateLabel, stateClass] = serviceCloseStateMeta(row.state);
+                const selectedSet = new Set((row.selected_barcodes || row.barcodes || []).map(String));
+                const barcodes = Array.from(new Set((row.barcodes || []).map(String).filter(Boolean)));
+                const barcodeHtml = barcodes.map(barcode => {
+                    const selected = selectedSet.has(barcode);
+                    return `<span class="service-close-barcode ${selected ? 'is-selected' : 'is-related'}"><span>${escapeHtml(barcode)}</span><em>${selected ? '已选' : '关联'}</em></span>`;
+                }).join('') || '<span class="service-close-barcode">无关联条码</span>';
+                const serviceNo = String(row.service_no || '');
+                const detailUrl = String(row.detail_url || '');
+                const serviceOrderButton = `<button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)" ${detailUrl ? '' : 'disabled'} title="${detailUrl ? '查看完整服务单详情' : '正在生成服务单详情'}">${escapeHtml(serviceNo || '未知服务单')}</button>`;
+                const customerText = formatServiceCloseValues(row.customer_names || [], 1000);
+                const message = row.message || (row.state === 'waiting' ? '等待处理' : '处理中');
+                return `<div class="service-close-status-row ${stateClass}" data-service-no="${escapeHtml(row.service_no || '')}">
+                    <div class="service-close-order">
+                        <strong>${serviceOrderButton}</strong>
+                        ${customerText ? `<small>客户 ${escapeHtml(customerText)}</small>` : ''}
+                        <div class="service-close-barcodes">${barcodeHtml}</div>
+                    </div>
+                    <div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div>
+                    <div class="service-close-progress">
+                        <span class="service-close-state">${escapeHtml(stateLabel)}</span>
+                        <div>${escapeHtml(message)}</div>
+                    </div>
+                    <div class="service-close-elapsed">${formatDuration(Number(row.elapsed || 0))}</div>
+                </div>`;
+            }).join('') || '<div class="dim">正在准备服务单状态…</div>';
         }
 
         function markServiceClosedLocally(barcodes, serviceNo) {
@@ -2026,12 +2223,16 @@
         function applyServiceCloseResults(results) {
             if (!results || !results.length) return;
             let changed = 0;
+            const closed = [];
+            const alreadyClosed = [];
             const failed = [];
             results.forEach(row => {
                 if (!row) return;
                 const serviceNo = row.service_no || '';
                 if (row.success) {
                     changed += markServiceClosedLocally(row.barcodes || [], serviceNo);
+                    if (row.status === 'already_closed') alreadyClosed.push(row);
+                    else closed.push(row);
                 } else {
                     failed.push(row);
                 }
@@ -2040,12 +2241,15 @@
                 rebuildFilterDropdowns();
                 applyFilters();
             }
-            if (failed.length) {
-                serviceCloseLog('结单失败明细：', 'warn');
-                failed.forEach(row => {
-                    serviceCloseLog(`${formatServiceCloseDisplay(row)}：${row.message || '未知原因'}`, 'error');
-                });
-            }
+            const groups = [
+                ['新结单明细', closed, 'success', '结单成功'],
+                ['原本已结单明细', alreadyClosed, 'dim', '原本已结单'],
+                ['结单失败明细', failed, 'error', '未知原因'],
+            ];
+            groups.forEach(([title, rows, level, fallback]) => {
+                serviceCloseLog(`${title}（${rows.length}）：`, rows.length ? level : 'dim');
+                rows.forEach(row => serviceCloseLog(`${formatServiceCloseDisplay(row)}：${row.message || fallback}`, level));
+            });
         }
 
         function formatServiceCloseValues(values, limit=4) {
@@ -2060,14 +2264,16 @@
         }
 
         function formatServiceCloseDisplay(row) {
-            if (row && row.display_label) return row.display_label;
             const parts = [];
-            const barcodeText = formatServiceCloseValues(row?.barcodes || [], 4);
-            const customerText = formatServiceCloseValues(row?.customer_names || row?.customers || [], 2);
+            const selected = new Set((row?.selected_barcodes || row?.barcodes || []).map(String));
+            const barcodeText = Array.from(new Set((row?.barcodes || []).map(String).filter(Boolean)))
+                .map(barcode => `${barcode}${selected.has(barcode) ? '（已选）' : '（关联）'}`)
+                .join('、');
+            const customerText = formatServiceCloseValues(row?.customer_names || row?.customers || [], 1000);
             if (barcodeText) parts.push(`条码 ${barcodeText}`);
             if (customerText) parts.push(`客户 ${customerText}`);
             if (row?.service_no) parts.push(`服务单 ${row.service_no}`);
-            return parts.join(' / ') || row?.service_no || '未知服务单';
+            return parts.join(' / ') || row?.display_label || row?.service_no || '未知服务单';
         }
 
         async function pollServiceCloseStatus() {
@@ -2075,6 +2281,7 @@
             const url = `/api/service-close/status?job_id=${encodeURIComponent(serviceCloseJobId)}&slot_id=${encodeURIComponent(serviceCloseSlotId || '')}&since=${encodeURIComponent(lastServiceCloseLogSeq)}`;
             const data = await fetch(url).then(r => r.json());
             appendServiceCloseLogs(data.logs || []);
+            renderServiceCloseStatuses(data.service_rows || []);
             if (!data.running) {
                 if (serviceCloseTimer) clearInterval(serviceCloseTimer);
                 serviceCloseTimer = null;
@@ -2085,15 +2292,12 @@
                 }
                 applyServiceCloseResults(data.results || []);
                 loadAllData(false);
-                if (serviceCloseStartAtMs) {
-                    serviceCloseLog(`批量结单总耗时：${formatDuration((Date.now() - serviceCloseStartAtMs) / 1000)}`, data.close_success ? 'success' : 'warn');
-                }
                 if (data.close_success) {
                     showToast(`批量结单完成，新结单 ${data.closed_count || 0} 个，原本已结单 ${data.already_closed_count || 0} 个`);
                 } else if (data.error) {
                     showToast(`批量结单失败：${data.error}`);
                 } else {
-                    showToast(`批量结单完成，失败 ${data.failed_count || 0} 个`);
+                    showToast(`批量结单完成，新结单 ${data.closed_count || 0} 个，原本已结单 ${data.already_closed_count || 0} 个，失败 ${data.failed_count || 0} 个`);
                 }
                 return true;
             }
@@ -2117,6 +2321,18 @@
             serviceCloseSlotId = '';
             serviceCloseStartAtMs = Date.now();
             serviceCloseLog(`提交批量结单任务：${barcodes.length} 个条码`, 'info');
+            // 立即用已选条码渲染占位行，避免启动期间面板空白
+            renderServiceCloseStatuses(barcodes.map((bc, idx) => ({
+                service_no: '',
+                barcodes: [bc],
+                selected_barcodes: [bc],
+                related_barcodes: [],
+                customer_names: [],
+                state: 'waiting',
+                message: '启动中，正在加载服务单…',
+                slot_label: '待分配',
+                elapsed: 0,
+            })));
             try {
                 const data = await fetch('/api/service-close/start', {
                     method: 'POST',
@@ -2126,6 +2342,8 @@
                 if (!data.success) {
                     serviceCloseLog(data.error || '批量结单启动失败', 'error');
                     showToast(data.error || '批量结单启动失败');
+                    const list = area.querySelector('.service-close-status-list');
+                    if (list) list.innerHTML = '';
                     if (btn) {
                         btn.disabled = false;
                         btn.textContent = '批量结单';
@@ -2135,6 +2353,7 @@
                 serviceCloseJobId = data.job_id || '';
                 serviceCloseSlotId = data.slot_id || '';
                 serviceCloseLog(`${data.message || '批量结单已开始'}，使用 ${data.slot_label || '查询通道'}`, 'success');
+                renderServiceCloseStatuses(data.service_rows || []);
                 if ((data.no_service || []).length) {
                     serviceCloseLog(`已跳过无服务单条码 ${data.no_service.length} 个`, 'warn');
                 }
@@ -2156,35 +2375,145 @@
             }
         }
 
-        function showDetail(barcode) {
-            const basePath = '/barcode/';
-            const filePath = basePath + barcode + '.html';
+        function openDetailDocument(title, filePath) {
+            const detailFrame = document.getElementById('detailFrame');
+            const serviceDetailContent = document.getElementById('serviceDetailContent');
+            serviceDetailContent.style.display = 'none';
+            serviceDetailContent.innerHTML = '';
+            detailFrame.style.display = 'block';
             fetch(filePath)
-                .then(r => r.text())
+                .then(r => {
+                    if (!r.ok) throw new Error('详情不存在');
+                    return r.text();
+                })
                 .then(html => {
                     // 修复相对路径，让图片/样式能正常加载
-                    const baseTag = `<base href="${filePath}">`;
-                    const bodyStart = html.indexOf('<body');
                     let content = html;
-                    if (bodyStart !== -1) {
-                        const insertPos = html.indexOf('>', bodyStart) + 1;
-                        content = html.slice(0, insertPos) + baseTag + html.slice(insertPos);
+                    if (!/<base\b/i.test(html)) {
+                        const baseTag = `<base href="${filePath}">`;
+                        const headStart = html.indexOf('<head');
+                        const bodyStart = html.indexOf('<body');
+                        const targetStart = headStart !== -1 ? headStart : bodyStart;
+                        if (targetStart !== -1) {
+                            const insertPos = html.indexOf('>', targetStart) + 1;
+                            content = html.slice(0, insertPos) + baseTag + html.slice(insertPos);
+                        }
                     }
-                    document.getElementById('modalTitle').textContent = '条码详情 - ' + barcode;
+                    document.getElementById('modalTitle').textContent = title;
                     document.getElementById('detailFrame').srcdoc = content;
                     document.getElementById('detailModal').classList.add('overlay-show');
                 })
                 .catch(() => {
                     // fallback: 直接加载
+                    document.getElementById('modalTitle').textContent = title;
                     document.getElementById('detailFrame').src = filePath;
                     document.getElementById('detailModal').classList.add('overlay-show');
                 });
+        }
+
+        function showDetail(barcode) {
+            openDetailDocument('条码详情 - ' + barcode, '/barcode/' + barcode + '.html');
+        }
+
+        function renderServiceOrderDetail(detail) {
+            const content = document.getElementById('serviceDetailContent');
+            const selectedSet = new Set((detail.selected_barcodes || []).map(String));
+            const relatedSet = new Set((detail.related_barcodes || []).map(String));
+            const fields = (detail.fields || []).filter(row => row && row.label && row.value);
+            const fieldValue = (labels) => {
+                for (const label of labels) {
+                    const exact = fields.find(row => String(row.label || '') === label);
+                    if (exact) return String(exact.value || '');
+                }
+                return '';
+            };
+            const customerName = fieldValue(['客户名称', '客户姓名', '反馈人', '联系人']) || '—';
+            const customerPhone = fieldValue(['联系电话', '客户电话', '反馈电话', '联系人电话', '手机号码']) || '—';
+            const addressParts = [
+                fieldValue(['所属省份', '省份']),
+                fieldValue(['所属城市', '城市']),
+                fieldValue(['所属县区', '县区']),
+                fieldValue(['联系地址', '客户地址', '地址']),
+            ].filter(Boolean);
+            const customerAddress = Array.from(new Set(addressParts)).join(' ') || '—';
+            const customerSection = `<section class="service-detail-section"><h3>客户信息</h3><div class="service-detail-fields">
+                <div class="service-detail-field"><label>客户姓名</label><div>${escapeHtml(customerName)}</div></div>
+                <div class="service-detail-field"><label>联系电话</label><div>${escapeHtml(customerPhone)}</div></div>
+                <div class="service-detail-field"><label>联系地址</label><div>${escapeHtml(customerAddress)}</div></div>
+            </div></section>`;
+            const products = detail.products || [];
+            const productRows = products.map(product => {
+                const barcode = String(product.barcode || '');
+                const selected = selectedSet.has(barcode);
+                const related = relatedSet.has(barcode) || !selected;
+                return `<tr>
+                    <td>${escapeHtml(product.product_name || '—')}</td>
+                    <td>${escapeHtml(product.product_code || '—')}</td>
+                    <td>${escapeHtml(product.barcode || '—')}</td>
+                    <td><span class="service-detail-relation ${selected ? 'is-selected' : 'is-related'}">${selected ? '已选' : (related ? '关联' : '服务单')}</span></td>
+                </tr>`;
+            }).join('');
+            const refreshButton = `<button type="button" class="service-detail-refresh" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="refreshServiceOrderProducts(this.dataset.serviceNo)" title="重新打开 CRM 服务单详情并重抓产品明细"><span class="service-detail-refresh-icon">↻</span>重查产品明细</button>`;
+            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><h3>产品明细</h3>${refreshButton}</div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
+            content.innerHTML = customerSection + productSection;
+        }
+
+        async function showServiceOrderDetail(serviceNo, detailUrl) {
+            if (!detailUrl) return;
+            const modal = document.getElementById('detailModal');
+            const detailFrame = document.getElementById('detailFrame');
+            const content = document.getElementById('serviceDetailContent');
+            document.getElementById('modalTitle').textContent = '服务单详情 - ' + serviceNo;
+            detailFrame.style.display = 'none';
+            detailFrame.srcdoc = '';
+            detailFrame.src = '';
+            content.style.display = 'block';
+            content.innerHTML = '<div class="service-detail-empty">正在读取服务单详情…</div>';
+            modal.classList.add('overlay-show');
+            try {
+                const response = await fetch(detailUrl);
+                const detail = await response.json();
+                if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在');
+                renderServiceOrderDetail(detail);
+            } catch (error) {
+                content.innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`;
+            }
+        }
+
+        async function refreshServiceOrderProducts(serviceNo) {
+            if (!serviceNo) {
+                showToast('服务单号为空');
+                return;
+            }
+            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh'));
+            buttons.forEach(btn => { btn.disabled = true; btn.classList.add('is-loading'); btn.dataset.originalText = btn.dataset.originalText || btn.textContent; btn.innerHTML = '<span class="service-detail-refresh-icon spinning">↻</span>重查中…'; });
+            try {
+                const res = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || data.success === false) {
+                    throw new Error(data.error || '重查失败');
+                }
+                showToast(`已重查 ${data.product_count || 0} 个产品明细（${data.slot_label || ''}）`);
+                const detailUrl = data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`;
+                const response = await fetch(detailUrl);
+                const detail = await response.json();
+                if (response.ok && detail && detail.success !== false) {
+                    renderServiceOrderDetail(detail);
+                }
+            } catch (e) {
+                showToast(`重查失败：${e.message || e}`);
+            } finally {
+                buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
+            }
         }
 
         function closeDetailModal() {
             document.getElementById('detailModal').classList.remove('overlay-show');
             document.getElementById('detailFrame').srcdoc = '';
             document.getElementById('detailFrame').src = '';
+            document.getElementById('detailFrame').style.display = 'block';
+            document.getElementById('serviceDetailContent').style.display = 'none';
+            document.getElementById('serviceDetailContent').innerHTML = '';
         }
 
         function hideDetail() {
