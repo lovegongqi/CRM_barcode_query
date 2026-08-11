@@ -215,6 +215,19 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["job_id"], latest["job_id"])
 
+    def test_service_close_uses_latest_installation_order_only(self):
+        fields = {
+            "sr2": [
+                {"servno1": "INSTALL-20260701", "typestr1": "安装", "servdate1": "2026-07-01"},
+                {"servno1": "REPAIR-20260730", "typestr1": "维修", "servdate1": "2026-07-30"},
+                {"servno1": "MAINT-20260731", "typestr1": "保养", "servdate1": "2026-07-31"},
+            ]
+        }
+
+        latest = app_module._latest_service_record(fields)
+
+        self.assertEqual(latest["service_no"], "INSTALL-20260701")
+
     def test_background_query_status_only_returns_actionable_rows(self):
         job = app_module._empty_background_query_job(
             "admin",

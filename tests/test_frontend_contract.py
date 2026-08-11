@@ -563,6 +563,32 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("document.hidden && !clearSelection", source)
         self.assertNotIn("fetch('/api/filter-options')", source)
 
+    def test_results_page_restores_service_close_job_from_session(self):
+        source = self.source("index.html")
+        for token in (
+            "const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1'",
+            "function saveServiceCloseJob()",
+            "function clearSavedServiceCloseJob()",
+            "function restoreServiceCloseJob()",
+            "sessionStorage.setItem(SERVICE_CLOSE_SESSION_KEY",
+            "sessionStorage.removeItem(SERVICE_CLOSE_SESSION_KEY)",
+            "restoreServiceCloseJob();",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source)
+
+    def test_results_page_groups_barcodes_by_latest_service_order(self):
+        source = self.source("index.html")
+        for token in (
+            "function isInstallationServiceOrder(row)",
+            "function getServiceOrderSortKey(item)",
+            "const aServiceNo = getServiceOrderSortKey(a)",
+            "const bServiceNo = getServiceOrderSortKey(b)",
+            "aServiceNo.localeCompare(bServiceNo, undefined, {numeric: true})",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source)
+
     def test_query_summary_includes_failure_count_and_requeue_button(self):
         source = self.source("crm.html")
         self.assertIn('id="queryBatchSummary"', source)

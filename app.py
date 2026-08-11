@@ -6312,9 +6312,14 @@ def _parse_service_date_from_no(service_no):
     except Exception:
         return 0
 
+def _is_installation_service_row(row):
+    return "安装" in _clean_export_value((row or {}).get("typestr1"))
+
 def _latest_service_record(fields):
     latest = None
     for index, row in enumerate(_service_rows(fields)):
+        if not _is_installation_service_row(row):
+            continue
         service_no = _clean_export_value(row.get("servno1"))
         if not service_no:
             continue
