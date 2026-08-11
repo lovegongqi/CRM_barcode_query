@@ -1480,6 +1480,7 @@
         let serviceCloseSlotId = '';
         let lastServiceCloseLogSeq = 0;
         let serviceCloseStartAtMs = 0;
+        const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1';
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -1696,6 +1697,13 @@
             return rows.some(row => row && String(row['servno1'] || '').trim()) ? '有服务单' : '无服务单';
         }
 
+        function getServiceOrderSortKey(item) {
+            const fields = (item && item.fields) || {};
+            const sr2 = fields.sr2;
+            const rows = Array.isArray(sr2) ? sr2 : (sr2 ? [sr2] : []);
+            return getLatestServiceNo(rows);
+        }
+
         function gfFields(fields, fieldId) {
             const idx = fieldId.lastIndexOf('_sr');
             if (idx === -1) {
@@ -1753,6 +1761,17 @@
                 const bc = b.barcode.toLowerCase();
                 return terms.some(t => bc.includes(t));
             }).sort((a, b) => {
+                const aServiceNo = getServiceOrderSortKey(a);
+                const bServiceNo = getServiceOrderSortKey(b);
+                if (aServiceNo && bServiceNo) {
+                    const serviceCompare = aServiceNo.localeCompare(bServiceNo, undefined, {numeric: true});
+                    if (serviceCompare) return serviceCompare;
+                } else if (aServiceNo) {
+                    return -1;
+                } else if (bServiceNo) {
+                    return 1;
+                }
+
                 // 有多个服务单且包含已结单的优先排前面
                 const aData = a.fields || {};
                 const bData = b.fields || {};
@@ -1886,35 +1905,24 @@
             return Number.isNaN(time) ? 0 : time;
         }
 
-        function getServiceTypePriority(row) {
-            const raw = row && (row.typestr1 || row.servtype1 || row.ordertype1);
-            const text = raw ? String(raw).trim() : '';
-            if (!text) return 0;
-            if (text.includes('安装')) return 3;
-            if (text.includes('维修') || text.includes('保养')) return 2;
-            if (text.includes('退换') || text.includes('置换')) return 1;
-            return 0;
-        }
-
         function getLatestServiceNo(rows) {
             let latest = null;
             (rows || []).forEach((row, index) => {
+                if (!isInstallationServiceOrder(row)) return;
                 const no = row && row.servno1 ? String(row.servno1).trim() : '';
                 if (!no) return;
                 const dateScore = parseServiceDate(row.servdate1) || parseServiceDateFromNo(no);
                 const score = dateScore || (index + 1);
-                const typePriority = getServiceTypePriority(row);
-                if (!latest) {
-                    latest = { no, score, typePriority };
-                    return;
-                }
-                if (typePriority > latest.typePriority) {
-                    latest = { no, score, typePriority };
-                } else if (typePriority === latest.typePriority && score >= latest.score) {
-                    latest = { no, score, typePriority };
+                if (!latest || score >= latest.score) {
+                    latest = { no, score };
                 }
             });
             return latest ? latest.no : '';
+        }
+
+        function isInstallationServiceOrder(row) {
+            const raw = row && (row.typestr1 || row.servtype1 || row.ordertype1);
+            return String(raw || '').trim().includes('安装');
         }
 
         function toggleSelect(barcode, checked) {
@@ -2142,6 +2150,51 @@
             if (window.globalLogAppend) window.globalLogAppend(message, level, time || '');
         }
 
+        function saveServiceCloseJob() {
+            if (!serviceCloseJobId) return;
+            try {
+                sessionStorage.setItem(SERVICE_CLOSE_SESSION_KEY, JSON.stringify({
+                    jobId: serviceCloseJobId,
+                    slotId: serviceCloseSlotId,
+                    startedAtMs: serviceCloseStartAtMs,
+                }));
+            } catch (e) {}
+        }
+
+        function clearSavedServiceCloseJob() {
+            try {
+                sessionStorage.removeItem(SERVICE_CLOSE_SESSION_KEY);
+            } catch (e) {}
+        }
+
+        function restoreServiceCloseJob() {
+            let saved;
+            try {
+                saved = JSON.parse(sessionStorage.getItem(SERVICE_CLOSE_SESSION_KEY) || 'null');
+            } catch (e) {
+                clearSavedServiceCloseJob();
+                return;
+            }
+            if (!saved || !saved.jobId) return;
+            serviceCloseJobId = String(saved.jobId);
+            serviceCloseSlotId = String(saved.slotId || '');
+            serviceCloseStartAtMs = Number(saved.startedAtMs) || Date.now();
+            lastServiceCloseLogSeq = 0;
+            const area = document.getElementById('transferLogMain');
+            area.style.display = 'block';
+            area.innerHTML = '';
+            const btn = document.getElementById('serviceCloseBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = '结单中...';
+            }
+            if (serviceCloseTimer) clearInterval(serviceCloseTimer);
+            serviceCloseTimer = setInterval(() => {
+                pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
+            }, 1200);
+            pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
+        }
+
         function appendServiceCloseLogs(logs) {
             if (!logs || logs.length === 0) return;
             logs.forEach(row => {
@@ -2282,9 +2335,20 @@
             const data = await fetch(url).then(r => r.json());
             appendServiceCloseLogs(data.logs || []);
             renderServiceCloseStatuses(data.service_rows || []);
+            if (data.running) {
+                const btn = document.getElementById('serviceCloseBtn');
+                if (btn) {
+                    btn.disabled = true;
+                    const total = Number(data.total || 0);
+                    const current = Number(data.current || 0);
+                    btn.textContent = total ? `结单中 ${current}/${total}...` : '结单中...';
+                }
+                return false;
+            }
             if (!data.running) {
                 if (serviceCloseTimer) clearInterval(serviceCloseTimer);
                 serviceCloseTimer = null;
+                clearSavedServiceCloseJob();
                 const btn = document.getElementById('serviceCloseBtn');
                 if (btn) {
                     btn.disabled = false;
@@ -2317,6 +2381,7 @@
             area.style.display = 'block';
             area.innerHTML = '';
             lastServiceCloseLogSeq = 0;
+            clearSavedServiceCloseJob();
             serviceCloseJobId = '';
             serviceCloseSlotId = '';
             serviceCloseStartAtMs = Date.now();
@@ -2352,6 +2417,7 @@
                 }
                 serviceCloseJobId = data.job_id || '';
                 serviceCloseSlotId = data.slot_id || '';
+                saveServiceCloseJob();
                 serviceCloseLog(`${data.message || '批量结单已开始'}，使用 ${data.slot_label || '查询通道'}`, 'success');
                 renderServiceCloseStatuses(data.service_rows || []);
                 if ((data.no_service || []).length) {
@@ -2722,6 +2788,7 @@ ${section(9, '移机单', 'moveid1', [
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetailModal(); });
 
         loadAllData();
+        restoreServiceCloseJob();
         setInterval(() => loadAllData(false), 30000);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) loadAllData(false);

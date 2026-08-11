@@ -1,9 +1,4 @@
-"""Tests for the service order selection priority logic.
-
-The 设备档案 → 服务单 table may contain multiple rows (e.g. 安装 + 维修保养).
-We prefer 安装 over 维修保养 regardless of date, and within the same type
-the latest date wins.
-"""
+"""Tests for installation-only service order selection."""
 import sys
 import unittest
 from pathlib import Path
@@ -36,7 +31,7 @@ class ServiceOrderPriorityTest(unittest.TestCase):
         result = app._latest_service_record(fields)
         self.assertEqual(result["service_no"], "FWD202607100083")
 
-    def test_only_maintenance_picks_latest(self):
+    def test_only_maintenance_returns_none(self):
         fields = {
             "sr2": [
                 {"servno1": "FWD202310080064", "typestr1": "维修保养", "servdate1": "2023-10-08"},
@@ -44,7 +39,7 @@ class ServiceOrderPriorityTest(unittest.TestCase):
             ]
         }
         result = app._latest_service_record(fields)
-        self.assertEqual(result["service_no"], "FWD202607100083")
+        self.assertIsNone(result)
 
     def test_only_installs_picks_latest(self):
         fields = {
@@ -60,7 +55,7 @@ class ServiceOrderPriorityTest(unittest.TestCase):
         self.assertIsNone(app._latest_service_record({"sr2": []}))
         self.assertIsNone(app._latest_service_record({}))
 
-    def test_missing_type_field_falls_back_to_date(self):
+    def test_missing_type_field_returns_none(self):
         fields = {
             "sr2": [
                 {"servno1": "FWD202310080064", "servdate1": "2023-10-08"},
@@ -68,7 +63,7 @@ class ServiceOrderPriorityTest(unittest.TestCase):
             ]
         }
         result = app._latest_service_record(fields)
-        self.assertEqual(result["service_no"], "FWD202607100083")
+        self.assertIsNone(result)
 
     def test_priority_uses_servtype1_alias(self):
         fields = {
