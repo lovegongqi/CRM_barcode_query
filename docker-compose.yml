@@ -12,7 +12,7 @@ services:
       CRM_SESSION_BASE: /app/session
       CRM_DISABLE_DATA_MIGRATION: "1"
     ports:
-      - "5001:5001"
+      - "5002:5001"
     volumes:
       # 默认已内置 CRM 入口；如需覆盖配置，可创建 config.json 后取消下一行注释
       # - ./config.json:/app/config.json:ro

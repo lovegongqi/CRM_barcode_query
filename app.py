@@ -1925,6 +1925,165 @@ class CRMSession:
         except Exception:
             return False, ""
 
+    def _service_detail_products(self):
+        # 先把产品明细相关的可折叠面板展开，并等待表格正文行渲染再抓取
+        try:
+            self.page.evaluate("""() => {
+                const clean = (text) => (text || '').replace(/\\s+/g, '').trim();
+                const clickIfMatch = (el) => {
+                    if (!el) return;
+                    const text = clean(el.innerText || el.textContent || '');
+                    if (text.includes('产品明细') || text.includes('订单产品')) {
+                        if (typeof el.click === 'function') el.click();
+                    }
+                };
+                const scope = document.body || document.documentElement;
+                const panels = Array.from(scope.querySelectorAll('.el-collapse-item, .ant-collapse-item'));
+                for (const panel of panels) {
+                    clickIfMatch(panel.querySelector('.el-collapse-item__header, .ant-collapse-header') || panel);
+                }
+                const headers = Array.from(scope.querySelectorAll('.el-collapse-item__header, .ant-collapse-header, .panel-title, .el-tabs__item, .ant-tabs-tab'));
+                for (const h of headers) clickIfMatch(h);
+                return true;
+            }""")
+        except Exception:
+            pass
+        rows = []
+        for _ in range(10):
+            try:
+                rows = self.page.evaluate("""() => {
+                const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                const cellText = (cell) => {
+                    const values = Array.from(cell.querySelectorAll('input,textarea,select'))
+                        .map(el => clean(el.value || el.getAttribute('value') || el.innerText || el.textContent || ''))
+                        .filter(Boolean);
+                    return clean(values.join(' ') || cell.innerText || cell.textContent || '');
+                };
+                const barcodeHeaders = ['产品条码', '设备条码', '机器条码', '序列号', '条码'];
+                const nameHeaders = ['产品名称', '产品'];
+                const modelHeaders = ['产品型号', '产品规格', '规格型号', '型号'];
+                const codeHeaders = ['产品编码', '产品代码', '物料编码'];
+                const roots = Array.from(document.querySelectorAll('.el-table,.ivu-table,.ant-table,table'))
+                    .filter((root, index, all) => !all.some((other, otherIndex) => otherIndex < index && other.contains(root)));
+                const result = [];
+                const seen = new Set();
+                for (const root of roots) {
+                    const headerCells = Array.from(root.querySelectorAll('.el-table__header-wrapper thead th, .ivu-table-header thead th, .ant-table-thead th, thead th'));
+                    const headers = headerCells.map(cellText);
+                    if (!headers.length) continue;
+                    const barcodeIndex = headers.findIndex(text => barcodeHeaders.some(label => text === label || text.includes(label)));
+                    if (barcodeIndex < 0) continue;
+                    const nameIndex = headers.findIndex(text => nameHeaders.some(label => text === label || text.includes(label)));
+                    const modelIndex = headers.findIndex(text => modelHeaders.some(label => text === label || text.includes(label)));
+                    const codeIndex = headers.findIndex(text => codeHeaders.some(label => text === label || text.includes(label)));
+                    const context = clean((root.closest('.el-card,.ivu-card,.ant-card,.panel,.tab-pane,.el-tab-pane') || root.parentElement || root).innerText || '');
+                    if (nameIndex < 0 && codeIndex < 0 && !/订单产品明细|产品明细/.test(context)) continue;
+                    const bodyRows = Array.from(root.querySelectorAll('.el-table__body-wrapper tbody tr, .ivu-table-body tbody tr, .ant-table-tbody tr, tbody tr'));
+                    for (const tr of bodyRows) {
+                        const cells = Array.from(tr.querySelectorAll(':scope > td'));
+                        if (barcodeIndex >= cells.length) continue;
+                        const barcodeValue = cellText(cells[barcodeIndex]);
+                        const productName = nameIndex >= 0 && nameIndex < cells.length ? cellText(cells[nameIndex]) : '';
+                        const productModel = modelIndex >= 0 && modelIndex < cells.length ? cellText(cells[modelIndex]) : '';
+                        const productCode = codeIndex >= 0 && codeIndex < cells.length ? cellText(cells[codeIndex]) : '';
+                        const barcodes = barcodeValue.split(/[\\s,,,;;/]+/).map(clean).filter(Boolean);
+                        for (const barcode of barcodes) {
+                            if (!/^[A-Za-z0-9-]{6,40}$/.test(barcode) || seen.has(barcode)) continue;
+                            seen.add(barcode);
+                            result.push({ barcode, product_name: productName, product_model: productModel, product_code: productCode });
+                        }
+                    }
+                }
+                return result;
+            }""")
+            except Exception:
+                rows = []
+            if rows:
+                break
+            time.sleep(0.5)
+        if not rows:
+            return []
+        products = []
+        seen = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            barcode = _clean_export_value(row.get("barcode"))
+            if not re.fullmatch(r"[A-Za-z0-9-]{6,40}", barcode or "") or barcode in seen:
+                continue
+            seen.add(barcode)
+            products.append({
+                "barcode": barcode,
+                "product_name": _clean_export_value(row.get("product_name")),
+                "product_model": _clean_export_value(row.get("product_model")),
+                "product_code": _clean_export_value(row.get("product_code")),
+            })
+        return products
+
+    def _service_detail_fields(self):
+        try:
+            rows = self.page.evaluate("""() => {
+                const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
+                const nodes = Array.from(document.querySelectorAll('.el-form-item, .ivu-form-item, .ant-form-item, .form-group'));
+                const result = [];
+                const seen = new Set();
+                for (const node of nodes) {
+                    const labelNode = node.querySelector('.el-form-item__label, .ivu-form-item-label, .ant-form-item-label, label');
+                    const label = clean(labelNode?.innerText || labelNode?.textContent || '').replace(/[：:]+$/, '');
+                    if (!label || label.length > 80) continue;
+                    const values = [];
+                    for (const control of node.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
+                        const type = (control.getAttribute('type') || '').toLowerCase();
+                        if ((type === 'radio' || type === 'checkbox') && !control.checked) continue;
+                        let value = '';
+                        if (control.tagName === 'SELECT') {
+                            value = Array.from(control.selectedOptions || []).map(option => clean(option.textContent || option.value || '')).filter(Boolean).join('、');
+                        } else {
+                            value = clean(control.value || control.getAttribute('value') || '');
+                        }
+                        if (value && !values.includes(value)) values.push(value);
+                    }
+                    if (!values.length) {
+                        const content = node.querySelector('.el-form-item__content, .ivu-form-item-content, .ant-form-item-control');
+                        let value = clean(content?.innerText || content?.textContent || '');
+                        if (value.startsWith(label)) value = clean(value.slice(label.length));
+                        if (value) values.push(value);
+                    }
+                    const value = clean(values.join('、'));
+                    if (!value || value === label || value.length > 500) continue;
+                    const key = `${label}::${value}`;
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    result.push({ label, value });
+                }
+                return result;
+            }""")
+        except Exception:
+            return []
+        fields = []
+        seen = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            label = _clean_export_value(row.get("label")).rstrip("：:")
+            value = _clean_export_value(row.get("value"))
+            key = (label, value)
+            if not label or not value or key in seen:
+                continue
+            seen.add(key)
+            fields.append({"label": label, "value": value})
+        return fields
+
+    def _save_service_detail(self, service_no, row):
+        detail = {
+            "service_no": _clean_export_value(service_no),
+            "fields": self._service_detail_fields(),
+            "products": list((row or {}).get("service_products") or []),
+            "selected_barcodes": list((row or {}).get("selected_barcodes") or []),
+            "related_barcodes": list((row or {}).get("related_barcodes") or []),
+        }
+        return _write_service_order_detail(service_no, detail)
+
     def _close_current_service_order(self, log=None):
         closed = False
         value = ""
@@ -1984,7 +2143,7 @@ class CRMSession:
             return False, "failed", last_message
         return False, "failed", f"结单确认后 {timeout} 秒内未收到 CRM 成功或失败提示"
 
-    def close_service_orders(self, service_orders, log=None):
+    def close_service_orders(self, service_orders, log=None, progress=None):
         def emit(message, level='info'):
             if log:
                 log(message, level)
@@ -2012,6 +2171,10 @@ class CRMSession:
                     result_row = {
                         "service_no": service_no,
                         "barcodes": list(row.get("barcodes") or []) if isinstance(row, dict) else [],
+                        "selected_barcodes": list(row.get("selected_barcodes") or row.get("barcodes") or []) if isinstance(row, dict) else [],
+                        "related_barcodes": [],
+                        "service_products": [],
+                        "detail_url": "",
                         "customer_names": list(row.get("customer_names") or []) if isinstance(row, dict) else [],
                         "product_names": list(row.get("product_names") or []) if isinstance(row, dict) else [],
                         "display_label": display_label,
@@ -2034,6 +2197,19 @@ class CRMSession:
                         if not ok:
                             last_error = message
                             continue
+                        products = self._service_detail_products()
+                        result_row = _merge_service_order_products(
+                            result_row,
+                            products,
+                            selected_barcodes=result_row.get("selected_barcodes"),
+                        )
+                        result_row["detail_url"] = self._save_service_detail(service_no, result_row)
+                        if products:
+                            emit(f"已读取订单产品明细：{len(products)} 个产品条码", "info")
+                        else:
+                            emit("订单产品明细中未识别到产品条码", "warn")
+                        if progress:
+                            progress(row=dict(result_row))
                         ok, status, message = self._close_current_service_order(emit)
                         if ok:
                             result_row.update({
@@ -2041,6 +2217,7 @@ class CRMSession:
                                 "status": status,
                                 "message": message or ("已结单" if status == "closed" else "原本已结单"),
                             })
+                            result_row["detail_url"] = self._save_service_detail(service_no, result_row)
                             level = "success" if status == "closed" else "dim"
                             emit(f"{display_label} {'结单成功' if status == 'closed' else '已是结单状态'}", level)
                             break
@@ -2059,6 +2236,39 @@ class CRMSession:
             except Exception as e:
                 crash_message = self._handle_browser_exception(e)
                 return False, {"error": crash_message or str(e), "results": results}
+
+
+    def refresh_service_order_products(self, service_no, log=None):
+        def emit(message, level='info'):
+            if log:
+                log(message, level)
+
+        try:
+            service_no = _clean_export_value(service_no)
+            if not service_no:
+                return False, {"error": "服务单号为空"}
+
+            with self.lock:
+                if not self.is_alive():
+                    emit("正在恢复 CRM 浏览器会话", "info")
+                    if not self._ensure_browser():
+                        return False, {"error": "浏览器未启动，请先登录 CRM"}
+                if not self.logged_in and not self._is_current_page_logged_in():
+                    return False, {"error": "CRM 当前未登录，请先登录 CRM"}
+
+                ok, message = self._open_service_order_list(emit)
+                if not ok:
+                    return False, {"error": message or "无法打开服务单列表"}
+                ok, message = self._search_service_order(service_no)
+                if not ok:
+                    return False, {"error": message or "未找到服务单"}
+                ok, message = self._open_service_order_detail(service_no)
+                if not ok:
+                    return False, {"error": message or "无法打开服务单详情"}
+                products = self._service_detail_products()
+                return True, {"products": products}
+        except Exception as e:
+            return False, {"error": str(e)}
 
     def _move_create_url(self):
         cfg = load_crm_config()
@@ -3388,13 +3598,18 @@ class CRMWorker:
             log(f"CRM 查询任务已加入队列：{barcode}", "dim")
         return self._call("query_barcode", barcode, log, output_dir)
 
-    def close_service_orders(self, service_orders, log=None):
+    def close_service_orders(self, service_orders, log=None, progress=None):
         if log:
             log(f"CRM 服务单结单任务已加入队列：{len(service_orders or [])} 个服务单", "dim")
-        return self._call("close_service_orders", service_orders, log)
+        return self._call("close_service_orders", service_orders, log, progress)
 
     def close_idle_report_tabs(self, idle_seconds=REPORT_IDLE_TIMEOUT_SECONDS):
         return self._call("close_idle_report_tabs", idle_seconds)
+
+    def refresh_service_order_products(self, service_no, log=None):
+        if log:
+            log(f"CRM 重查产品明细任务已加入队列：{service_no}", "dim")
+        return self._call("refresh_service_order_products", service_no, log)
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
@@ -3812,6 +4027,30 @@ def _empty_service_close_job(slot_id=None, orders=None):
         'closed_count': 0,
         'already_closed_count': 0,
         'failed_count': 0,
+        'service_rows': [
+            {
+                'index': index,
+                'service_no': _clean_export_value(row.get('service_no') if isinstance(row, dict) else row),
+                'barcodes': list(row.get('barcodes') or []) if isinstance(row, dict) else [],
+                'selected_barcodes': list(row.get('selected_barcodes') or row.get('barcodes') or []) if isinstance(row, dict) else [],
+                'related_barcodes': list(row.get('related_barcodes') or []) if isinstance(row, dict) else [],
+                'service_products': list(row.get('service_products') or []) if isinstance(row, dict) else [],
+                'detail_url': _clean_export_value(row.get('detail_url')) if isinstance(row, dict) else '',
+                'customer_names': list(row.get('customer_names') or []) if isinstance(row, dict) else [],
+                'product_names': list(row.get('product_names') or []) if isinstance(row, dict) else [],
+                'display_label': _service_order_display(row if isinstance(row, dict) else {'service_no': row}),
+                'slot_id': '',
+                'slot_label': '',
+                'state': 'waiting',
+                'message': '等待处理',
+                'level': 'dim',
+                'elapsed': 0,
+                'started_at': '',
+                'finished_at': '',
+                '_started_ts': 0,
+            }
+            for index, row in enumerate(orders, 1)
+        ],
         'results': [],
         'missing': [],
         'no_service': [],
@@ -4002,6 +4241,29 @@ def _transfer_job_log(job_id, message, level='dim'):
 
 def _service_close_job_log(job_id, message, level='dim'):
     _job_log(service_close_job_lock, service_close_jobs, job_id, message, level, 1000)
+
+def _update_service_close_row(job_id, index, **changes):
+    with service_close_job_lock:
+        job = service_close_jobs.get(job_id)
+        rows = job.get('service_rows') if job else None
+        if not rows or index < 1 or index > len(rows):
+            return
+        row = rows[index - 1]
+        row.update(changes)
+        started_ts = float(row.get('_started_ts') or 0)
+        if started_ts:
+            row['elapsed'] = max(int(row.get('elapsed') or 0), int(time.time() - started_ts))
+
+def _service_close_rows_payload(job):
+    now = time.time()
+    payload = []
+    for source in job.get('service_rows') or []:
+        row = {key: value for key, value in source.items() if not key.startswith('_')}
+        started_ts = float(source.get('_started_ts') or 0)
+        if source.get('state') == 'running' and started_ts:
+            row['elapsed'] = max(int(row.get('elapsed') or 0), int(now - started_ts))
+        payload.append(row)
+    return payload
 
 def _bulk_login_job_log(job_id, message, level='dim'):
     _job_log(bulk_login_job_lock, bulk_login_jobs, job_id, message, level, 1000)
@@ -4568,6 +4830,18 @@ def _run_service_close_job(job_id, workers, orders):
                 service_no = _clean_export_value(row.get("service_no") if isinstance(row, dict) else row)
                 try:
                     display_label = _service_order_display(row if isinstance(row, dict) else {"service_no": service_no})
+                    row_started = time.time()
+                    _update_service_close_row(
+                        job_id,
+                        index,
+                        slot_id=slot_id,
+                        slot_label=slot_label,
+                        state='running',
+                        message='正在处理',
+                        level='info',
+                        started_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        _started_ts=row_started,
+                    )
                     log(f"{slot_label} 处理服务单 {index}/{total}：{display_label}", "info")
 
                     def worker_log(message, level='dim'):
@@ -4576,9 +4850,24 @@ def _run_service_close_job(job_id, workers, orders):
                             return
                         if text.startswith("CRM 服务单结单任务已加入队列"):
                             return
+                        _update_service_close_row(job_id, index, message=text, level=level)
                         log(f"{slot_label} {text}", level)
 
-                    ok, result = worker.close_service_orders([row], worker_log)
+                    def worker_progress(row=None):
+                        detail = row if isinstance(row, dict) else {}
+                        _update_service_close_row(
+                            job_id,
+                            index,
+                            barcodes=list(detail.get('barcodes') or []),
+                            selected_barcodes=list(detail.get('selected_barcodes') or []),
+                            related_barcodes=list(detail.get('related_barcodes') or []),
+                            service_products=list(detail.get('service_products') or []),
+                            detail_url=_clean_export_value(detail.get('detail_url')),
+                            product_names=list(detail.get('product_names') or []),
+                            display_label=detail.get('display_label') or display_label,
+                        )
+
+                    ok, result = worker.close_service_orders([row], worker_log, worker_progress)
                     result = result if isinstance(result, dict) else {"error": str(result), "results": []}
                     result_rows = result.get("results") or []
                     result_row = result_rows[0] if result_rows else {
@@ -4595,10 +4884,36 @@ def _run_service_close_job(job_id, workers, orders):
                             result_row["display_label"] = _service_order_display(result_row or row)
                     if not ok and result.get("error") and not result_row.get("message"):
                         result_row["message"] = result.get("error")
+                    final_state = result_row.get('status') if result_row.get('success') else 'failed'
+                    if final_state not in {'closed', 'already_closed', 'failed'}:
+                        final_state = 'closed' if result_row.get('success') else 'failed'
+                    _update_service_close_row(
+                        job_id,
+                        index,
+                        state=final_state,
+                        barcodes=list(result_row.get('barcodes') or []),
+                        selected_barcodes=list(result_row.get('selected_barcodes') or []),
+                        related_barcodes=list(result_row.get('related_barcodes') or []),
+                        service_products=list(result_row.get('service_products') or []),
+                        detail_url=_clean_export_value(result_row.get('detail_url')),
+                        product_names=list(result_row.get('product_names') or []),
+                        display_label=result_row.get('display_label') or display_label,
+                        message=result_row.get('message') or ('已结单' if final_state == 'closed' else '原本已结单'),
+                        level='success' if final_state == 'closed' else ('dim' if final_state == 'already_closed' else 'error'),
+                        finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    )
                     with result_lock:
                         rows_by_index[index - 1] = result_row
                 except Exception as e:
                     error = _brief_batch_error(e, 800)
+                    _update_service_close_row(
+                        job_id,
+                        index,
+                        state='failed',
+                        message=error,
+                        level='error',
+                        finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    )
                     with result_lock:
                         rows_by_index[index - 1] = {
                             "service_no": service_no,
@@ -4635,16 +4950,21 @@ def _run_service_close_job(job_id, workers, orders):
             if not service_no:
                 continue
             source_row = order_map.get(service_no) or {}
-            row["barcodes"] = list(source_row.get("barcodes") or row.get("barcodes") or [])
+            merged_row = _merge_service_order_products(
+                row,
+                row.get("service_products") or [],
+                selected_barcodes=source_row.get("selected_barcodes") or source_row.get("barcodes") or [],
+            )
+            row.clear()
+            row.update(merged_row)
             row["customer_names"] = list(source_row.get("customer_names") or row.get("customer_names") or [])
-            row["product_names"] = list(source_row.get("product_names") or row.get("product_names") or [])
             row["display_label"] = _service_order_display(row)
             if row.get("success"):
                 if row.get("status") == "already_closed":
                     already_closed_count += 1
                 else:
                     closed_count += 1
-                _record_service_closed_for_barcodes(service_no, (order_map.get(service_no) or {}).get("barcodes") or [])
+                _record_service_closed_for_barcodes(service_no, row.get("barcodes") or [])
             else:
                 failed_count += 1
 
@@ -4747,7 +5067,7 @@ def _run_background_query_job(job_id, workers):
                 'error',
             )
             return False
-        _background_query_job_log(job_id, f"{slot_label} CRM 未登录，跳过该通道", 'error')
+        _background_query_job_log(job_id, f"{slot_label} CRM 未登录，等待登录后自动加入", 'info')
         return False
 
     def run_worker(worker, slot_id, slot_label):
@@ -4756,7 +5076,17 @@ def _run_background_query_job(job_id, workers):
         except Exception:
             pass
         if not verify_worker(worker, slot_label):
-            return
+            while not stop_requested() and not item_queue.empty():
+                if worker.logged_in:
+                    _background_query_job_log(
+                        job_id,
+                        f"{slot_label} 已登录，自动加入当前查询队列",
+                        'success',
+                    )
+                    break
+                time.sleep(0.25)
+            else:
+                return
         while not stop_requested():
             try:
                 item_index = item_queue.get_nowait()
@@ -5081,6 +5411,7 @@ DATA_BASE_DIR = _runtime_data_base_dir()
 CONFIG_DIR = _runtime_config_dir()
 BARCODE_DIR = os.path.join(DATA_BASE_DIR, "barcode")
 ARCHIVE_DIR = os.path.join(BARCODE_DIR, "archived")
+SERVICE_ORDER_DIR = os.path.join(DATA_BASE_DIR, "service_orders")
 DATA_FILE = os.path.join(CONFIG_DIR, "barcode_data.json")
 PRODUCT_LIBRARY_FILE = os.path.join(CONFIG_DIR, "product_library.json")
 ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
@@ -6312,20 +6643,33 @@ def _parse_service_date_from_no(service_no):
     except Exception:
         return 0
 
-def _is_installation_service_row(row):
-    return "安装" in _clean_export_value((row or {}).get("typestr1"))
+def _service_type_priority(row):
+    text = _clean_export_value(row.get("typestr1") or row.get("servtype1") or row.get("ordertype1"))
+    if text:
+        if "安装" in text:
+            return 3
+        if "维修" in text or "保养" in text:
+            return 2
+        if "退换" in text or "置换" in text:
+            return 1
+    return 0
+
 
 def _latest_service_record(fields):
     latest = None
     for index, row in enumerate(_service_rows(fields)):
-        if not _is_installation_service_row(row):
-            continue
         service_no = _clean_export_value(row.get("servno1"))
         if not service_no:
             continue
         score = _parse_service_date(row.get("servdate1")) or _parse_service_date_from_no(service_no) or (index + 1)
-        if latest is None or score >= latest["score"]:
-            latest = {"service_no": service_no, "row": row, "score": score}
+        type_priority = _service_type_priority(row)
+        if latest is None:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
+            continue
+        if type_priority > latest["type_priority"]:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
+        elif type_priority == latest["type_priority"] and score >= latest["score"]:
+            latest = {"service_no": service_no, "row": row, "score": score, "type_priority": type_priority}
     return latest
 
 def _service_row_is_closed(row):
@@ -6487,6 +6831,88 @@ def build_transfer_summary(selected_barcodes, transfer_type="移出", distributo
     _refresh_transfer_summary_failure_details(summary)
     return summary
 
+def _merge_service_order_products(row, products, selected_barcodes=None):
+    merged = dict(row or {})
+    selected = normalize_input_barcodes(
+        selected_barcodes
+        if selected_barcodes is not None
+        else (merged.get("selected_barcodes") or merged.get("barcodes") or [])
+    )
+    barcodes = normalize_input_barcodes([
+        *selected,
+        *(merged.get("barcodes") or []),
+        *[
+            product.get("barcode")
+            for product in (products or [])
+            if isinstance(product, dict)
+        ],
+    ])
+    product_names = []
+    for value in [
+        *(merged.get("product_names") or []),
+        *[
+            product.get("product_name")
+            for product in (products or [])
+            if isinstance(product, dict)
+        ],
+    ]:
+        value = _clean_export_value(value)
+        if value and value not in product_names:
+            product_names.append(value)
+    selected_set = set(selected)
+    merged.update({
+        "selected_barcodes": selected,
+        "barcodes": barcodes,
+        "related_barcodes": [barcode for barcode in barcodes if barcode not in selected_set],
+        "product_names": product_names,
+        "service_products": list(products or []),
+    })
+    merged["display_label"] = _service_order_display(merged)
+    return merged
+
+def _infer_service_product_model(product_name):
+    product_name = _clean_export_value(product_name)
+    candidates = []
+    for token in re.findall(r"(?<![A-Za-z0-9])([A-Za-z0-9]+(?:[-+.][A-Za-z0-9]+)*)(?![A-Za-z0-9])", product_name):
+        if re.search(r"[A-Za-z]", token) and re.search(r"\d", token):
+            candidates.append(token)
+    if not candidates:
+        return ""
+    model = candidates[-1]
+    if re.search(rf"{re.escape(model)}\s+PLUS\b", product_name, re.I):
+        model += " PLUS"
+    return model
+
+def _normalize_service_order_detail(detail, service_no=""):
+    payload = dict(detail or {})
+    payload["service_no"] = _clean_export_value(service_no or payload.get("service_no"))
+    products = []
+    for source in payload.get("products") or []:
+        if not isinstance(source, dict):
+            continue
+        product = dict(source)
+        product["product_model"] = (
+            _clean_export_value(product.get("product_model"))
+            or _infer_service_product_model(product.get("product_name"))
+        )
+        products.append(product)
+    payload["products"] = products
+    return payload
+
+def _write_service_order_detail(service_no, detail):
+    service_no = _clean_export_value(service_no)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return ""
+    if not isinstance(detail, dict):
+        return ""
+    payload = _normalize_service_order_detail(detail, service_no)
+    os.makedirs(SERVICE_ORDER_DIR, exist_ok=True)
+    filename = f"{service_no}.json"
+    filepath = os.path.join(SERVICE_ORDER_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+    return f"/api/service-orders/{service_no}"
+
 def selected_latest_service_orders(selected_barcodes):
     wanted = normalize_input_barcodes(selected_barcodes)
     all_items = {item['barcode']: item for item in scan_barcodes()}
@@ -6508,11 +6934,14 @@ def selected_latest_service_orders(selected_barcodes):
             service_orders[service_no] = {
                 "service_no": service_no,
                 "barcodes": [],
+                "selected_barcodes": [],
+                "related_barcodes": [],
                 "customer_names": [],
                 "product_names": [],
                 "local_closed": _service_row_is_closed(row),
             }
         service_orders[service_no]["barcodes"].append(barcode)
+        service_orders[service_no]["selected_barcodes"].append(barcode)
         customer_name = _clean_export_value(row.get("name1") or row.get("customer1"))
         if customer_name and customer_name not in service_orders[service_no]["customer_names"]:
             service_orders[service_no]["customer_names"].append(customer_name)
@@ -7154,7 +7583,7 @@ def account_has_permission(permission):
     return permission in (row.get('permissions') or [])
 
 def required_permission_for_path(path):
-    if path == "/" or path.startswith("/barcode/"):
+    if path == "/" or path.startswith("/barcode/") or path.startswith("/service-order/"):
         return "results"
     if path == "/crm":
         return "crm"
@@ -7168,7 +7597,7 @@ def required_permission_for_path(path):
         return "account-self"
     if path.startswith("/api/barcodes") or path.startswith("/api/filter-options") or path.startswith("/api/export"):
         return "results"
-    if path.startswith("/api/service-close"):
+    if path.startswith("/api/service-close") or path.startswith("/api/service-orders"):
         return "results"
     if path == "/api/crm/credentials":
         return "account-self"
@@ -7610,6 +8039,7 @@ def api_service_close_start():
         'slot_ids': slot_ids,
         'slot_label': slot_label_text,
         'orders': orders,
+        'service_rows': _service_close_rows_payload(job),
         'total': len(orders),
         'missing': prepared.get("missing") or [],
         'no_service': prepared.get("no_service") or [],
@@ -7641,6 +8071,7 @@ def api_service_close_status():
             'already_closed_count': job.get('already_closed_count') or 0,
             'failed_count': job.get('failed_count') or 0,
             'orders': job.get('orders') or [],
+            'service_rows': _service_close_rows_payload(job),
             'results': job.get('results') or [],
             'missing': job.get('missing') or [],
             'no_service': job.get('no_service') or [],
@@ -7981,6 +8412,82 @@ def serve_barcode(filename):
             return send_from_directory(ARCHIVE_DIR, filename)
         return Response(html, mimetype='text/html')
     return send_from_directory(ARCHIVE_DIR, filename)
+
+@app.route("/service-order/<filename>")
+def serve_service_order(filename):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}\.html", filename or ""):
+        return "服务单详情不存在", 404
+    return send_from_directory(SERVICE_ORDER_DIR, filename, mimetype="text/html")
+
+@app.route("/api/service-orders/<service_no>")
+def api_service_order_detail(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({"success": False, "error": "服务单详情不存在"}), 404
+    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+    if not os.path.exists(filepath):
+        return jsonify({"success": False, "error": "服务单详情不存在"}), 404
+    try:
+        with open(filepath, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except Exception:
+        return jsonify({"success": False, "error": "服务单详情读取失败"}), 500
+    return jsonify(_normalize_service_order_detail(payload, service_no))
+
+
+@app.route("/api/service-orders/<service_no>/refresh-products", methods=["POST"])
+def api_service_order_refresh_products(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({"success": False, "error": "服务单号格式不正确"}), 400
+
+    workers, error = _select_idle_query_workers_desc()
+    if error:
+        return jsonify({"success": False, "error": error})
+
+    worker, slot_id, slot_label = workers[0]
+
+    def emit(message, level="dim"):
+        # 占位：与现有 close_service_orders 同样签名以复用 _service_detail_products 等工具
+        pass
+
+    try:
+        ok, result = worker.refresh_service_order_products(service_no, emit)
+    except Exception as e:
+        return jsonify({"success": False, "error": f"重查失败：{e}"}), 500
+
+    if not ok:
+        return jsonify({"success": False, "error": (result if isinstance(result, str) else str(result)) or "重查失败"})
+
+    products = []
+    if isinstance(result, dict):
+        products = list(result.get("products") or [])
+    elif isinstance(result, list):
+        products = list(result)
+
+    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+    existing = {}
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+
+    if products:
+        existing["products"] = products
+    else:
+        existing["products"] = []
+    existing["service_no"] = _clean_export_value(service_no)
+    _write_service_order_detail(service_no, existing)
+
+    return jsonify({
+        "success": True,
+        "service_no": service_no,
+        "slot_id": slot_id,
+        "slot_label": slot_label,
+        "products": products,
+        "product_count": len(products),
+        "detail_url": f"/api/service-orders/{service_no}",
+    })
 
 @app.route("/barcode/archived/<filename>")
 def serve_archived(filename):
