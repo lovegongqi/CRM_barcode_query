@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
