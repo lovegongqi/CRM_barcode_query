@@ -229,6 +229,100 @@ class InboundRouteTest(unittest.TestCase):
         self.assertIn(PACKING_SLIP_NO, disposition)
         self.assertTrue(download.data.startswith(b"PK"))
 
+    def test_new_start_removes_prior_completed_owner_job_and_result(self):
+        client = self._login("admin", "88293529")
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(FakeInboundWorker(), "query-2", "查询2", ""),
+        ):
+            first = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+        first_job_id = first.get_json()["job_id"]
+        self.assertTrue(self._wait_for_job(client, first_job_id)["success"])
+        self.assertEqual(
+            client.get(f"/api/inbound/export?job_id={first_job_id}").status_code,
+            200,
+        )
+
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(FakeInboundWorker(), "query-2", "查询2", ""),
+        ):
+            second = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": "SH202607210003"},
+            )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            client.get(f"/api/inbound/status?job_id={first_job_id}").status_code,
+            404,
+        )
+        self.assertEqual(
+            client.get(f"/api/inbound/export?job_id={first_job_id}").status_code,
+            404,
+        )
+
+    def test_explicit_batch_start_refuses_an_inbound_reserved_slot(self):
+        with app_module.inbound_job_lock:
+            inbound_job = app_module._empty_inbound_job(
+                "admin", PACKING_SLIP_NO, "query-2", "查询2"
+            )
+            inbound_job["running"] = True
+            app_module.inbound_jobs[inbound_job["job_id"]] = inbound_job
+            app_module.latest_inbound_job_by_slot["query-2"] = inbound_job["job_id"]
+
+        client = self._login("admin", "88293529")
+        with (
+            mock.patch.object(app_module, "_request_slot_id", return_value="query-2"),
+            mock.patch.object(app_module.crm_pool, "get", return_value=object()),
+            mock.patch.object(app_module.threading, "Thread"),
+        ):
+            response = client.post(
+                "/api/crm/batch/start",
+                json={"barcodes": ["7925000000001"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["success"])
+        self.assertIn("入库", response.get_json()["error"])
+
+    def test_background_batch_start_skips_an_inbound_reserved_slot(self):
+        class IdleWorker:
+            def clear_stop(self):
+                pass
+
+        with app_module.inbound_job_lock:
+            inbound_job = app_module._empty_inbound_job(
+                "admin", PACKING_SLIP_NO, "query-2", "查询2"
+            )
+            inbound_job["running"] = True
+            app_module.inbound_jobs[inbound_job["job_id"]] = inbound_job
+            app_module.latest_inbound_job_by_slot["query-2"] = inbound_job["job_id"]
+
+        client = self._login("admin", "88293529")
+        with (
+            mock.patch.object(
+                app_module,
+                "configured_query_slot_ids",
+                return_value=["query-1", "query-2"],
+            ),
+            mock.patch.object(app_module.crm_pool, "get", return_value=IdleWorker()),
+            mock.patch.object(app_module.threading, "Thread"),
+        ):
+            response = client.post(
+                "/api/crm/background-batch/start",
+                json={"barcodes": ["7925000000001"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(response.get_json()["slot_ids"], ["query-1"])
+
     def test_start_reserves_slot_before_worker_runs_and_rejects_owner_conflict(self):
         class BlockingWorker(FakeInboundWorker):
             def __init__(self):

@@ -4055,6 +4055,19 @@ def _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label):
         'finished_at': '',
     }
 
+
+def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_jobs.pop(job_id, None)
+        if latest_inbound_job_by_owner.get(owner) == job_id:
+            latest_inbound_job_by_owner.pop(owner, None)
+        for slot_id, mapped_job_id in list(latest_inbound_job_by_slot.items()):
+            if mapped_job_id == job_id:
+                latest_inbound_job_by_slot.pop(slot_id, None)
+
 def _empty_summary_job(slot_id=None):
     return {
         'job_id': uuid.uuid4().hex,
@@ -8930,6 +8943,7 @@ def api_inbound_start():
         if not worker:
             return jsonify({'success': False, 'error': error or '暂无可用查询通道'}), 409
 
+        _purge_completed_inbound_jobs_for_owner_unlocked(owner)
         job = _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label)
         job.update({
             'running': True,
@@ -9533,7 +9547,11 @@ def api_crm_background_batch_start():
             'excluded': excluded,
         }), 400
 
-    slot_ids = configured_query_slot_ids()
+    slot_ids = [
+        slot_id
+        for slot_id in configured_query_slot_ids()
+        if not _query_slot_has_running_inbound(slot_id)
+    ]
     if not slot_ids:
         return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
 
@@ -9625,6 +9643,8 @@ def api_crm_background_batch_stop():
 def api_crm_batch_start():
     data = request.get_json()
     slot_id = _request_slot_id("query")
+    if _query_slot_has_running_inbound(slot_id):
+        return jsonify({'success': False, 'error': f'{slot_id} 正在被入库读取任务占用'})
     worker = crm_pool.get(slot_id, "query")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)

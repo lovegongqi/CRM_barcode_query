@@ -267,6 +267,15 @@ async function pollInboundStatus(preferLatest=false) {
             await pollInboundStatus(true);
             return;
         }
+        if (preferLatest && !data.job_id) {
+            inboundJobId = '';
+            sessionStorage.removeItem('inbound_job_id');
+            if (inboundPollTimer) {
+                clearInterval(inboundPollTimer);
+                inboundPollTimer = null;
+            }
+            return;
+        }
         if (!response.ok || data.error && !data.job_id) {
             document.getElementById('inboundStage').textContent = data.error || '无法读取入库任务';
             return;

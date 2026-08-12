@@ -566,6 +566,13 @@ class FrontendContractTest(unittest.TestCase):
             r"if \(data\.done\)[\s\S]*?data\.success && data\.result[\s\S]*?clearInboundResultSurfaces\(\)",
         )
 
+    def test_inbound_stale_job_fallback_stops_polling_when_no_latest_job_exists(self):
+        inbound = self.source("inbound.html")
+        self.assertRegex(
+            inbound,
+            r"if \(preferLatest && !data\.job_id\)\s*\{[\s\S]*?clearInterval\(inboundPollTimer\)[\s\S]*?inboundPollTimer = null;[\s\S]*?return;",
+        )
+
     def test_shared_navigation_has_six_columns_and_inbound_permission(self):
         settings = self.source("accounts.html")
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
