@@ -96,6 +96,12 @@ class InboundRouteTest(unittest.TestCase):
                 app_module.inbound_jobs.clear()
                 app_module.latest_inbound_job_by_owner.clear()
                 app_module.latest_inbound_job_by_slot.clear()
+        with app_module.batch_job_lock:
+            app_module.batch_jobs.clear()
+            app_module.latest_batch_job_by_slot.clear()
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs.clear()
+            app_module.latest_background_query_job_by_owner.clear()
 
     def tearDown(self):
         if hasattr(app_module, "inbound_job_lock"):
@@ -103,6 +109,12 @@ class InboundRouteTest(unittest.TestCase):
                 app_module.inbound_jobs.clear()
                 app_module.latest_inbound_job_by_owner.clear()
                 app_module.latest_inbound_job_by_slot.clear()
+        with app_module.batch_job_lock:
+            app_module.batch_jobs.clear()
+            app_module.latest_batch_job_by_slot.clear()
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs.clear()
+            app_module.latest_background_query_job_by_owner.clear()
         app_module.save_accounts(self._original_accounts)
 
     @staticmethod
@@ -322,6 +334,100 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["success"])
         self.assertEqual(response.get_json()["slot_ids"], ["query-1"])
+
+    def test_concurrent_inbound_and_batch_start_claim_only_one_contested_slot(self):
+        class BlockingQueryWorker:
+            def __init__(self):
+                self.slot_id = "query-2"
+                self.busy = False
+                self.logged_in = True
+                self.remembered_logged_in = True
+                self.batch_query_started = threading.Event()
+                self.release_batch_query = threading.Event()
+                self.inbound_calls = 0
+
+            def clear_stop(self):
+                pass
+
+            def is_stop_requested(self):
+                return False
+
+            def query_barcode(self, barcode, log=None, output_dir=None):
+                self.batch_query_started.set()
+                self.release_batch_query.wait(2)
+                return True, f"{barcode}.html"
+
+            def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+                self.inbound_calls += 1
+                return True, {
+                    "rows": [dict(FIXED_ROW)],
+                    "page_counts": [{"page": 1, "row_count": 1}],
+                }
+
+        worker = BlockingQueryWorker()
+        batch_checked = threading.Event()
+        release_batch_check = threading.Event()
+        batch_done = threading.Event()
+        inbound_started = threading.Event()
+        inbound_done = threading.Event()
+        responses = {}
+        original_inbound_check = app_module._query_slot_has_running_inbound
+
+        def coordinate_inbound_check(slot_id):
+            if threading.current_thread().name == "batch-start":
+                batch_checked.set()
+                release_batch_check.wait(2)
+                return False
+            return original_inbound_check(slot_id)
+
+        batch_client = self._login("admin", "88293529")
+        inbound_client = self._login("admin", "88293529")
+
+        def start_batch():
+            responses["batch"] = batch_client.post(
+                "/api/crm/batch/start",
+                json={"slot_id": "query-2", "barcodes": ["7925000000001"]},
+            )
+            batch_done.set()
+
+        def start_inbound():
+            inbound_started.set()
+            responses["inbound"] = inbound_client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+            inbound_done.set()
+
+        batch_thread = threading.Thread(target=start_batch, name="batch-start")
+        inbound_thread = threading.Thread(target=start_inbound, name="inbound-start")
+        try:
+            with (
+                mock.patch.object(app_module, "_query_slot_has_running_inbound", side_effect=coordinate_inbound_check),
+                mock.patch.object(app_module.crm_pool, "query_slots", ["query-2"]),
+                mock.patch.object(app_module.crm_pool, "get", return_value=worker),
+                mock.patch.object(app_module, "_query_slot_cooldown_message", return_value=""),
+                mock.patch.object(app_module, "_query_slot_has_running_service_close", return_value=False),
+            ):
+                batch_thread.start()
+                self.assertTrue(batch_checked.wait(1))
+                inbound_thread.start()
+                self.assertTrue(inbound_started.wait(1))
+                inbound_finished_before_batch_claim = inbound_done.wait(0.1)
+                release_batch_check.set()
+                self.assertTrue(batch_done.wait(1))
+                self.assertTrue(worker.batch_query_started.wait(1))
+                self.assertTrue(inbound_done.wait(1))
+        finally:
+            release_batch_check.set()
+            worker.release_batch_query.set()
+            batch_thread.join(2)
+            inbound_thread.join(2)
+
+        self.assertFalse(inbound_finished_before_batch_claim)
+        self.assertTrue(responses["batch"].get_json()["success"])
+        self.assertEqual(responses["inbound"].status_code, 409)
+        self.assertFalse(responses["inbound"].get_json()["success"])
+        self.assertEqual(worker.inbound_calls, 0)
 
     def test_start_reserves_slot_before_worker_runs_and_rejects_owner_conflict(self):
         class BlockingWorker(FakeInboundWorker):

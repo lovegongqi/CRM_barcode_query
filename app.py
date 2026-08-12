@@ -3906,6 +3906,8 @@ MAX_BATCH_RETRY_LIMIT = 5
 
 BATCH_LOG_LIMIT = 5000
 
+query_slot_reservation_lock = threading.RLock()
+
 batch_job_lock = threading.Lock()
 batch_jobs = {}
 latest_batch_job_by_slot = {}
@@ -6597,6 +6599,14 @@ def _query_slot_has_running_batch(slot_id):
         job = batch_jobs.get(job_id)
         return bool(job and job.get('running'))
 
+
+def _query_slot_has_running_background_batch(slot_id):
+    with background_query_job_lock:
+        return any(
+            job.get('running') and slot_id in (job.get('slot_ids') or [])
+            for job in background_query_jobs.values()
+        )
+
 def _query_slot_has_running_service_close(slot_id):
     with service_close_job_lock:
         job_id = latest_service_close_job_by_slot.get(slot_id)
@@ -6669,6 +6679,8 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
             skipped_cooldown += 1
             continue
         if _query_slot_has_running_batch(slot_id):
+            continue
+        if _query_slot_has_running_background_batch(slot_id):
             continue
         if _query_slot_has_running_service_close(slot_id):
             continue
@@ -8929,30 +8941,31 @@ def api_inbound_start():
         return jsonify({'success': False, 'error': str(error)}), 400
 
     owner = _current_inbound_owner()
-    with inbound_job_lock:
-        running_job_id = latest_inbound_job_by_owner.get(owner)
-        running_job = inbound_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({
-                'success': False,
-                'error': '当前账号已有入库读取任务正在运行',
-                'job_id': running_job_id,
-            }), 409
+    with query_slot_reservation_lock:
+        with inbound_job_lock:
+            running_job_id = latest_inbound_job_by_owner.get(owner)
+            running_job = inbound_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({
+                    'success': False,
+                    'error': '当前账号已有入库读取任务正在运行',
+                    'job_id': running_job_id,
+                }), 409
 
-        worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
-        if not worker:
-            return jsonify({'success': False, 'error': error or '暂无可用查询通道'}), 409
+            worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
+            if not worker:
+                return jsonify({'success': False, 'error': error or '暂无可用查询通道'}), 409
 
-        _purge_completed_inbound_jobs_for_owner_unlocked(owner)
-        job = _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label)
-        job.update({
-            'running': True,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        _append_job_log_unlocked(job, f"已预留查询通道：{slot_label}", 'info', 300)
-        inbound_jobs[job['job_id']] = job
-        latest_inbound_job_by_owner[owner] = job['job_id']
-        latest_inbound_job_by_slot[slot_id] = job['job_id']
+            _purge_completed_inbound_jobs_for_owner_unlocked(owner)
+            job = _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label)
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            _append_job_log_unlocked(job, f"已预留查询通道：{slot_label}", 'info', 300)
+            inbound_jobs[job['job_id']] = job
+            latest_inbound_job_by_owner[owner] = job['job_id']
+            latest_inbound_job_by_slot[slot_id] = job['job_id']
 
     thread = threading.Thread(
         target=_run_inbound_job,
@@ -9547,46 +9560,48 @@ def api_crm_background_batch_start():
             'excluded': excluded,
         }), 400
 
-    slot_ids = [
-        slot_id
-        for slot_id in configured_query_slot_ids()
-        if not _query_slot_has_running_inbound(slot_id)
-    ]
-    if not slot_ids:
-        return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
+    with query_slot_reservation_lock:
+        slot_ids = [
+            slot_id
+            for slot_id in configured_query_slot_ids()
+            if not _query_slot_has_running_inbound(slot_id)
+            and not _query_slot_has_running_batch(slot_id)
+            and not _query_slot_has_running_background_batch(slot_id)
+        ]
+        if not slot_ids:
+            return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
 
-    with background_query_job_lock:
-        running_job_id = latest_background_query_job_by_owner.get(owner)
-        running_job = background_query_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({
-                'success': False,
-                'error': '当前账号已有后台批量查询正在运行',
-                'job_id': running_job_id,
-            }), 409
+        with background_query_job_lock:
+            running_job_id = latest_background_query_job_by_owner.get(owner)
+            running_job = background_query_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({
+                    'success': False,
+                    'error': '当前账号已有后台批量查询正在运行',
+                    'job_id': running_job_id,
+                }), 409
 
-    workers = []
-    for slot_id in slot_ids:
-        worker = crm_pool.get(slot_id, 'query')
-        try:
-            worker.clear_stop()
-        except Exception:
-            pass
-        workers.append((worker, slot_id, _query_slot_label(slot_id)))
+            job = _empty_background_query_job(
+                owner,
+                barcodes,
+                slot_ids,
+                batch_retry_limit(),
+            )
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            background_query_jobs[job['job_id']] = job
+            latest_background_query_job_by_owner[owner] = job['job_id']
 
-    job = _empty_background_query_job(
-        owner,
-        barcodes,
-        slot_ids,
-        batch_retry_limit(),
-    )
-    job.update({
-        'running': True,
-        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    })
-    with background_query_job_lock:
-        background_query_jobs[job['job_id']] = job
-        latest_background_query_job_by_owner[owner] = job['job_id']
+        workers = []
+        for slot_id in slot_ids:
+            worker = crm_pool.get(slot_id, 'query')
+            try:
+                worker.clear_stop()
+            except Exception:
+                pass
+            workers.append((worker, slot_id, _query_slot_label(slot_id)))
 
     threading.Thread(
         target=_run_background_query_job,
@@ -9643,9 +9658,6 @@ def api_crm_background_batch_stop():
 def api_crm_batch_start():
     data = request.get_json()
     slot_id = _request_slot_id("query")
-    if _query_slot_has_running_inbound(slot_id):
-        return jsonify({'success': False, 'error': f'{slot_id} 正在被入库读取任务占用'})
-    worker = crm_pool.get(slot_id, "query")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
@@ -9653,18 +9665,24 @@ def api_crm_batch_start():
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需查询' if excluded else '条码不能为空', 'excluded': excluded})
 
-    with batch_job_lock:
-        running_job_id = latest_batch_job_by_slot.get(slot_id)
-        running_job = batch_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
-        job = _empty_batch_job(slot_id, barcodes, retry_limit)
-        job.update({
-            'running': True,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        batch_jobs[job['job_id']] = job
-        latest_batch_job_by_slot[slot_id] = job['job_id']
+    with query_slot_reservation_lock:
+        if _query_slot_has_running_inbound(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 正在被入库读取任务占用'})
+        if _query_slot_has_running_background_batch(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 已有后台批量查询正在运行'})
+        worker = crm_pool.get(slot_id, "query")
+        with batch_job_lock:
+            running_job_id = latest_batch_job_by_slot.get(slot_id)
+            running_job = batch_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
+            job = _empty_batch_job(slot_id, barcodes, retry_limit)
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            batch_jobs[job['job_id']] = job
+            latest_batch_job_by_slot[slot_id] = job['job_id']
 
     t = threading.Thread(target=_run_batch_job, args=(job['job_id'], worker, barcodes, retry_limit, excluded), daemon=True)
     t.start()
