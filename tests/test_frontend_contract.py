@@ -63,6 +63,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("product.product_model", results)
         self.assertNotIn("service-close-summary-log", results)
 
+    def test_results_page_can_export_service_orders_in_install_template(self):
+        results = self.source("index.html")
+        self.assertIn('onclick="exportServiceOrdersXlsx()"', results)
+        self.assertIn("function exportServiceOrdersXlsx()", results)
+        self.assertIn("fetch('/api/service-orders/export/xlsx'", results)
+        self.assertIn("getSelectedBarcodeArray()", results)
+
     def test_service_order_detail_matches_the_dark_workspace_theme(self):
         results = self.source("index.html")
         content_rule = re.search(r"\.service-detail-content\s*\{([^}]*)\}", results, re.S)

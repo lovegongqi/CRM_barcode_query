@@ -1381,6 +1381,7 @@
                     <button class="btn btn-danger-soft" onclick="batchDelete()">删除选中</button>
                     <button class="btn btn-copy" onclick="copyAllBarcodes()">复制全部</button>
                     <button class="btn btn-export" onclick="exportXlsx()">导出 XLSX</button>
+                    <button class="btn btn-export" id="serviceOrderExportBtn" onclick="exportServiceOrdersXlsx()">导出安装表</button>
                     <button class="btn btn-transfer" onclick="goSelectedTransfer()">选中条码移库</button>
                     <button class="btn btn-service-close" id="serviceCloseBtn" onclick="batchCloseServiceOrders()">批量结单</button>
                     <button class="btn btn-secondary-soft" onclick="clearAllFilters()">清空筛选</button>
@@ -2034,6 +2035,37 @@
 
             btn.classList.remove('exporting');
             btn.textContent = '导出 XLSX';
+        }
+
+        async function exportServiceOrdersXlsx() {
+            const selected = getSelectedBarcodeArray();
+            const filtered = getCurrentFilteredBarcodes();
+            const barcodes = selected.length ? selected : filtered.map(item => item.barcode);
+            if (barcodes.length === 0) { showToast('没有可导出的条码'); return; }
+
+            const btn = document.getElementById('serviceOrderExportBtn');
+            btn.disabled = true;
+            btn.classList.add('exporting');
+            btn.textContent = '导出中...';
+            try {
+                const res = await fetch('/api/service-orders/export/xlsx', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({barcodes})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    window.open(BARCODE_DIR + data.filename, '_blank');
+                    showToast(`已导出 ${data.exported_count || 0} 个服务单，跳过 ${data.skipped_count || 0} 个未保存详情的服务单`);
+                } else {
+                    showToast('安装表导出失败: ' + (data.error || '未知错误'));
+                }
+            } catch(e) {
+                showToast('安装表导出出错: ' + e.message);
+            }
+            btn.disabled = false;
+            btn.classList.remove('exporting');
+            btn.textContent = '导出安装表';
         }
 
         async function chooseTransferSlotAndGo(payload) {
