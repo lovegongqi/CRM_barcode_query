@@ -82,7 +82,7 @@ body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no
     width: 100% !important;
     height: var(--aurora-nav-height);
     display: grid !important;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 6px !important;
     padding: 5px !important;
     border-radius: 16px;
@@ -934,7 +934,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
         width: auto !important;
         height: 62px;
         display: grid !important;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 3px !important;
         padding: 6px 7px !important;
         border-radius: 18px;

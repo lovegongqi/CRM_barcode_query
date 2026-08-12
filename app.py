@@ -19,8 +19,15 @@ import uuid
 import shutil
 import hashlib
 from collections import OrderedDict
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, session, redirect
+from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
+
+from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
+from inbound_extraction import (
+    build_inbound_result,
+    build_inbound_workbook,
+    normalize_packing_slip_no,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -3464,6 +3471,27 @@ class CRMSession:
                     return False, crash_message
                 return False, str(e)
 
+    def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+        with self.lock:
+            if not self.is_alive() and not self._ensure_browser():
+                return False, "浏览器未启动，请先登录 CRM"
+            if not self._is_current_page_logged_in():
+                self.logged_in = False
+                return False, "CRM 当前未登录，请先登录 CRM"
+            self.logged_in = True
+            try:
+                result = PackingSlipCRMReader(self, log=log, progress=progress).extract(
+                    packing_slip_no
+                )
+                return True, result
+            except PackingSlipReadError as error:
+                return False, str(error)
+            except Exception as error:
+                crash_message = self._handle_browser_exception(error)
+                return False, crash_message or str(error)
+            finally:
+                self.needs_navigation = True
+
 class CRMWorker:
     """把所有 Playwright 操作固定到同一个线程里执行。"""
     def __init__(self, slot_id="default", session_dir=None):
@@ -3613,6 +3641,9 @@ class CRMWorker:
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
+
+    def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+        return self._call("extract_packing_slip", packing_slip_no, log, progress)
 
     def shutdown(self):
         try:
@@ -3875,6 +3906,8 @@ MAX_BATCH_RETRY_LIMIT = 5
 
 BATCH_LOG_LIMIT = 5000
 
+query_slot_reservation_lock = threading.RLock()
+
 batch_job_lock = threading.Lock()
 batch_jobs = {}
 latest_batch_job_by_slot = {}
@@ -3901,6 +3934,11 @@ library_query_job = {
 transfer_job_lock = threading.Lock()
 transfer_jobs = {}
 latest_transfer_job_by_slot = {}
+
+inbound_job_lock = threading.RLock()
+inbound_jobs = {}
+latest_inbound_job_by_owner = {}
+latest_inbound_job_by_slot = {}
 
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
@@ -3996,6 +4034,41 @@ def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_typ
         'started_at': '',
         'finished_at': '',
     }
+
+
+def _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'packing_slip_no': str(packing_slip_no or ''),
+        'slot_id': str(slot_id or ''),
+        'slot_label': str(slot_label or ''),
+        'stage': 'waiting',
+        'running': False,
+        'done': False,
+        'success': False,
+        'error': '',
+        'current_page': 0,
+        'page_counts': [],
+        'log_seq': 0,
+        'logs': [],
+        'result': None,
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
+def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_jobs.pop(job_id, None)
+        if latest_inbound_job_by_owner.get(owner) == job_id:
+            latest_inbound_job_by_owner.pop(owner, None)
+        for slot_id, mapped_job_id in list(latest_inbound_job_by_slot.items()):
+            if mapped_job_id == job_id:
+                latest_inbound_job_by_slot.pop(slot_id, None)
 
 def _empty_summary_job(slot_id=None):
     return {
@@ -4238,6 +4311,10 @@ def _summary_job_log(job_id, message, level='dim'):
 def _transfer_job_log(job_id, message, level='dim'):
     _job_log(transfer_job_lock, transfer_jobs, job_id, message, level, 500)
     _sync_transfer_record_from_job(job_id)
+
+
+def _inbound_job_log(job_id, message, level='dim'):
+    _job_log(inbound_job_lock, inbound_jobs, job_id, message, level, 300)
 
 def _service_close_job_log(job_id, message, level='dim'):
     _job_log(service_close_job_lock, service_close_jobs, job_id, message, level, 1000)
@@ -4790,6 +4867,104 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
                 job['error'] = _brief_batch_error(e, 800)
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"移库出错：{e}", 'error')
+
+
+def _run_inbound_job(job_id, worker):
+    def set_stage(stage):
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job['stage'] = stage
+
+    def log(message, level='dim'):
+        text = str(message or '')
+        if '正在打开' in text:
+            set_stage('navigation')
+        elif '正在查询' in text:
+            set_stage('search')
+        _inbound_job_log(job_id, text, level)
+
+    def progress(entry=None):
+        row = dict(entry or {})
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if not job:
+                return
+            job['stage'] = 'reading'
+            job['current_page'] = row.get('page') or job.get('current_page') or 0
+            if row:
+                job['page_counts'].append(row)
+
+    with inbound_job_lock:
+        job = inbound_jobs.get(job_id)
+        if not job:
+            return
+        packing_slip_no = job['packing_slip_no']
+        slot_id = job['slot_id']
+        job['stage'] = 'navigation'
+
+    try:
+        ok, raw_result = worker.extract_packing_slip(
+            packing_slip_no,
+            log=log,
+            progress=progress,
+        )
+        if not ok:
+            error = _brief_batch_error(raw_result, 800) or '读取装箱单失败'
+            with inbound_job_lock:
+                job = inbound_jobs.get(job_id)
+                if job:
+                    job.update({
+                        'stage': 'failed',
+                        'running': False,
+                        'done': True,
+                        'success': False,
+                        'error': error,
+                        'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    })
+            log(error, 'error')
+            return
+
+        set_stage('organizing')
+        source = raw_result if isinstance(raw_result, dict) else {}
+        result = build_inbound_result(
+            packing_slip_no,
+            source.get('rows') or [],
+            source.get('page_counts') or [],
+        )
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'success',
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'error': '',
+                    'current_page': (result.get('pages_read') or [0])[-1],
+                    'page_counts': list(result.get('page_counts') or []),
+                    'result': result,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log('装箱单入库明细整理完成', 'success')
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or '读取装箱单失败'
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'failed',
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log(message, 'error')
+    finally:
+        with inbound_job_lock:
+            if latest_inbound_job_by_slot.get(slot_id) == job_id:
+                latest_inbound_job_by_slot.pop(slot_id, None)
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -6424,10 +6599,25 @@ def _query_slot_has_running_batch(slot_id):
         job = batch_jobs.get(job_id)
         return bool(job and job.get('running'))
 
+
+def _query_slot_has_running_background_batch(slot_id):
+    with background_query_job_lock:
+        return any(
+            job.get('running') and slot_id in (job.get('slot_ids') or [])
+            for job in background_query_jobs.values()
+        )
+
 def _query_slot_has_running_service_close(slot_id):
     with service_close_job_lock:
         job_id = latest_service_close_job_by_slot.get(slot_id)
         job = service_close_jobs.get(job_id)
+        return bool(job and job.get('running'))
+
+
+def _query_slot_has_running_inbound(slot_id):
+    with inbound_job_lock:
+        job_id = latest_inbound_job_by_slot.get(slot_id)
+        job = inbound_jobs.get(job_id)
         return bool(job and job.get('running'))
 
 query_slot_cooldown_lock = threading.Lock()
@@ -6471,6 +6661,8 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
     for slot_id in reversed(slots):
         if slot_id in exclude_slot_ids:
             continue
+        if _query_slot_has_running_inbound(slot_id):
+            continue
         worker = crm_pool.get(slot_id, "query")
         if worker.busy:
             busy_count += 1
@@ -6487,6 +6679,8 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
             skipped_cooldown += 1
             continue
         if _query_slot_has_running_batch(slot_id):
+            continue
+        if _query_slot_has_running_background_batch(slot_id):
             continue
         if _query_slot_has_running_service_close(slot_id):
             continue
@@ -7559,7 +7753,7 @@ def load_accounts():
         'username': 'admin',
         'display_name': '管理员',
         'password': '88293529',
-        'permissions': ['crm', 'results', 'transfer', 'accounts', 'product-library'],
+        'permissions': ['crm', 'results', 'transfer', 'inbound', 'accounts', 'product-library'],
         'updated_at': '',
     }
     if os.path.exists(ACCOUNTS_FILE):
@@ -7658,6 +7852,7 @@ PAGE_LINKS = [
     {'permission': 'crm', 'label': '查询', 'href': '/crm'},
     {'permission': 'results', 'label': '结果', 'href': '/'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
+    {'permission': 'inbound', 'label': '入库', 'href': '/inbound'},
     {'permission': 'product-library', 'label': '匹配', 'href': '/product-library'},
     {'permission': 'accounts', 'label': '设置', 'href': '/accounts'},
 ]
@@ -7699,6 +7894,8 @@ def required_permission_for_path(path):
         return "crm"
     if path == "/transfer" or path.startswith("/api/transfer") or path.startswith("/api/crm/transfer"):
         return "transfer"
+    if path == "/inbound" or path.startswith("/api/inbound"):
+        return "inbound"
     if path.startswith("/api/distributor-history"):
         return "transfer"
     if path == "/product-library" or path.startswith("/api/product-library"):
@@ -8675,6 +8872,170 @@ def transfer_page():
         account=current_account_public(),
     )
 
+
+@app.route("/inbound")
+def inbound_page():
+    return render_template(
+        "inbound.html",
+        nav_links=visible_page_links(),
+        account=current_account_public(),
+    )
+
+
+def _current_inbound_owner():
+    account = current_account() or {}
+    return str(account.get('id') or account.get('username') or '')
+
+
+def _inbound_status_payload(job, owner=''):
+    if not job:
+        return {
+            'job_id': '',
+            'owner': owner,
+            'packing_slip_no': '',
+            'slot_id': '',
+            'slot_label': '',
+            'stage': 'waiting',
+            'running': False,
+            'done': False,
+            'success': False,
+            'error': '',
+            'current_page': 0,
+            'page_counts': [],
+            'logs': [],
+            'started_at': '',
+            'finished_at': '',
+        }
+    payload = {
+        key: job.get(key)
+        for key in (
+            'job_id',
+            'owner',
+            'packing_slip_no',
+            'slot_id',
+            'slot_label',
+            'stage',
+            'running',
+            'done',
+            'success',
+            'error',
+            'current_page',
+            'started_at',
+            'finished_at',
+        )
+    }
+    payload['page_counts'] = list(job.get('page_counts') or [])
+    payload['logs'] = list(job.get('logs') or [])
+    if job.get('done') and job.get('success') and isinstance(job.get('result'), dict):
+        payload['result'] = job['result']
+        payload['download_url'] = f"/api/inbound/export?job_id={job['job_id']}"
+    return payload
+
+
+@app.route("/api/inbound/start", methods=["POST"])
+def api_inbound_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        packing_slip_no = normalize_packing_slip_no(data.get('packing_slip_no'))
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+
+    owner = _current_inbound_owner()
+    with query_slot_reservation_lock:
+        with inbound_job_lock:
+            running_job_id = latest_inbound_job_by_owner.get(owner)
+            running_job = inbound_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({
+                    'success': False,
+                    'error': '当前账号已有入库读取任务正在运行',
+                    'job_id': running_job_id,
+                }), 409
+
+            worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
+            if not worker:
+                return jsonify({'success': False, 'error': error or '暂无可用查询通道'}), 409
+
+            _purge_completed_inbound_jobs_for_owner_unlocked(owner)
+            job = _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label)
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            _append_job_log_unlocked(job, f"已预留查询通道：{slot_label}", 'info', 300)
+            inbound_jobs[job['job_id']] = job
+            latest_inbound_job_by_owner[owner] = job['job_id']
+            latest_inbound_job_by_slot[slot_id] = job['job_id']
+
+    thread = threading.Thread(
+        target=_run_inbound_job,
+        args=(job['job_id'], worker),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or '入库任务启动失败'
+        with inbound_job_lock:
+            job.update({
+                'stage': 'failed',
+                'running': False,
+                'done': True,
+                'success': False,
+                'error': message,
+                'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            if latest_inbound_job_by_slot.get(slot_id) == job['job_id']:
+                latest_inbound_job_by_slot.pop(slot_id, None)
+        return jsonify({'success': False, 'error': message}), 500
+
+    return jsonify({
+        'success': True,
+        'job_id': job['job_id'],
+        'packing_slip_no': packing_slip_no,
+        'slot_id': slot_id,
+        'slot_label': slot_label,
+    })
+
+
+@app.route("/api/inbound/status", methods=["GET"])
+def api_inbound_status():
+    owner = _current_inbound_owner()
+    requested_job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
+    with inbound_job_lock:
+        job_id = requested_job_id
+        if prefer_latest or not job_id:
+            job_id = latest_inbound_job_by_owner.get(owner) or ''
+        job = inbound_jobs.get(job_id)
+        if requested_job_id and (not job or job.get('owner') != owner):
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        return jsonify(_inbound_status_payload(job, owner))
+
+
+@app.route("/api/inbound/export", methods=["GET"])
+def api_inbound_export():
+    owner = _current_inbound_owner()
+    job_id = str(request.args.get('job_id') or '').strip()
+    with inbound_job_lock:
+        job = inbound_jobs.get(job_id)
+        if not job or job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        if not job.get('done') or not job.get('success') or not isinstance(job.get('result'), dict):
+            return jsonify({'success': False, 'error': '入库任务尚未成功完成'}), 409
+        packing_slip_no = job['packing_slip_no']
+        result = job['result']
+
+    workbook = build_inbound_workbook(result)
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"{packing_slip_no}_入库明细.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 @app.route("/product-library")
 def product_library_page():
     return render_template(
@@ -8815,7 +9176,7 @@ def api_accounts_save():
         return jsonify({'success': False, 'error': '账号不能为空'})
     if not isinstance(permissions, list):
         permissions = []
-    allowed = {'crm', 'results', 'transfer', 'accounts', 'product-library'}
+    allowed = {'crm', 'results', 'transfer', 'inbound', 'accounts', 'product-library'}
     permissions = [p for p in permissions if p in allowed]
     accounts = load_accounts()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -9199,42 +9560,48 @@ def api_crm_background_batch_start():
             'excluded': excluded,
         }), 400
 
-    slot_ids = configured_query_slot_ids()
-    if not slot_ids:
-        return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
+    with query_slot_reservation_lock:
+        slot_ids = [
+            slot_id
+            for slot_id in configured_query_slot_ids()
+            if not _query_slot_has_running_inbound(slot_id)
+            and not _query_slot_has_running_batch(slot_id)
+            and not _query_slot_has_running_background_batch(slot_id)
+        ]
+        if not slot_ids:
+            return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
 
-    with background_query_job_lock:
-        running_job_id = latest_background_query_job_by_owner.get(owner)
-        running_job = background_query_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({
-                'success': False,
-                'error': '当前账号已有后台批量查询正在运行',
-                'job_id': running_job_id,
-            }), 409
+        with background_query_job_lock:
+            running_job_id = latest_background_query_job_by_owner.get(owner)
+            running_job = background_query_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({
+                    'success': False,
+                    'error': '当前账号已有后台批量查询正在运行',
+                    'job_id': running_job_id,
+                }), 409
 
-    workers = []
-    for slot_id in slot_ids:
-        worker = crm_pool.get(slot_id, 'query')
-        try:
-            worker.clear_stop()
-        except Exception:
-            pass
-        workers.append((worker, slot_id, _query_slot_label(slot_id)))
+            job = _empty_background_query_job(
+                owner,
+                barcodes,
+                slot_ids,
+                batch_retry_limit(),
+            )
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            background_query_jobs[job['job_id']] = job
+            latest_background_query_job_by_owner[owner] = job['job_id']
 
-    job = _empty_background_query_job(
-        owner,
-        barcodes,
-        slot_ids,
-        batch_retry_limit(),
-    )
-    job.update({
-        'running': True,
-        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    })
-    with background_query_job_lock:
-        background_query_jobs[job['job_id']] = job
-        latest_background_query_job_by_owner[owner] = job['job_id']
+        workers = []
+        for slot_id in slot_ids:
+            worker = crm_pool.get(slot_id, 'query')
+            try:
+                worker.clear_stop()
+            except Exception:
+                pass
+            workers.append((worker, slot_id, _query_slot_label(slot_id)))
 
     threading.Thread(
         target=_run_background_query_job,
@@ -9291,7 +9658,6 @@ def api_crm_background_batch_stop():
 def api_crm_batch_start():
     data = request.get_json()
     slot_id = _request_slot_id("query")
-    worker = crm_pool.get(slot_id, "query")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
@@ -9299,18 +9665,24 @@ def api_crm_batch_start():
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需查询' if excluded else '条码不能为空', 'excluded': excluded})
 
-    with batch_job_lock:
-        running_job_id = latest_batch_job_by_slot.get(slot_id)
-        running_job = batch_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
-        job = _empty_batch_job(slot_id, barcodes, retry_limit)
-        job.update({
-            'running': True,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        batch_jobs[job['job_id']] = job
-        latest_batch_job_by_slot[slot_id] = job['job_id']
+    with query_slot_reservation_lock:
+        if _query_slot_has_running_inbound(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 正在被入库读取任务占用'})
+        if _query_slot_has_running_background_batch(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 已有后台批量查询正在运行'})
+        worker = crm_pool.get(slot_id, "query")
+        with batch_job_lock:
+            running_job_id = latest_batch_job_by_slot.get(slot_id)
+            running_job = batch_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
+            job = _empty_batch_job(slot_id, barcodes, retry_limit)
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            batch_jobs[job['job_id']] = job
+            latest_batch_job_by_slot[slot_id] = job['job_id']
 
     t = threading.Thread(target=_run_batch_job, args=(job['job_id'], worker, barcodes, retry_limit, excluded), daemon=True)
     t.start()

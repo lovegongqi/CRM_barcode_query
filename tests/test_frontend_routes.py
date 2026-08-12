@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
@@ -108,7 +108,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertNotIn('os.environ.setdefault("CRM_DESKTOP_APP", "1")', source)
 
     def test_every_work_page_shows_tool_account_logout(self):
-        for route in ("/", "/crm", "/transfer", "/product-library", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
@@ -119,6 +119,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
             "/": "results",
             "/crm": "query",
             "/transfer": "transfer",
+            "/inbound": "inbound",
             "/product-library": "product-library",
             "/accounts": "settings",
         }
@@ -128,6 +129,11 @@ class FrontendRouteSmokeTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(f'data-aurora-page="{page}"'.encode(), response.data)
                 self.assertIn(b'/static/aurora.css', response.data)
+
+    def test_admin_can_open_inbound_extraction_page(self):
+        response = self.client.get("/inbound")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'id="packingSlipInput"', response.data)
 
     def test_shared_assets_are_served(self):
         for path, mimetypes in (

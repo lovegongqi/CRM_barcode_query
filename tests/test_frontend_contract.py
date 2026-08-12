@@ -13,6 +13,7 @@ class FrontendContractTest(unittest.TestCase):
         "query": "crm.html",
         "results": "index.html",
         "transfer": "transfer.html",
+        "inbound": "inbound.html",
         "product-library": "product_library.html",
         "settings": "accounts.html",
         "login": "login.html",
@@ -386,14 +387,14 @@ class FrontendContractTest(unittest.TestCase):
         )
 
     def test_every_work_page_uses_the_shared_tool_account_logout_button(self):
-        for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
+        for filename in ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html"):
             with self.subTest(filename=filename):
                 self.assertIn("aurora-account-logout", self.source(filename))
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn(".aurora-account-logout", css)
 
     def test_every_work_page_places_plain_username_before_logout(self):
-        filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
+        filenames = ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html")
         for filename in filenames:
             with self.subTest(filename=filename):
                 source = self.source(filename)
@@ -408,7 +409,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertRegex(css, r"\.aurora-account-name\s*\{[^}]*text-overflow:\s*ellipsis")
 
     def test_tool_account_controls_use_compact_status_rows(self):
-        filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
+        filenames = ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html")
         for filename in filenames:
             with self.subTest(filename=filename):
                 source = self.source(filename)
@@ -493,10 +494,97 @@ class FrontendContractTest(unittest.TestCase):
             source.index("'permission': 'crm'"),
             source.index("'permission': 'results'"),
             source.index("'permission': 'transfer'"),
+            source.index("'permission': 'inbound'"),
             source.index("'permission': 'product-library'"),
             source.index("'permission': 'accounts'"),
         ]
         self.assertEqual(positions, sorted(positions))
+
+    def test_inbound_page_exposes_extraction_and_download_contract(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "packingSlipInput",
+            "startInboundBtn",
+            "inboundStage",
+            "inboundSlot",
+            "inboundCurrentPage",
+            "inboundLogs",
+            "inboundSummary",
+            "inboundPageCounts",
+            "inboundWarnings",
+            "inboundProducts",
+            "downloadInboundBtn",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in (
+            "startInboundExtraction",
+            "pollInboundStatus",
+            "renderInboundStatus",
+            "renderInboundResult",
+            "downloadInboundXlsx",
+        ):
+            with self.subTest(function_name=function_name):
+                self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/start'", inbound)
+        self.assertIn("fetch('/api/inbound/status?'", inbound)
+        self.assertIn("sessionStorage.getItem('inbound_job_id')", inbound)
+        self.assertIn("sessionStorage.setItem('inbound_job_id'", inbound)
+        self.assertIn("sessionStorage.removeItem('inbound_job_id')", inbound)
+        self.assertIn("params.set('latest', '1')", inbound)
+        self.assertRegex(inbound, r"response\.status === 404[\s\S]*pollInboundStatus\(true\)")
+        self.assertIn("let activeJobAccepted = false", inbound)
+        self.assertIn("if (!activeJobAccepted)", inbound)
+        self.assertRegex(
+            inbound,
+            r"visibilitychange[\s\S]*if \(!document\.hidden\)[\s\S]*restoreInboundJob\(\)",
+        )
+        self.assertIn("document.hidden", inbound)
+
+    def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function escapeHtml", inbound)
+        self.assertIn("result.items || []", inbound)
+        self.assertIn("item.serials || []", inbound)
+        self.assertIn("data.page_counts || []", inbound)
+        self.assertIn("result.duplicate_serials || []", inbound)
+        self.assertIn("data.done && data.success && data.download_url", inbound)
+        self.assertIn("new URL(inboundDownloadUrl, window.location.origin)", inbound)
+        self.assertIn("url.origin !== window.location.origin", inbound)
+        self.assertNotIn("result.rows", inbound)
+        self.assertNotIn("JSON.stringify(inbound", inbound)
+
+    def test_inbound_page_clears_stale_result_surfaces_for_new_and_failed_jobs(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function clearInboundResultSurfaces()", inbound)
+        self.assertRegex(
+            inbound,
+            r"function startInboundExtraction\(\)[\s\S]*?clearInboundResultSurfaces\(\)[\s\S]*?fetch\('/api/inbound/start'",
+        )
+        self.assertRegex(
+            inbound,
+            r"if \(data\.done\)[\s\S]*?data\.success && data\.result[\s\S]*?clearInboundResultSurfaces\(\)",
+        )
+
+    def test_inbound_stale_job_fallback_stops_polling_when_no_latest_job_exists(self):
+        inbound = self.source("inbound.html")
+        self.assertRegex(
+            inbound,
+            r"if \(preferLatest && !data\.job_id\)\s*\{[\s\S]*?clearInterval\(inboundPollTimer\)[\s\S]*?inboundPollTimer = null;[\s\S]*?return;",
+        )
+
+    def test_shared_navigation_has_six_columns_and_inbound_permission(self):
+        settings = self.source("accounts.html")
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+        layout_css = (STATIC / "app_layout.css").read_text(encoding="utf-8")
+        aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertRegex(settings, r'<input type="checkbox" value="inbound">\s*入库')
+        self.assertIn("'/inbound':", aurora)
+        self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)")
+        self.assertEqual(
+            len(re.findall(r"grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)", aurora_css)),
+            2,
+        )
 
     def test_login_and_access_pages_use_approved_compositions(self):
         login = self.source("login.html")
@@ -670,7 +758,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("logHistory.slice(-MAX_RENDERED_HISTORY)", source)
 
     def test_work_page_polling_skips_hidden_tabs(self):
-        for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
+        for filename in ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html"):
             with self.subTest(filename=filename):
                 self.assertIn("document.hidden", self.source(filename))
 
@@ -835,10 +923,10 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
             self.assertIn(f"'label': '{label}'", app_source)
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
             self.assertIn(f"'{label}'", aurora)
         self.assertIn("aurora-nav-label", aurora)
         self.assertNotIn("anchor.textContent =", aurora)
