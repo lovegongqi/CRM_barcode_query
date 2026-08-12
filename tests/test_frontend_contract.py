@@ -554,6 +554,18 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("result.rows", inbound)
         self.assertNotIn("JSON.stringify(inbound", inbound)
 
+    def test_inbound_page_clears_stale_result_surfaces_for_new_and_failed_jobs(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function clearInboundResultSurfaces()", inbound)
+        self.assertRegex(
+            inbound,
+            r"function startInboundExtraction\(\)[\s\S]*?clearInboundResultSurfaces\(\)[\s\S]*?fetch\('/api/inbound/start'",
+        )
+        self.assertRegex(
+            inbound,
+            r"if \(data\.done\)[\s\S]*?data\.success && data\.result[\s\S]*?clearInboundResultSurfaces\(\)",
+        )
+
     def test_shared_navigation_has_six_columns_and_inbound_permission(self):
         settings = self.source("accounts.html")
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")

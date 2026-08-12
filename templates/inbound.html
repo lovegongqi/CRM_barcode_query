@@ -137,6 +137,12 @@ function escapeHtml(value) {
     })[char]);
 }
 
+function clearInboundResultSurfaces() {
+    document.getElementById('inboundSummary').textContent = '任务完成后显示汇总。';
+    document.getElementById('inboundWarnings').textContent = '暂无警告。';
+    document.getElementById('inboundProducts').textContent = '任务完成后显示完整条码。';
+}
+
 function renderInboundStatus(data) {
     const stage = INBOUND_STAGE_LABELS[data.stage] || data.stage || '等待开始';
     document.getElementById('inboundStage').textContent = data.error || stage;
@@ -159,7 +165,10 @@ function renderInboundStatus(data) {
 
     inboundDownloadUrl = data.done && data.success && data.download_url ? String(data.download_url) : '';
     document.getElementById('downloadInboundBtn').disabled = !inboundDownloadUrl;
-    if (data.done && data.success && data.result) renderInboundResult(data.result);
+    if (data.done) {
+        if (data.success && data.result) renderInboundResult(data.result);
+        else clearInboundResultSurfaces();
+    }
     if (data.done && inboundPollTimer) {
         clearInterval(inboundPollTimer);
         inboundPollTimer = null;
@@ -206,6 +215,7 @@ async function startInboundExtraction() {
     }
     const button = document.getElementById('startInboundBtn');
     let activeJobAccepted = false;
+    clearInboundResultSurfaces();
     button.disabled = true;
     button.textContent = '启动中...';
     inboundDownloadUrl = '';
