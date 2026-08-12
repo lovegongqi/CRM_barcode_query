@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>装箱单入库</title>
+    <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { min-height:100vh; background:#f4f7fb; color:#202938; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+        .container { max-width:1280px; margin:0 auto; padding:24px; }
+        .header { display:flex; flex-direction:column; align-items:stretch; gap:12px; margin-bottom:20px; }
+        h1 { margin-bottom:6px; font-size:26px; }
+        .muted { color:#667085; font-size:13px; }
+        .page-nav { display:flex; gap:6px; width:100%; }
+        .page-nav a { display:inline-flex; align-items:center; justify-content:center; min-height:34px; color:#667085; text-decoration:none; border:1px solid #d9e1ec; border-radius:6px; background:#fff; }
+        .page-nav a.active { color:#fff; border-color:#2563eb; background:#2563eb; }
+        .status-bar, .card { margin-bottom:16px; padding:18px; border:1px solid #d9e1ec; border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(15,23,42,.06); }
+        .status-bar { display:flex; justify-content:flex-end; padding:12px 14px; }
+        .inbound-form { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; align-items:end; }
+        label { display:block; margin-bottom:6px; color:#667085; font-size:12px; font-weight:700; }
+        input { width:100%; min-height:40px; padding:9px 10px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; font-size:14px; outline:none; }
+        .btn { min-height:38px; padding:8px 16px; border:0; border-radius:8px; font-weight:800; cursor:pointer; }
+        .btn:disabled { opacity:.45; cursor:not-allowed; }
+        .btn-primary { color:#fff; background:#2563eb; }
+        .btn-secondary { color:#334155; background:#e5e7eb; }
+        .inbound-progress { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }
+        .inbound-stat { min-width:0; padding:12px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; }
+        .inbound-stat span { display:block; margin-bottom:5px; color:#667085; font-size:11px; font-weight:800; }
+        .inbound-stat strong { overflow-wrap:anywhere; font-size:14px; }
+        .inbound-results { display:grid; grid-template-columns:minmax(0,.75fr) minmax(0,1.25fr); gap:14px; }
+        .inbound-panel { min-width:0; }
+        .inbound-panel h2 { margin-bottom:12px; padding-bottom:9px; border-bottom:1px solid #e5e7eb; font-size:15px; }
+        .inbound-box { min-height:54px; padding:10px 12px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; color:#475569; font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
+        .inbound-logs { max-height:230px; overflow:auto; background:#0f172a; color:#d4d4d4; font-family:"Courier New",monospace; }
+        .inbound-log { padding:2px 0; }
+        .inbound-log.info { color:#4fc3f7; } .inbound-log.success { color:#81c784; } .inbound-log.warn { color:#ffb74d; } .inbound-log.error { color:#e57373; }
+        .inbound-summary-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+        .inbound-summary-grid span { padding:8px; border:1px solid #d9e1ec; border-radius:6px; background:#fff; }
+        .inbound-warning { color:#b45309; }
+        .inbound-products { display:grid; gap:10px; }
+        .inbound-product { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; }
+        .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:#eef4ff; }
+        .inbound-product-head strong, .inbound-product-head small { display:block; overflow-wrap:anywhere; }
+        .inbound-product-head small { margin-top:3px; color:#667085; }
+        .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; }
+        .inbound-serials code { padding:4px 7px; border:1px solid #d9e1ec; border-radius:5px; background:#fff; color:#334155; }
+        .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
+        .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .aurora-account-logout { white-space:nowrap; }
+        @media (max-width:720px) {
+            .container { padding:14px; }
+            .inbound-form, .inbound-results { grid-template-columns:1fr; }
+            .inbound-form .btn { width:100%; }
+            .inbound-progress, .inbound-summary-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+        }
+    </style>
+    <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css">
+    <script defer src="/static/aurora.js"></script>
+</head>
+<body data-aurora-page="inbound">
+<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+<div class="container">
+    <div class="header">
+        <div>
+            <h1>装箱单入库</h1>
+            <p class="muted">输入装箱单号，按页读取 CRM 物料和完整条码明细。</p>
+        </div>
+        <div class="page-nav">
+            {% for link in nav_links %}
+            <a href="{{ link.href }}" class="{{ 'active' if link.href == '/inbound' else '' }}">{{ link.label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="status-bar aurora-account-status">
+        <div class="aurora-account-session">
+            <span class="aurora-account-name">{{ account.username if account else '未登录' }}</span>
+            <a class="aurora-account-logout" href="/logout">退出工具账号</a>
+        </div>
+    </div>
+
+    <section class="card">
+        <div class="inbound-form">
+            <div>
+                <label for="packingSlipInput">装箱单号</label>
+                <input id="packingSlipInput" placeholder="例如 SH202607210002" inputmode="latin" lang="en" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" onkeydown="if(event.key==='Enter')startInboundExtraction()">
+            </div>
+            <button class="btn btn-primary" id="startInboundBtn" onclick="startInboundExtraction()">开始读取</button>
+            <button class="btn btn-secondary" id="downloadInboundBtn" onclick="downloadInboundXlsx()" disabled>下载 Excel</button>
+        </div>
+        <div class="inbound-progress" aria-live="polite">
+            <div class="inbound-stat"><span>当前阶段</span><strong id="inboundStage">等待开始</strong></div>
+            <div class="inbound-stat"><span>查询通道</span><strong id="inboundSlot">--</strong></div>
+            <div class="inbound-stat"><span>当前页</span><strong id="inboundCurrentPage">--</strong></div>
+        </div>
+    </section>
+
+    <div class="inbound-results">
+        <div class="inbound-panel">
+            <section class="card">
+                <h2>实时日志</h2>
+                <div class="inbound-box inbound-logs" id="inboundLogs">暂无日志</div>
+            </section>
+            <section class="card">
+                <h2>汇总</h2>
+                <div class="inbound-box" id="inboundSummary">任务完成后显示汇总。</div>
+            </section>
+            <section class="card">
+                <h2>每页行数</h2>
+                <div class="inbound-box" id="inboundPageCounts">尚未读取页面。</div>
+            </section>
+            <section class="card">
+                <h2>警告</h2>
+                <div class="inbound-box" id="inboundWarnings">暂无警告。</div>
+            </section>
+        </div>
+        <section class="card inbound-panel">
+            <h2>按物料编码分组的条码</h2>
+            <div class="inbound-products" id="inboundProducts">任务完成后显示完整条码。</div>
+        </section>
+    </div>
+</div>
+
+<script>
+const INBOUND_STAGE_LABELS = {
+    waiting: '等待开始', navigation: '打开 CRM 页面', search: '查询装箱单',
+    reading: '逐页读取', organizing: '整理入库明细', success: '读取完成', failed: '读取失败'
+};
+let inboundJobId = '';
+let inboundDownloadUrl = '';
+let inboundPollTimer = null;
+
+function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
+        '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+    })[char]);
+}
+
+function renderInboundStatus(data) {
+    const stage = INBOUND_STAGE_LABELS[data.stage] || data.stage || '等待开始';
+    document.getElementById('inboundStage').textContent = data.error || stage;
+    document.getElementById('inboundSlot').textContent = data.slot_label || data.slot_id || '--';
+    document.getElementById('inboundCurrentPage').textContent = data.current_page || '--';
+    document.getElementById('startInboundBtn').disabled = !!data.running;
+    document.getElementById('startInboundBtn').textContent = data.running ? '读取中...' : '开始读取';
+
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    document.getElementById('inboundLogs').innerHTML = logs.length ? logs.map(entry => {
+        const row = typeof entry === 'string' ? {message: entry, level: ''} : (entry || {});
+        const level = ['info', 'success', 'warn', 'error'].includes(row.level) ? row.level : '';
+        return `<div class="inbound-log ${level}">${escapeHtml(row.time || row.timestamp || '')} ${escapeHtml(row.message || row.text || '')}</div>`;
+    }).join('') : '暂无日志';
+
+    const pageCounts = data.page_counts || [];
+    document.getElementById('inboundPageCounts').innerHTML = pageCounts.length
+        ? pageCounts.map(entry => `<div>第 ${escapeHtml(entry.page)} 页：${escapeHtml(entry.row_count)} 行</div>`).join('')
+        : '尚未读取页面。';
+
+    inboundDownloadUrl = data.done && data.success && data.download_url ? String(data.download_url) : '';
+    document.getElementById('downloadInboundBtn').disabled = !inboundDownloadUrl;
+    if (data.done && data.success && data.result) renderInboundResult(data.result);
+    if (data.done && inboundPollTimer) {
+        clearInterval(inboundPollTimer);
+        inboundPollTimer = null;
+    }
+}
+
+function renderInboundResult(result) {
+    const items = result.items || [];
+    document.getElementById('inboundSummary').innerHTML = `
+        <div class="inbound-summary-grid">
+            <span>物料 <strong>${escapeHtml(items.length)}</strong> 种</span>
+            <span>应发 <strong>${escapeHtml(result.expected_total)}</strong> 件</span>
+            <span>条码 <strong>${escapeHtml(result.total_serials)}</strong> 个</span>
+        </div>`;
+
+    const warnings = [];
+    (result.duplicate_serials || []).forEach(serial => warnings.push(`重复条码：${serial}`));
+    items.forEach(item => {
+        if (item.quantity_mismatch) warnings.push(`${item.product_code}：应发数量与条码数不一致`);
+        (item.warnings || []).forEach(message => warnings.push(`${item.product_code}：${message}`));
+    });
+    document.getElementById('inboundWarnings').innerHTML = warnings.length
+        ? warnings.map(message => `<div class="inbound-warning">${escapeHtml(message)}</div>`).join('')
+        : '暂无警告。';
+
+    document.getElementById('inboundProducts').innerHTML = items.length ? items.map(item => {
+        const serials = item.serials || [];
+        const orders = Array.isArray(item.order_numbers) ? item.order_numbers.join('、') : '';
+        return `<section class="inbound-product">
+            <div class="inbound-product-head">
+                <div><strong>${escapeHtml(item.product_code)}</strong><small>${escapeHtml(item.description || '无物料描述')} · 订单 ${escapeHtml(orders || '--')}</small></div>
+                <div>${escapeHtml(item.serial_count)} / ${escapeHtml(item.expected_quantity == null ? '--' : item.expected_quantity)}</div>
+            </div>
+            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>
+        </section>`;
+    }).join('') : '未读取到可用条码。';
+}
+
+async function startInboundExtraction() {
+    const packingSlipNo = document.getElementById('packingSlipInput').value.trim();
+    if (!packingSlipNo) {
+        document.getElementById('inboundStage').textContent = '请输入装箱单号';
+        return;
+    }
+    const button = document.getElementById('startInboundBtn');
+    let activeJobAccepted = false;
+    button.disabled = true;
+    button.textContent = '启动中...';
+    inboundDownloadUrl = '';
+    document.getElementById('downloadInboundBtn').disabled = true;
+    try {
+        const response = await fetch('/api/inbound/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({packing_slip_no: packingSlipNo})
+        });
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            document.getElementById('inboundStage').textContent = data.error || '入库任务启动失败';
+            if (data.job_id) {
+                activeJobAccepted = true;
+                inboundJobId = data.job_id;
+                sessionStorage.setItem('inbound_job_id', inboundJobId);
+                startInboundPolling();
+            }
+            return;
+        }
+        activeJobAccepted = true;
+        inboundJobId = data.job_id || '';
+        sessionStorage.setItem('inbound_job_id', inboundJobId);
+        renderInboundStatus({...data, running: true, stage: 'waiting'});
+        startInboundPolling();
+    } catch (error) {
+        document.getElementById('inboundStage').textContent = '无法启动入库任务';
+    } finally {
+        if (!activeJobAccepted) {
+            button.disabled = false;
+            button.textContent = '开始读取';
+        }
+    }
+}
+
+async function pollInboundStatus(preferLatest=false) {
+    if (document.hidden) return;
+    const params = new URLSearchParams();
+    const requestedJobId = inboundJobId && !preferLatest ? inboundJobId : '';
+    if (requestedJobId) params.set('job_id', requestedJobId);
+    else params.set('latest', '1');
+    try {
+        const response = await fetch('/api/inbound/status?' + params.toString());
+        const data = await response.json();
+        if (response.status === 404 && requestedJobId) {
+            inboundJobId = '';
+            sessionStorage.removeItem('inbound_job_id');
+            await pollInboundStatus(true);
+            return;
+        }
+        if (!response.ok || data.error && !data.job_id) {
+            document.getElementById('inboundStage').textContent = data.error || '无法读取入库任务';
+            return;
+        }
+        if (data.job_id) {
+            inboundJobId = data.job_id;
+            sessionStorage.setItem('inbound_job_id', inboundJobId);
+            if (data.packing_slip_no) document.getElementById('packingSlipInput').value = data.packing_slip_no;
+        }
+        renderInboundStatus(data);
+    } catch (error) {
+        document.getElementById('inboundStage').textContent = '入库状态连接失败';
+    }
+}
+
+function startInboundPolling() {
+    if (inboundPollTimer) clearInterval(inboundPollTimer);
+    inboundPollTimer = setInterval(() => pollInboundStatus(false), 1000);
+    pollInboundStatus(false);
+}
+
+function downloadInboundXlsx() {
+    if (!inboundDownloadUrl) return;
+    const url = new URL(inboundDownloadUrl, window.location.origin);
+    if (url.origin !== window.location.origin) return;
+    window.location.assign(url.href);
+}
+
+async function restoreInboundJob() {
+    if (document.hidden) return;
+    if (inboundJobId) {
+        if (inboundPollTimer) await pollInboundStatus(false);
+        else startInboundPolling();
+        return;
+    }
+    await pollInboundStatus(true);
+    if (inboundJobId && !inboundPollTimer) startInboundPolling();
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) restoreInboundJob();
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    inboundJobId = sessionStorage.getItem('inbound_job_id') || '';
+    restoreInboundJob();
+});
+</script>
+</body>
+</html>
