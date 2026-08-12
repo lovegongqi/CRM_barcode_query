@@ -2507,6 +2507,14 @@
                 <div class="service-detail-field"><label>联系电话</label><div>${escapeHtml(customerPhone)}</div></div>
                 <div class="service-detail-field"><label>联系地址</label><div>${escapeHtml(customerAddress)}</div></div>
             </div></section>`;
+            const acceptedAt = fieldValue(['受理时间', '受理日期']) || '—';
+            const appointmentAt = fieldValue(['客户预约时间', '预约时间']) || '—';
+            const technician = fieldValue(['服务人员', '安装人员', '服务工程师']) || '—';
+            const serviceSection = `<section class="service-detail-section"><h3>服务信息</h3><div class="service-detail-fields">
+                <div class="service-detail-field"><label>受理时间</label><div>${escapeHtml(acceptedAt)}</div></div>
+                <div class="service-detail-field"><label>客户预约时间</label><div>${escapeHtml(appointmentAt)}</div></div>
+                <div class="service-detail-field"><label>服务人员</label><div>${escapeHtml(technician)}</div></div>
+            </div></section>`;
             const products = detail.products || [];
             const productRows = products.map(product => {
                 const barcode = String(product.barcode || '');
@@ -2521,7 +2529,7 @@
             }).join('');
             const refreshButton = `<button type="button" class="service-detail-refresh" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="refreshServiceOrderProducts(this.dataset.serviceNo)" title="重新打开 CRM 服务单详情并重抓产品明细"><span class="service-detail-refresh-icon">↻</span>重查产品明细</button>`;
             const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><h3>产品明细</h3>${refreshButton}</div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
-            content.innerHTML = customerSection + productSection;
+            content.innerHTML = customerSection + serviceSection + productSection;
         }
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
