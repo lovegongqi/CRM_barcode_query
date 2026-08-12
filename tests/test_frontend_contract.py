@@ -126,14 +126,14 @@ class FrontendContractTest(unittest.TestCase):
             r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
         )
 
-    def test_mobile_results_actions_use_equal_three_by_three_grid(self):
+    def test_mobile_results_actions_use_equal_three_column_grid(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
         self.assertEqual(results.count('<div class="action-groups">'), 1)
         self.assertEqual(
             len(re.findall(r'<div class="action-groups">(.*?)</div>', results, re.S)[0].split('<button')) - 1,
-            9,
+            10,
         )
         for selector in (
             'body[data-aurora-page="results"] .action-groups {',
