@@ -6902,6 +6902,126 @@ def _write_service_order_detail(service_no, detail):
         json.dump(payload, file, ensure_ascii=False, indent=2)
     return f"/api/service-orders/{service_no}"
 
+
+SERVICE_ORDER_INSTALL_EXPORT_COLUMNS = (
+    "用户姓名", "安装地址", "联系电话", "购买日期", "备注", "分销商名称", "服务费",
+    "产品编码", "产品型号", "预约时间", "安装人员", "产品序列号", "安装日期", "状态",
+    "销售点车牌号", "销售渠道", "区域", "网购订单号", "价格", "产品类型",
+)
+
+
+def _service_detail_field_value(detail, labels):
+    wanted = {_clean_export_value(label) for label in labels}
+    for field in (detail or {}).get("fields") or []:
+        if not isinstance(field, dict):
+            continue
+        if _clean_export_value(field.get("label")) in wanted:
+            return _clean_export_value(field.get("value"))
+    return ""
+
+
+def _service_order_install_export_rows(selected_barcodes):
+    wanted = normalize_input_barcodes(selected_barcodes)
+    items = {item.get("barcode"): item for item in scan_barcodes()}
+    rows = []
+    seen_service_nos = set()
+    skipped_count = 0
+    for barcode in wanted:
+        item = items.get(barcode)
+        latest = _latest_service_record((item or {}).get("fields") or {})
+        service_no = _clean_export_value((latest or {}).get("service_no"))
+        if not service_no or service_no in seen_service_nos:
+            continue
+        seen_service_nos.add(service_no)
+        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+        try:
+            with open(filepath, "r", encoding="utf-8") as file:
+                detail = _normalize_service_order_detail(json.load(file) or {}, service_no)
+        except (OSError, ValueError, TypeError):
+            skipped_count += 1
+            continue
+        products = [product for product in detail.get("products") or [] if isinstance(product, dict)]
+        service_row = (latest or {}).get("row") or {}
+        address = _service_detail_field_value(detail, ["联系地址", "客户地址", "地址"])
+        region = " ".join(filter(None, [
+            _service_detail_field_value(detail, ["所属省份", "省份"]),
+            _service_detail_field_value(detail, ["所属城市", "城市"]),
+            _service_detail_field_value(detail, ["所属县区", "县区"]),
+        ]))
+        rows.append([
+            _service_detail_field_value(detail, ["客户姓名", "客户名称", "反馈人", "联系人"]),
+            address,
+            _service_detail_field_value(detail, ["联系电话", "客户电话", "反馈电话", "联系人电话", "手机号码"]),
+            _service_detail_field_value(detail, ["受理时间", "受理日期"]),
+            f"服务单号：{service_no}",
+            _clean_export_value(service_row.get("newdealername1") or service_row.get("newpresaledealername1")),
+            "",
+            "、".join(filter(None, (_clean_export_value(product.get("product_code")) for product in products))),
+            "、".join(filter(None, (_clean_export_value(product.get("product_model")) or _infer_service_product_model(product.get("product_name")) for product in products))),
+            "",
+            _service_detail_field_value(detail, ["服务人员", "安装人员", "服务工程师"]),
+            "、".join(filter(None, (_clean_export_value(product.get("barcode")) for product in products))),
+            _service_detail_field_value(detail, ["客户预约时间", "预约时间"]),
+            "已结单" if _service_row_is_closed(service_row) else "有效",
+            "",
+            "",
+            region,
+            "",
+            "",
+            "、".join(filter(None, (_clean_export_value(product.get("product_name")) for product in products))),
+        ])
+    return rows, skipped_count
+
+
+def _write_service_order_install_xlsx(rows, skipped_count):
+    if not rows:
+        return None
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "产品销售安装"
+    sheet.sheet_view.showGridLines = False
+    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True, size=11)
+    title_fill = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    thin_border = Border(
+        left=Side(style="thin"), right=Side(style="thin"),
+        top=Side(style="thin"), bottom=Side(style="thin"),
+    )
+    for index, label in enumerate(SERVICE_ORDER_INSTALL_EXPORT_COLUMNS, 2):
+        cell = sheet.cell(row=1, column=index, value=label)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin_border
+    sheet.merge_cells("B2:Q2")
+    title_cell = sheet["B2"]
+    title_cell.value = "产品销售安装"
+    title_cell.fill = title_fill
+    title_cell.font = Font(color="FFFFFF", bold=True, size=12)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    title_cell.border = thin_border
+    for row_index, values in enumerate(rows, 3):
+        for column_index, value in enumerate(values, 2):
+            cell = sheet.cell(row=row_index, column=column_index, value=_xlsx_cell_value(value))
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.border = thin_border
+    for column_index, label in enumerate(SERVICE_ORDER_INSTALL_EXPORT_COLUMNS, 2):
+        values = [row[column_index - 2] for row in rows[:200]]
+        sheet.column_dimensions[get_column_letter(column_index)].width = _suggest_column_width(label, values)
+    sheet.row_dimensions[1].height = 28
+    sheet.row_dimensions[2].height = 24
+    sheet.freeze_panes = "B3"
+    sheet.auto_filter.ref = f"B1:U{len(rows) + 2}"
+    filename = "service_order_install_export.xlsx"
+    workbook.save(os.path.join(BARCODE_DIR, filename))
+    return {
+        "success": True,
+        "exported_count": len(rows),
+        "skipped_count": skipped_count,
+        "filename": filename,
+        "message": f"已导出 {len(rows)} 个服务单，跳过 {skipped_count} 个未保存详情的服务单",
+    }
+
 def selected_latest_service_orders(selected_barcodes):
     wanted = normalize_input_barcodes(selected_barcodes)
     all_items = {item['barcode']: item for item in scan_barcodes()}
@@ -8407,6 +8527,17 @@ def serve_service_order(filename):
     if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}\.html", filename or ""):
         return "服务单详情不存在", 404
     return send_from_directory(SERVICE_ORDER_DIR, filename, mimetype="text/html")
+
+@app.route("/api/service-orders/export/xlsx", methods=["POST"])
+def api_export_service_orders_xlsx():
+    if not HAS_OPENPYXL:
+        return jsonify({"success": False, "error": "缺少 openpyxl 库，请运行: pip3 install openpyxl"})
+    data = request.get_json() or {}
+    rows, skipped_count = _service_order_install_export_rows(data.get("barcodes") or [])
+    payload = _write_service_order_install_xlsx(rows, skipped_count)
+    if not payload:
+        return jsonify({"success": False, "error": "没有已保存详情的安装服务单可导出", "skipped_count": skipped_count})
+    return jsonify(payload)
 
 @app.route("/api/service-orders/<service_no>")
 def api_service_order_detail(service_no):
