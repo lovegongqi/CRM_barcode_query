@@ -165,6 +165,35 @@ class InboundCRMTest(unittest.TestCase):
         with self.assertRaisesRegex(PackingSlipReadError, "未读完总页数"):
             reader._read_all_pages()
 
+    def test_rejects_unknown_total_when_next_control_state_cannot_be_read(self):
+        class DetachedControl:
+            def get_attribute(self, name):
+                raise RuntimeError("control was detached")
+
+        class UnknownTotalReader(PackingSlipCRMReader):
+            def __init__(self):
+                super().__init__(session=None)
+
+            def _go_to_first_page(self):
+                return None
+
+            def _current_page_number(self):
+                return 1
+
+            def _total_pages(self):
+                return None
+
+            def _read_current_page(self):
+                return [detail_row(1)]
+
+            def _next_controls(self):
+                return [DetachedControl()]
+
+        reader = UnknownTotalReader()
+
+        with self.assertRaisesRegex(PackingSlipReadError, "无法识别下一页状态"):
+            reader._read_all_pages()
+
 
 if __name__ == "__main__":
     unittest.main()

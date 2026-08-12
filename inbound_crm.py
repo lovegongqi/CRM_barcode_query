@@ -396,7 +396,7 @@ class PackingSlipCRMReader:
                 return True
             return hasattr(element, "is_enabled") and not element.is_enabled()
         except Exception:
-            return True
+            return None
 
     def _next_controls(self):
         controls = []
@@ -452,7 +452,12 @@ class PackingSlipCRMReader:
     def _has_next_page(self):
         controls = self._next_controls()
         if controls:
-            return any(not self._disabled(control) for control in controls)
+            states = [self._disabled(control) for control in controls]
+            if any(state is False for state in states):
+                return True
+            if any(state is None for state in states):
+                raise PackingSlipReadError("无法识别下一页状态")
+            return False
         total = self._total_pages()
         current = self._current_page_number()
         if total is not None and current is not None and current < total and self._page_input() is not None:
@@ -461,7 +466,7 @@ class PackingSlipCRMReader:
 
     def _advance_to_page(self, expected_page):
         for control in self._next_controls():
-            if not self._disabled(control):
+            if self._disabled(control) is False:
                 control.click()
                 return
         field = self._page_input()
