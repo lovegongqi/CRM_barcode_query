@@ -6940,7 +6940,7 @@ def _service_order_install_export_rows(selected_barcodes):
         except (OSError, ValueError, TypeError):
             skipped_count += 1
             continue
-        products = [product for product in detail.get("products") or [] if isinstance(product, dict)]
+        products = [product for product in detail.get("products") or [] if isinstance(product, dict)] or [{}]
         service_row = (latest or {}).get("row") or {}
         address = _service_detail_field_value(detail, ["联系地址", "客户地址", "地址"])
         region = " ".join(filter(None, [
@@ -6948,28 +6948,29 @@ def _service_order_install_export_rows(selected_barcodes):
             _service_detail_field_value(detail, ["所属城市", "城市"]),
             _service_detail_field_value(detail, ["所属县区", "县区"]),
         ]))
-        rows.append([
-            _service_detail_field_value(detail, ["客户姓名", "客户名称", "反馈人", "联系人"]),
-            address,
-            _service_detail_field_value(detail, ["联系电话", "客户电话", "反馈电话", "联系人电话", "手机号码"]),
-            _service_detail_field_value(detail, ["受理时间", "受理日期"]),
-            f"服务单号：{service_no}",
-            _clean_export_value(service_row.get("newdealername1") or service_row.get("newpresaledealername1")),
-            "",
-            "、".join(filter(None, (_clean_export_value(product.get("product_code")) for product in products))),
-            "、".join(filter(None, (_clean_export_value(product.get("product_model")) or _infer_service_product_model(product.get("product_name")) for product in products))),
-            "",
-            _service_detail_field_value(detail, ["服务人员", "安装人员", "服务工程师"]),
-            "、".join(filter(None, (_clean_export_value(product.get("barcode")) for product in products))),
-            _service_detail_field_value(detail, ["客户预约时间", "预约时间"]),
-            "已结单" if _service_row_is_closed(service_row) else "有效",
-            "",
-            "",
-            region,
-            "",
-            "",
-            "、".join(filter(None, (_clean_export_value(product.get("product_name")) for product in products))),
-        ])
+        for product in products:
+            rows.append([
+                _service_detail_field_value(detail, ["客户姓名", "客户名称", "反馈人", "联系人"]),
+                address,
+                _service_detail_field_value(detail, ["联系电话", "客户电话", "反馈电话", "联系人电话", "手机号码"]),
+                _service_detail_field_value(detail, ["受理时间", "受理日期"]),
+                f"服务单号：{service_no}",
+                _clean_export_value(service_row.get("newdealername1") or service_row.get("newpresaledealername1")),
+                "",
+                _clean_export_value(product.get("product_code")),
+                _clean_export_value(product.get("product_model")) or _infer_service_product_model(product.get("product_name")),
+                "",
+                _service_detail_field_value(detail, ["服务人员", "安装人员", "服务工程师"]),
+                _clean_export_value(product.get("barcode")),
+                _service_detail_field_value(detail, ["客户预约时间", "预约时间"]),
+                "已结单" if _service_row_is_closed(service_row) else "有效",
+                "",
+                "",
+                region,
+                "",
+                "",
+                _clean_export_value(product.get("product_name")),
+            ])
     return rows, skipped_count
 
 

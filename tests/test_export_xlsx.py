@@ -78,7 +78,10 @@ class ExportXlsxTest(unittest.TestCase):
                 {"label": "客户预约时间", "value": "2026-08-03 10:00"},
                 {"label": "服务人员", "value": "张工"},
             ],
-            "products": [{"product_name": "壁挂式饮水机（白色）EWD600S", "product_code": "906020905", "barcode": "5312408100080"}],
+            "products": [
+                {"product_name": "壁挂式饮水机（白色）EWD600S", "product_code": "906020905", "barcode": "5312408100080"},
+                {"product_name": "前置过滤器 PWF100", "product_code": "906020906", "barcode": "5312408100081"},
+            ],
         }
         with open(os.path.join(service_dir.name, "FWD202608010001.json"), "w", encoding="utf-8") as file:
             json.dump(detail, file, ensure_ascii=False)
@@ -93,7 +96,7 @@ class ExportXlsxTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["success"])
-        self.assertEqual(payload["exported_count"], 1)
+        self.assertEqual(payload["exported_count"], 2)
         self.assertEqual(payload["skipped_count"], 1)
         workbook = load_workbook(os.path.join(self.output_dir.name, payload["filename"]))
         sheet = workbook.active
@@ -109,6 +112,10 @@ class ExportXlsxTest(unittest.TestCase):
         self.assertEqual(sheet["L3"].value, "张工")
         self.assertEqual(sheet["M3"].value, "5312408100080")
         self.assertEqual(sheet["N3"].value, "2026-08-03 10:00")
+        self.assertEqual(sheet["B4"].value, "王剑利")
+        self.assertEqual(sheet["I4"].value, "906020906")
+        self.assertEqual(sheet["J4"].value, "PWF100")
+        self.assertEqual(sheet["M4"].value, "5312408100081")
         workbook.close()
 
 

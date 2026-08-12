@@ -2056,7 +2056,7 @@
                 const data = await res.json();
                 if (data.success) {
                     window.open(BARCODE_DIR + data.filename, '_blank');
-                    showToast(`已导出 ${data.exported_count || 0} 个服务单，跳过 ${data.skipped_count || 0} 个未保存详情的服务单`);
+                    showToast(`已导出 ${data.exported_count || 0} 个产品，跳过 ${data.skipped_count || 0} 个未保存详情的服务单`);
                 } else {
                     showToast('安装表导出失败: ' + (data.error || '未知错误'));
                 }
