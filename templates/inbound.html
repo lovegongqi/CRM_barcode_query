@@ -182,6 +182,7 @@ function renderInboundResult(result) {
             <span>物料 <strong>${escapeHtml(items.length)}</strong> 种</span>
             <span>应发 <strong>${escapeHtml(result.expected_total)}</strong> 件</span>
             <span>条码 <strong>${escapeHtml(result.total_serials)}</strong> 个</span>
+            <span>无条码配件 <strong>${escapeHtml(items.reduce((total, item) => total + (Number(item.unbarcoded_quantity) || 0), 0))}</strong> 件</span>
         </div>`;
 
     const warnings = [];
@@ -197,12 +198,13 @@ function renderInboundResult(result) {
     document.getElementById('inboundProducts').innerHTML = items.length ? items.map(item => {
         const serials = item.serials || [];
         const orders = Array.isArray(item.order_numbers) ? item.order_numbers.join('、') : '';
+        const unbarcoded = Number(item.unbarcoded_quantity) || 0;
         return `<section class="inbound-product">
             <div class="inbound-product-head">
                 <div><strong>${escapeHtml(item.product_code)}</strong><small>${escapeHtml(item.description || '无物料描述')} · 订单 ${escapeHtml(orders || '--')}</small></div>
                 <div>${escapeHtml(item.serial_count)} / ${escapeHtml(item.expected_quantity == null ? '--' : item.expected_quantity)}</div>
             </div>
-            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>
+            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
         </section>`;
     }).join('') : '未读取到可用条码。';
 }

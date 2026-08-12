@@ -1,5 +1,6 @@
 import re
 import time
+from math import ceil
 
 from inbound_extraction import normalize_packing_slip_no
 
@@ -14,6 +15,12 @@ FIELD_ALIASES = {
     "description": ("物料描述", "产品描述", "商品描述", "品名", "名称"),
     "expected_quantity": ("应发数量", "数量", "出货数量", "发货数量"),
     "serial": ("条码", "序列号", "产品条码", "SN"),
+}
+SHIPMENT_FIELD_ALIASES = {
+    "order_number": ("erp发货单号", "crm订单号", "订单号"),
+    "product_code": ("产品编码", "物料编码", "商品编码"),
+    "description": ("产品名称", "物料描述", "产品描述"),
+    "expected_quantity": ("发货数量", "已发数量", "数量"),
 }
 MAPPED_FIELDS = tuple(FIELD_ALIASES)
 SUMMARY_LABELS = ("合计", "汇总", "总计")
@@ -72,6 +79,32 @@ def map_table_rows(headers, rows, page_number):
     return mapped_rows
 
 
+def map_shipment_rows(headers, rows):
+    normalized = [_header_text(header) for header in headers or []]
+    indexes = {}
+    for field, aliases in SHIPMENT_FIELD_ALIASES.items():
+        accepted = {_header_text(alias) for alias in aliases}
+        indexes[field] = next(
+            (index for index, header in enumerate(normalized) if header in accepted),
+            None,
+        )
+    if indexes["product_code"] is None or indexes["expected_quantity"] is None:
+        raise PackingSlipReadError("发货明细缺少产品编码或发货数量")
+
+    mapped_rows = []
+    for raw_row in rows or []:
+        cells = [_clean_text(value) for value in list(raw_row or [])]
+        product_code = cells[indexes["product_code"]] if indexes["product_code"] < len(cells) else ""
+        expected_quantity = cells[indexes["expected_quantity"]] if indexes["expected_quantity"] < len(cells) else ""
+        if not product_code or not expected_quantity:
+            continue
+        mapped_rows.append({
+            field: cells[index] if index is not None and index < len(cells) else ""
+            for field, index in indexes.items()
+        })
+    return mapped_rows
+
+
 def _rows_fingerprint(rows):
     return tuple(
         tuple(_clean_text(row.get(field)) for field in MAPPED_FIELDS)
@@ -91,13 +124,22 @@ class PackingSlipCRMReader:
         self._navigate_to_packing_slips()
         self._emit(f"正在查询装箱单 {packing_slip_no}")
         self._search_and_open(packing_slip_no)
-        return self._read_all_pages()
+        shipment_rows = self._read_shipment_rows()
+        result = self._read_all_pages()
+        result["shipment_rows"] = shipment_rows
+        return result
 
     def _emit(self, message):
         if self.log:
             self.log(message)
 
     def _read_all_pages(self):
+        if self._set_outbound_page_size(50):
+            if not self._wait_for_outbound_page_size_render(50):
+                raise PackingSlipReadError("已选择 50 条/页，但出库明细表格未完成刷新")
+            self._emit("已将出库明细设置为 50 条/页")
+        else:
+            self._emit("未找到 50 条/页选项，按当前每页行数继续读取")
         self._go_to_first_page()
         total_pages = self._total_pages()
         expected_page = 1
@@ -158,9 +200,19 @@ class PackingSlipCRMReader:
         self._pause()
 
     def _search_and_open(self, packing_slip_no):
-        field = self._find_labeled_input("装箱单号")
+        if self._open_matching_result(packing_slip_no):
+            self._pause()
+            return
+        field = None
+        for _ in range(15):
+            field = self._find_labeled_input("装箱单号")
+            if field is not None:
+                break
+            self._pause(400)
         if field is None:
-            raise PackingSlipReadError("未找到装箱单号输入框")
+            diagnostics = self._visible_field_diagnostics()
+            suffix = f"；当前可见字段：{diagnostics}" if diagnostics else ""
+            raise PackingSlipReadError(f"未找到装箱单号输入框{suffix}")
         field.fill(packing_slip_no)
         if not (self._click_exact_text("查询") or self._click_exact_text("搜索")):
             raise PackingSlipReadError("未找到查询按钮")
@@ -228,6 +280,13 @@ class PackingSlipCRMReader:
         script = """(wanted) => {
             const clean = value => (value || '').replace(/\\s+/g, '').trim();
             const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+            for (const item of document.querySelectorAll('.el-form-item, .ant-form-item, .form-group, tr')) {
+                if (!visible(item)) continue;
+                const labelNode = item.querySelector('.el-form-item__label, label, th, td:first-child');
+                if (!labelNode || !clean(labelNode.textContent).includes(clean(wanted))) continue;
+                const input = Array.from(item.querySelectorAll('input:not([disabled]), textarea:not([disabled])')).find(visible);
+                if (input) return input;
+            }
             for (const node of document.querySelectorAll('label')) {
                 if (!visible(node) || !clean(node.textContent).includes(clean(wanted))) continue;
                 const linked = node.htmlFor ? document.getElementById(node.htmlFor) : node.querySelector('input');
@@ -236,6 +295,11 @@ class PackingSlipCRMReader:
                 const nearby = container && container.querySelector('input');
                 if (visible(nearby)) return nearby;
             }
+            const quickSearch = Array.from(document.querySelectorAll("input[placeholder*='快速搜索']")).find(input => {
+                const grid = input.closest('.rt-grid');
+                return visible(input) && grid && clean(grid.textContent).includes(clean(wanted));
+            });
+            if (quickSearch) return quickSearch;
             return Array.from(document.querySelectorAll('input')).find(input => {
                 const hint = [input.placeholder, input.name, input.id, input.getAttribute('aria-label')].join('');
                 return visible(input) && clean(hint).includes(clean(wanted));
@@ -253,6 +317,31 @@ class PackingSlipCRMReader:
                 continue
         return None
 
+    def _visible_field_diagnostics(self):
+        script = """() => {
+            const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+            const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+            const labels = Array.from(document.querySelectorAll('.el-form-item__label, .ant-form-item-label, label, th, td:first-child'))
+                .filter(visible)
+                .map(node => clean(node.textContent))
+                .filter(Boolean);
+            const inputs = Array.from(document.querySelectorAll('input, textarea, select'))
+                .filter(visible)
+                .map(input => [input.placeholder, input.name, input.id, input.getAttribute('aria-label'), input.className]
+                    .map(clean).filter(Boolean).join(' '))
+                .filter(Boolean);
+            return Array.from(new Set([...labels, ...inputs])).slice(0, 16).join(' | ');
+        }"""
+        diagnostics = []
+        for _page, scope in self._scopes():
+            try:
+                value = _clean_text(scope.evaluate(script))
+                if value and value not in diagnostics:
+                    diagnostics.append(value)
+            except Exception:
+                continue
+        return " || ".join(diagnostics)
+
     def _open_matching_result(self, packing_slip_no):
         for page, scope in self._scopes():
             try:
@@ -268,7 +357,11 @@ class PackingSlipCRMReader:
                     if not exact_cells:
                         continue
                     for action in row.query_selector_all("a,button,[role='button']"):
-                        if self._visible(action) and _header_text(action.inner_text()) in {"明细", "查看"}:
+                        action_text = _clean_text(action.inner_text())
+                        if self._visible(action) and (
+                            action_text == packing_slip_no
+                            or _header_text(action_text) in {"明细", "查看"}
+                        ):
                             action.click()
                             if self.session is not None:
                                 self.session.page = page
@@ -300,25 +393,66 @@ class PackingSlipCRMReader:
                 rows.append([_clean_text(cell.inner_text()) for cell in cells])
         return headers, rows
 
+    def _section_tables(self, title):
+        tables = []
+        for _page, scope in self._scopes():
+            try:
+                sections = scope.query_selector_all(".rt-section")
+            except Exception:
+                continue
+            for section in sections:
+                try:
+                    header = section.query_selector(".rt-section__header")
+                    if not header or _header_text(header.inner_text()) != _header_text(title):
+                        continue
+                    tables.extend(table for table in section.query_selector_all("table") if self._visible(table))
+                except Exception:
+                    continue
+        return tables
+
+    def _read_shipment_rows(self):
+        if not self._wait_for_detail_section("发货明细", ("产品编码", "发货数量")):
+            raise PackingSlipReadError("未找到包含产品编码和发货数量的发货明细表")
+        headers, raw_rows = self._section_table_values("发货明细")
+        try:
+            rows = map_shipment_rows(headers, raw_rows)
+        except PackingSlipReadError as error:
+            raise PackingSlipReadError(str(error)) from error
+        if not rows:
+            raise PackingSlipReadError("未找到包含产品编码和发货数量的发货明细表")
+        return rows
+
+    def _section_table_values(self, title):
+        headers = []
+        rows = []
+        for table in self._section_tables(title):
+            table_headers, table_rows = self._table_values(table)
+            if table_headers and not headers:
+                headers = table_headers
+            rows.extend(table_rows)
+        return headers, rows
+
+    def _wait_for_detail_section(self, title, required_headers):
+        expected_headers = {_header_text(header) for header in required_headers}
+        for _ in range(25):
+            headers, rows = self._section_table_values(title)
+            found_headers = {_header_text(header) for header in headers}
+            if rows and expected_headers.issubset(found_headers):
+                return True
+            self._pause(400)
+        return False
+
     def _read_current_page(self):
+        if not self._wait_for_detail_section("出库明细", ("产品编码", "产品条码")):
+            raise PackingSlipReadError("未找到同时包含物料编码和条码的明细表")
         page_number = self._current_page_number()
         if page_number is None:
             raise PackingSlipReadError("无法识别当前页码")
-        candidates = []
-        for _page, scope in self._scopes():
-            try:
-                tables = scope.query_selector_all("table")
-            except Exception:
-                continue
-            for table in tables:
-                if not self._visible(table):
-                    continue
-                headers, raw_rows = self._table_values(table)
-                try:
-                    mapped = map_table_rows(headers, raw_rows, page_number)
-                except PackingSlipReadError:
-                    continue
-                candidates.append(mapped)
+        headers, raw_rows = self._section_table_values("出库明细")
+        try:
+            candidates = [map_table_rows(headers, raw_rows, page_number)]
+        except PackingSlipReadError:
+            candidates = []
         if not candidates:
             raise PackingSlipReadError("未找到同时包含物料编码和条码的明细表")
         return max(candidates, key=len)
@@ -356,7 +490,7 @@ class PackingSlipCRMReader:
         if found:
             return current
         found, current = self._page_number_result(
-            ".pagination .active, .pagination .current, .pagination .selected, "
+            "li.number.active, .el-pagination .active, .pagination .active, .pagination .current, .pagination .selected, "
             ".pager .active, .pager .current, .pager .selected, "
             "[class*='pagination'] .active, [class*='pagination'] .current, "
             "[class*='pagination'] .selected"
@@ -364,23 +498,132 @@ class PackingSlipCRMReader:
         if found:
             return current
         _found, current = self._page_number_result(
-            ".pagination input, .pager input, [class*='pagination'] input, "
+            ".el-pagination input, .pagination input, .pager input, [class*='pagination'] input, "
             "input[aria-label*='页码'], input[placeholder*='页码'], input[title*='页码']"
         )
         return current
 
     def _total_pages(self):
         values = set()
-        pattern = re.compile(r"共\s*(\d+)\s*页")
+        page_pattern = re.compile(r"共\s*(\d+)\s*页")
+        item_pattern = re.compile(r"共\s*(\d+)\s*条")
+        page_sizes = {
+            size
+            for _page, input_el in self._outbound_page_size_inputs()
+            if (size := self._page_size_number(self._input_value(input_el))) is not None
+        }
         for _page, scope in self._scopes():
             try:
                 text = scope.inner_text("body")
             except Exception:
                 continue
-            values.update(int(match) for match in pattern.findall(text or ""))
+            values.update(int(match) for match in page_pattern.findall(text or ""))
+            item_counts = {int(match) for match in item_pattern.findall(text or "")}
+            try:
+                inputs = scope.query_selector_all(".el-pagination input, .pagination input")
+            except Exception:
+                inputs = []
+            for input_el in inputs:
+                if not self._visible(input_el):
+                    continue
+                value = self._input_value(input_el)
+                if re.fullmatch(r"\s*\d+\s*条/页\s*", value):
+                    page_sizes.add(self._page_size_number(value))
+            if len(item_counts) == 1 and len(page_sizes) == 1:
+                values.add(ceil(next(iter(item_counts)) / next(iter(page_sizes))))
         if len(values) > 1:
             raise PackingSlipReadError("无法唯一识别总页数")
         return next(iter(values)) if values else None
+
+    def _outbound_item_count(self):
+        values = set()
+        pattern = re.compile(r"共\s*(\d+)\s*条")
+        for _page, scope in self._scopes():
+            try:
+                values.update(int(match) for match in pattern.findall(scope.inner_text("body") or ""))
+            except Exception:
+                continue
+        return next(iter(values)) if len(values) == 1 else None
+
+    def _wait_for_outbound_page_size_render(self, target_size):
+        total_items = self._outbound_item_count()
+        expected_rows = min(total_items, target_size) if total_items is not None else target_size
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            headers, rows = self._section_table_values("出库明细")
+            if (
+                {"产品编码", "产品条码"}.issubset({_header_text(header) for header in headers})
+                and len(rows) == expected_rows
+            ):
+                return True
+            self._pause(100)
+        return False
+
+    @staticmethod
+    def _input_value(element):
+        try:
+            value = element.input_value()
+            if value is not None:
+                return value
+        except Exception:
+            pass
+        try:
+            return element.get_attribute("value") or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _page_size_number(value):
+        match = re.fullmatch(r"\s*(\d+)\s*(?:条/页)?\s*", str(value or ""))
+        return int(match.group(1)) if match else None
+
+    def _outbound_page_size_inputs(self):
+        selector = (
+            ".el-pagination__sizes input, .rt-pagination__sizes input, "
+            ".el-pagination .el-select input, .pagination .el-select input, .pager .el-select input, "
+            "[class*='pagination'] [class*='sizes'] input"
+        )
+        for page, scope in self._scopes():
+            try:
+                elements = scope.query_selector_all(selector)
+            except Exception:
+                continue
+            for element in elements:
+                if not self._visible(element):
+                    continue
+                if self._page_size_number(self._input_value(element)) is not None:
+                    yield page, element
+
+    def _set_outbound_page_size(self, target_size):
+        wanted = f"{target_size}条/页"
+        controls = list(self._outbound_page_size_inputs())
+        if any(self._page_size_number(self._input_value(control)) == target_size for _page, control in controls):
+            return True
+        for _page, control in controls:
+            try:
+                control.click()
+            except Exception:
+                continue
+            for _ in range(15):
+                for _option_page, scope in self._scopes():
+                    try:
+                        options = scope.query_selector_all("li.el-select-dropdown__item, [role='option']")
+                    except Exception:
+                        continue
+                    for option in options:
+                        try:
+                            if self._visible(option) and _header_text(option.inner_text()) == _header_text(wanted):
+                                option.click()
+                                break
+                        except Exception:
+                            continue
+                if any(
+                    self._page_size_number(self._input_value(field)) == target_size
+                    for _control_page, field in self._outbound_page_size_inputs()
+                ):
+                    return True
+                self._pause(100)
+        return False
 
     @staticmethod
     def _disabled(element):
@@ -402,7 +645,7 @@ class PackingSlipCRMReader:
         controls = []
         for _page, scope in self._scopes():
             try:
-                elements = scope.query_selector_all("a,button,[role='button']")
+                elements = scope.query_selector_all("a,button,[role='button'],button.btn-next")
             except Exception:
                 continue
             for element in elements:
@@ -417,19 +660,20 @@ class PackingSlipCRMReader:
                         ]
                     )
                 )
-                if text == "下一页" or "下一页" in hint:
+                classes = _header_text(element.get_attribute("class") or "")
+                if text == "下一页" or "下一页" in hint or "btn-next" in classes:
                     controls.append(element)
         return controls
 
     def _page_input(self):
         selectors = (
-            ".pagination input, .pager input, [class*='pagination'] input, "
+            ".el-pagination input, .pagination input, .pager input, [class*='pagination'] input, "
             "input[aria-label*='页码'], input[placeholder*='页码'], input[title*='页码']"
         )
         for _page, scope in self._scopes():
             try:
                 for element in scope.query_selector_all(selectors):
-                    if self._visible(element):
+                    if self._visible(element) and self._element_page_number(element) is not None:
                         return element
             except Exception:
                 continue

@@ -4931,6 +4931,7 @@ def _run_inbound_job(job_id, worker):
             packing_slip_no,
             source.get('rows') or [],
             source.get('page_counts') or [],
+            shipment_rows=source.get('shipment_rows') or [],
         )
         with inbound_job_lock:
             job = inbound_jobs.get(job_id)

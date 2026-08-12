@@ -95,12 +95,40 @@ class InboundExtractionTest(unittest.TestCase):
         sheet = workbook.active
         self.assertEqual(
             [cell.value for cell in sheet[1]],
-            ["装箱单号", "订单号", "物料编码", "物料描述", "应发数量", "条码", "来源页码"],
+            ["装箱单号", "订单号", "物料编码", "物料描述", "应发数量", "条码", "明细类型", "来源页码"],
         )
         self.assertEqual(sheet.max_row, result["total_serials"] + 1)
         self.assertEqual([sheet["F2"].value, sheet["F3"].value], ["SN00000001", "SN00000002"])
-        self.assertIsInstance(sheet["G2"].value, int)
+        self.assertIsInstance(sheet["H2"].value, int)
         workbook.close()
+
+    def test_keeps_unbarcoded_accessory_from_shipment_details(self):
+        result = build_inbound_result(
+            PACKING_SLIP_NO,
+            [
+                {
+                    "page": 1,
+                    "row_index": 1,
+                    "product_code": "906042856",
+                    "description": "净水机",
+                    "serial": "9462607180448",
+                }
+            ],
+            [{"page": 1, "row_count": 1}],
+            shipment_rows=[
+                {"product_code": "906042856", "description": "净水机", "expected_quantity": "1"},
+                {"product_code": "247296319", "description": "中央净水机面贴", "expected_quantity": "10"},
+            ],
+        )
+
+        self.assertEqual([item["product_code"] for item in result["items"]], ["906042856", "247296319"])
+        accessory = result["items"][1]
+        self.assertEqual(accessory["expected_quantity"], 10)
+        self.assertEqual(accessory["serial_count"], 0)
+        self.assertEqual(accessory["unbarcoded_quantity"], 10)
+        self.assertEqual(result["total_serials"], 1)
+        self.assertEqual(result["rows"][-1]["serial"], "")
+        self.assertEqual(result["rows"][-1]["record_type"], "无条码配件")
 
 
 if __name__ == "__main__":
