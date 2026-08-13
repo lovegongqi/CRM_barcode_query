@@ -30,7 +30,7 @@
 - Consumes: `build_gyj_purchase_lines(result)` 的 `product_code`、`description`、`quantity`、`serials`、`record_type` 行字典。
 - Produces: 成功的 GYJ 状态响应中的 `result.products: list[dict]`；前端 `renderGYJSavedProducts(result)`。
 
-- [ ] **Step 1: 写入失败的状态 API 和模板契约测试**
+- [x] **Step 1: 写入失败的状态 API 和模板契约测试**
 
 ```python
 def test_gyj_completed_status_exposes_saved_line_details(self):
@@ -49,13 +49,13 @@ def test_inbound_renders_saved_gyj_lines_with_collapsed_serials(self):
     self.assertIn("无条码", inbound)
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `python3 -m unittest tests.test_inbound_routes.InboundRouteTest tests.test_frontend_contract.FrontendContractTest -v`
 
 Expected: 状态响应缺少 `result.products`，模板缺少已保存明细渲染函数。
 
-- [ ] **Step 3: 实施最小的行结果与折叠视图**
+- [x] **Step 3: 实施最小的行结果与折叠视图**
 
 ```python
 saved_products = [
@@ -73,13 +73,13 @@ job["result"] = {**result, "products": saved_products}
 
 让 `renderGYJInboundStatus` 在成功完成时调用 `renderGYJSavedProducts(data.result)`；每个产品行使用独立 ID，条码容器初始 `hidden`，切换按钮更新为“展开条码/收起条码”。
 
-- [ ] **Step 4: 运行聚焦测试确认通过**
+- [x] **Step 4: 运行聚焦测试确认通过**
 
 Run: `python3 -m unittest tests.test_inbound_routes.InboundRouteTest tests.test_frontend_contract.FrontendContractTest -v`
 
 Expected: PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add app.py templates/inbound.html tests/test_inbound_routes.py tests/test_frontend_contract.py
@@ -120,7 +120,7 @@ Run: `python3 -m unittest tests.test_inbound_routes.InboundRouteTest tests.test_
 
 Expected: 无空闲通道时入库仍返回 409，普通批量会直接领取下一条码。
 
-- [ ] **Step 3: 实施共享等待队列和调度器**
+- [x] **Step 3: 实施共享等待队列和调度器**
 
 ```python
 priority_query_work_lock = threading.RLock()
@@ -138,13 +138,13 @@ def enqueue_priority_query_work(kind, job_id, launch):
 
 入库、结单、匹配在线查询在无空闲通道时创建原有任务记录并加入队列，接口返回成功、任务 ID 与等待状态；有空闲通道时仍立即派发。结单排队时从第一个释放通道启动，不等待全部通道。
 
-- [ ] **Step 4: 运行聚焦测试确认通过**
+- [x] **Step 4: 运行聚焦测试确认通过**
 
 Run: `python3 -m unittest tests.test_inbound_routes.InboundRouteTest tests.test_background_jobs.BackgroundJobTests -v`
 
 Expected: PASS；高优先级任务获得释放的通道且不存在双重占用。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add app.py tests/test_inbound_routes.py tests/test_background_jobs.py
@@ -177,7 +177,7 @@ Run: `python3 -m unittest tests.test_background_jobs.BackgroundJobTests -v`
 
 Expected: 普通 worker 立即领取第二个条码。
 
-- [ ] **Step 3: 在领取下一条前执行让位检查**
+- [x] **Step 3: 在领取下一条前执行让位检查**
 
 ```python
 while not stop_requested():
@@ -189,13 +189,13 @@ while not stop_requested():
 
 `yield_query_slot_to_priority_work` 仅在当前条码已结束且有等待高优先级任务时解除该普通任务对通道的活动占用、触发派发；不调用 `worker.request_stop()`，不修改当前条码的终态。
 
-- [ ] **Step 4: 运行聚焦测试确认通过**
+- [x] **Step 4: 运行聚焦测试确认通过**
 
 Run: `python3 -m unittest tests.test_background_jobs.BackgroundJobTests -v`
 
 Expected: PASS；普通查询在高优先级工作清空后恢复处理其剩余条码。
 
-- [ ] **Step 5: 完整验证、重启与提交**
+- [x] **Step 5: 完整验证、重启与提交**
 
 Run: `python3 -m unittest discover -s tests -v && git diff --check && node --check static/aurora.js`
 
