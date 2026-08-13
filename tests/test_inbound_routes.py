@@ -410,6 +410,7 @@ class InboundRouteTest(unittest.TestCase):
         status = self._wait_for_gyj_job(client, started.get_json()["job_id"])
         self.assertTrue(status["success"])
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+        self.assertIn(f"使用装箱单号：{PACKING_SLIP_NO}", status["logs"][0]["message"])
 
     def test_gyj_start_requires_visible_gyj_login(self):
         client = self._login("admin", "88293529")

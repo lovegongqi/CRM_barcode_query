@@ -302,6 +302,9 @@ class _LegacySelectTrigger:
         self.clicked = True
         self.force = force
 
+    def get_attribute(self, name):
+        return ""
+
     def locator(self, selector):
         return _MissingSelect()
 
@@ -329,6 +332,9 @@ class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
         if selector == "input":
             return self.search_input
         return _MissingSelect()
+
+    def get_attribute(self, name):
+        return "supplier-options" if name == "aria-controls" else ""
 
 
 class _SelectedText:
@@ -437,8 +443,9 @@ class _HeaderChoice:
     def count(self):
         return 1
 
-    def click(self):
+    def click(self, force=False):
         self.clicked = True
+        self.force = force
 
 
 class _LegacyHeaderDropdown:
@@ -498,9 +505,11 @@ class _DelayedSelectedLegacyHeaderForm(_LegacyHeaderForm):
 class _LegacyHeaderPage:
     def __init__(self, choice_text="昆山怡口净水系统有限公司"):
         self.dropdown = _LegacyHeaderDropdown(choice_text)
+        self.selectors = []
 
     def locator(self, selector):
-        if selector == ".ant-select-dropdown:visible":
+        self.selectors.append(selector)
+        if selector in ("#supplier-options", ".ant-select-dropdown"):
             return self.dropdown
         raise AssertionError(f"unexpected selector: {selector}")
 
@@ -617,7 +626,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertTrue(adapter.form.field.trigger.clicked)
         self.assertTrue(adapter.form.field.trigger.force)
-        self.assertEqual(page.dropdown.waited, ("visible", 5000))
+        self.assertEqual(page.dropdown.waited, ("attached", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
 
@@ -632,6 +641,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertTrue(adapter.form.field.trigger.search_input.force)
         self.assertTrue(page.dropdown.choice.clicked)
+        self.assertIn("#supplier-options", page.selectors)
+        self.assertNotIn(".ant-select-dropdown", page.selectors)
 
     def test_keeps_supplier_when_the_form_already_shows_the_default(self):
         page = _LegacyHeaderPage("昆山怡口净水")

@@ -9841,6 +9841,7 @@ def api_inbound_gyj_start():
             'running': True,
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         })
+        _append_job_log_unlocked(job, f'使用装箱单号：{packing_slip_no}', 'info', 300)
         _append_job_log_unlocked(job, '已通过 GYJ 登录校验，准备创建采购入库单', 'info', 300)
         inbound_gyj_jobs[job['job_id']] = job
         latest_inbound_gyj_job_by_owner[owner] = job['job_id']
