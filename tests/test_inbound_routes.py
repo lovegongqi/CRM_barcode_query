@@ -180,6 +180,14 @@ class InboundRouteTest(unittest.TestCase):
 
     def setUp(self):
         self._original_accounts = app_module.load_accounts()
+        self._original_inbound_history = [
+            record
+            for record in (
+                app_module.get_inbound_history(summary.get("packing_slip_no"))
+                for summary in app_module.load_inbound_history()
+            )
+            if record
+        ]
         app_module.save_accounts([
             {
                 "id": "admin",
@@ -249,6 +257,10 @@ class InboundRouteTest(unittest.TestCase):
             app_module.latest_background_query_job_by_owner.clear()
         if hasattr(app_module, "clear_inbound_history"):
             app_module.clear_inbound_history()
+            for record in self._original_inbound_history:
+                app_module.upsert_inbound_history(
+                    record.get("result") or {}, record.get("read_at") or ""
+                )
         app_module.save_accounts(self._original_accounts)
 
     @staticmethod
