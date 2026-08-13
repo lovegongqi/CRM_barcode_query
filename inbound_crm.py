@@ -55,7 +55,8 @@ def map_table_rows(headers, rows, page_number):
     if indexes["serial"] is None:
         missing.append("条码")
     if missing:
-        raise PackingSlipReadError(f"明细表缺少核心表头：{'\u3001'.join(missing)}")
+        missing_text = "、".join(missing)
+        raise PackingSlipReadError(f"明细表缺少核心表头：{missing_text}")
 
     normalized_headers = [_header_text(header) for header in headers]
     mapped_rows = []
