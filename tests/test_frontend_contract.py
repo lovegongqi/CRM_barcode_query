@@ -564,6 +564,16 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("沈桥仓", inbound)
         self.assertIn("仅保存，不审核", inbound)
 
+    def test_inbound_gyj_login_uses_backend_credentials_contract(self):
+        inbound = self.source("inbound.html")
+        for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in ("loadGYJCredentials", "startGYJBackgroundLogin", "submitGYJCaptcha"):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/credentials'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login/captcha'", inbound)
+
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
         inbound = self.source("inbound.html")
         self.assertIn("function escapeHtml", inbound)
