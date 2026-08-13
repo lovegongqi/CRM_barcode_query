@@ -402,7 +402,9 @@ class _QuantityInput:
         self.typed += value
         self.value = value
 
-    def evaluate(self, script):
+    def evaluate(self, script, value=None):
+        if value is not None:
+            self.value = str(value)
         return self.value
 
 
@@ -421,7 +423,9 @@ class _CommittedQuantityInput(_QuantityInput):
         super().__init__()
         self.committed = False
 
-    def evaluate(self, script):
+    def evaluate(self, script, value=None):
+        if value is not None:
+            self.value = str(value)
         return self.value if self.committed else ""
 
 
@@ -441,7 +445,7 @@ class _RejectedQuantityInput(_QuantityInput):
     def type(self, value):
         self.attempted = value
 
-    def evaluate(self, script):
+    def evaluate(self, script, value=None):
         if "=> ({" in script:
             return {"value": self.value, "id": "operNumber_jet-test", "type": "text"}
         return self.value
@@ -1129,8 +1133,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter._fill_quantity(row, 10)
 
         self.assertEqual(row.quantity_input.value, "10")
-        self.assertEqual(row.quantity_input.typed, "10")
-        self.assertEqual(row.quantity_input.keys, ["ControlOrMeta+A", "Enter", "Tab"])
+        self.assertEqual(row.quantity_input.typed, "")
+        self.assertEqual(row.quantity_input.keys, ["Tab"])
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
 
     def test_waits_for_unbarcoded_quantity_to_commit_before_continuing(self):
