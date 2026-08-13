@@ -232,12 +232,16 @@ class _QuantityInput:
     def __init__(self):
         self.value = ""
         self.key = ""
+        self.waited = None
 
     def count(self):
         return 1
 
     def fill(self, value):
         self.value = value
+
+    def wait_for(self, state, timeout):
+        self.waited = (state, timeout)
 
     def press(self, key):
         self.key = key
@@ -698,6 +702,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertEqual(row.quantity_input.value, "10")
         self.assertEqual(row.quantity_input.key, "Tab")
+        self.assertEqual(row.quantity_input.waited, ("visible", 5000))
 
     def test_inserts_another_row_after_the_first_prepared_line(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())

@@ -296,6 +296,10 @@ class GYJPlaywrightPage:
 
     def _fill_quantity(self, row, quantity):
         quantity_input = row.locator('input[id^="operNumber_"]')
+        try:
+            quantity_input.wait_for(state="visible", timeout=5000)
+        except Exception as error:
+            raise GYJInboundError("未找到 GYJ 无条码数量输入框") from error
         if quantity_input.count() != 1:
             raise GYJInboundError("未找到 GYJ 无条码数量输入框")
         quantity_input.fill(str(quantity))
