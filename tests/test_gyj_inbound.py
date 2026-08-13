@@ -315,6 +315,7 @@ class _SelectSearchInput:
         self.first = self
         self.force = False
         self.focused = False
+        self.clicked = False
 
     def count(self):
         return 1
@@ -325,6 +326,9 @@ class _SelectSearchInput:
 
     def focus(self):
         self.focused = True
+
+    def click(self, force=False):
+        self.clicked = force
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -642,6 +646,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.select_header("供应商", "昆山怡口净水")
 
         self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertTrue(adapter.form.field.trigger.search_input.clicked)
         self.assertTrue(adapter.form.field.trigger.search_input.focused)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertTrue(adapter.form.field.trigger.search_input.force)
