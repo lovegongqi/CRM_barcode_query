@@ -141,7 +141,7 @@ body[data-aurora-page] .page-nav a.active::before {
     box-shadow: 0 0 12px rgba(87, 227, 255, .65);
 }
 
-.aurora-nav-glyph { font-size: 17px; font-weight: 750; line-height: 1; transform: translateY(-1px); }
+.aurora-nav-glyph { display:inline-block; width:1em; font-size: 17px; font-weight: 750; line-height: 1; text-align:center; transform: translateY(-1px); }
 .aurora-nav-label { display: block; overflow: hidden; font-size: 11px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
 
 body[data-aurora-page] .header,
