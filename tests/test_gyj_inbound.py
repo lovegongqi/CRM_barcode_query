@@ -2,6 +2,7 @@ import unittest
 
 from gyj_inbound import (
     GYJInboundError,
+    GYJPlaywrightPage,
     GYJPurchaseInboundWriter,
     build_gyj_purchase_lines,
 )
@@ -113,6 +114,177 @@ class FakeGYJPage:
         return "CG202608130001"
 
 
+class _DelayedNewButton:
+    def __init__(self):
+        self.ready = False
+        self.clicked = False
+        self.last = self
+
+    def count(self):
+        return 1 if self.ready else 0
+
+    def wait_for(self, state, timeout):
+        self.ready = True
+
+    def click(self):
+        if not self.ready:
+            raise AssertionError("新增按钮尚未渲染")
+        self.clicked = True
+
+
+class _VisibleForm:
+    def __init__(self):
+        self.last = self
+
+    def count(self):
+        return 1
+
+
+class _PurchaseInboundListPage:
+    def __init__(self):
+        self.new_button = _DelayedNewButton()
+        self.modal = _VisibleForm()
+        self.goto_url = ""
+
+    def goto(self, url, **kwargs):
+        self.goto_url = url
+
+    def locator(self, selector):
+        if selector == ".table-operator button.ant-btn-primary":
+            return self.new_button
+        if selector == ".ant-modal:visible":
+            return self.modal
+        raise AssertionError(f"unexpected selector: {selector}")
+
+    def get_by_text(self, text, exact):
+        raise AssertionError("新增按钮必须等待采购入库工具栏渲染后按 CSS 定位")
+
+
+class _SaveButton:
+    def __init__(self):
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _MissingButton:
+    def count(self):
+        return 0
+
+
+class _ActualGYJSaveForm:
+    def __init__(self):
+        self.save_button = _SaveButton()
+
+    def get_by_text(self, text, exact):
+        if text == "保存（Ctrl+S）" and exact:
+            return self.save_button
+        return _MissingButton()
+
+
+class _ActualGYJSavePage:
+    def wait_for_timeout(self, timeout):
+        self.timeout = timeout
+
+    def locator(self, selector):
+        if selector != "body":
+            raise AssertionError(f"unexpected selector: {selector}")
+        return self
+
+    def inner_text(self):
+        return "保存成功"
+
+
+class _RowCollection:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def count(self):
+        return len(self.rows)
+
+    def nth(self, index):
+        return self.rows[index]
+
+
+class _ActualInboundRowsForm:
+    def __init__(self):
+        self.header = object()
+        self.entry = object()
+        self.summary = object()
+
+    def locator(self, selector):
+        if selector == ".tr":
+            return _RowCollection([self.header, self.entry, self.summary])
+        if selector == "tr":
+            return _RowCollection([])
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _QuantityInput:
+    def __init__(self):
+        self.value = ""
+        self.key = ""
+
+    def count(self):
+        return 1
+
+    def fill(self, value):
+        self.value = value
+
+    def press(self, key):
+        self.key = key
+
+
+class _ActualInboundRow:
+    def __init__(self):
+        self.quantity_input = _QuantityInput()
+
+    def locator(self, selector):
+        if selector == 'input[id^="operNumber_"]':
+            return self.quantity_input
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _InsertLineButton:
+    def __init__(self):
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _InsertLineForm:
+    def __init__(self):
+        self.button = _InsertLineButton()
+
+    def get_by_text(self, text, exact):
+        if text == "插入行" and exact:
+            return self.button
+        return _MissingButton()
+
+
+class _WarehouseValue:
+    def count(self):
+        return 1
+
+    def inner_text(self):
+        return "沈桥仓"
+
+
+class _WarehouseForm:
+    def locator(self, selector):
+        if selector == '[id^="depotId_"] .ant-select-selection-selected-value':
+            return _WarehouseValue()
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 class GYJInboundWriterTest(unittest.TestCase):
     def setUp(self):
         self.lines = [{
@@ -146,6 +318,64 @@ class GYJInboundWriterTest(unittest.TestCase):
             GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
 
         self.assertNotIn("保存", page.clicked)
+
+
+class GYJPurchaseInboundPageTest(unittest.TestCase):
+    def test_waits_for_purchase_inbound_new_button_before_clicking(self):
+        page = _PurchaseInboundListPage()
+
+        adapter = GYJPlaywrightPage(page)
+        adapter.open_new_form()
+
+        self.assertTrue(page.new_button.clicked)
+        self.assertIs(adapter.form, page.modal)
+
+    def test_uses_actual_plain_save_button_label(self):
+        form = _ActualGYJSaveForm()
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = form
+
+        adapter.click_plain_save()
+
+        self.assertTrue(form.save_button.clicked)
+
+    def test_finds_the_entry_row_between_header_and_summary(self):
+        form = _ActualInboundRowsForm()
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = form
+
+        row = adapter._entry_row()
+
+        self.assertIs(row, form.entry)
+
+    def test_fills_quantity_by_its_row_specific_input_id(self):
+        row = _ActualInboundRow()
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+
+        adapter._fill_quantity(row, 10)
+
+        self.assertEqual(row.quantity_input.value, "10")
+        self.assertEqual(row.quantity_input.key, "Tab")
+
+    def test_inserts_another_row_after_the_first_prepared_line(self):
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = _InsertLineForm()
+        adapter._entered_lines = [{"product_code": "926019528"}]
+        adapter._entry_row = lambda: object()
+        adapter._choose_product = lambda row, code: None
+        adapter._fill_quantity = lambda row, quantity: None
+
+        adapter.add_product_line({"product_code": "906018301", "serials": [], "quantity": 60})
+
+        self.assertTrue(adapter.form.button.clicked)
+
+    def test_accepts_the_visible_default_warehouse_for_the_first_row(self):
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = _WarehouseForm()
+
+        adapter.select_header("仓库", "沈桥仓")
+
+        self.assertEqual(adapter._headers, {"仓库": "沈桥仓"})
 
 
 if __name__ == "__main__":

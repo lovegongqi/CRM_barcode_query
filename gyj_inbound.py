@@ -110,7 +110,8 @@ class GYJPlaywrightPage:
 
     def open_new_form(self):
         self.page.goto(GYJ_PURCHASE_IN_URL, wait_until="domcontentloaded", timeout=60000)
-        new_button = self.page.get_by_text("新增", exact=True)
+        new_button = self.page.locator(".table-operator button.ant-btn-primary")
+        new_button.wait_for(state="visible", timeout=15000)
         if new_button.count() != 1:
             raise GYJInboundError("未找到 GYJ 采购入库的新增按钮")
         new_button.click()
@@ -119,6 +120,14 @@ class GYJPlaywrightPage:
     def select_header(self, label, value):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
+        if label == "仓库":
+            warehouse = self.form.locator(
+                '[id^="depotId_"] .ant-select-selection-selected-value'
+            )
+            if warehouse.count() != 1 or warehouse.inner_text().strip() != value:
+                raise GYJInboundError(f"GYJ 明细行仓库不是：{value}")
+            self._headers[label] = value
+            return
         field = self.form.locator(".ant-form-item").filter(has_text=label)
         if field.count() != 1:
             raise GYJInboundError(f"未找到 GYJ 表头字段：{label}")
@@ -147,12 +156,10 @@ class GYJPlaywrightPage:
     def _entry_row(self):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
-        rows = self.form.locator("tr").filter(
-            has=self.form.locator("button.ant-btn.ant-btn-icon-only")
-        )
-        if rows.count() < 1:
+        rows = self.form.locator(".tr")
+        if rows.count() < 3:
             raise GYJInboundError("未找到 GYJ 入库明细行")
-        return rows.last
+        return rows.nth(rows.count() - 2)
 
     def _choose_product(self, row, product_code):
         product_button = row.locator("button.ant-btn.ant-btn-icon-only")
@@ -197,14 +204,15 @@ class GYJPlaywrightPage:
         self._click_exact(modal, "确 定")
 
     def _fill_quantity(self, row, quantity):
-        inputs = row.locator('input:not([disabled])')
-        if inputs.count() < 1:
+        quantity_input = row.locator('input[id^="operNumber_"]')
+        if quantity_input.count() != 1:
             raise GYJInboundError("未找到 GYJ 无条码数量输入框")
-        quantity_input = inputs.last
         quantity_input.fill(str(quantity))
         quantity_input.press("Tab")
 
     def add_product_line(self, line):
+        if self._entered_lines:
+            self._click_exact(self.form, "插入行")
         row = self._entry_row()
         self._choose_product(row, line["product_code"])
         if line.get("serials"):
@@ -229,7 +237,7 @@ class GYJPlaywrightPage:
     def click_plain_save(self):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
-        save = self.form.get_by_text("保存", exact=True)
+        save = self.form.get_by_text("保存（Ctrl+S）", exact=True)
         if save.count() != 1:
             raise GYJInboundError("未找到唯一的 GYJ 普通保存按钮")
         save.click()
