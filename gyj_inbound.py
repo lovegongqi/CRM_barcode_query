@@ -134,6 +134,8 @@ class GYJPlaywrightPage:
         field = field.first
         trigger = field.locator(".ant-select-selector").first
         if trigger.count() != 1:
+            trigger = field.locator(".ant-select-selection").first
+        if trigger.count() != 1:
             raise GYJInboundError(f"GYJ 表头字段不是可选项：{label}")
         trigger.click()
         dropdown = self.page.locator(".ant-select-dropdown:visible")

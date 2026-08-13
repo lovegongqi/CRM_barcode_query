@@ -285,6 +285,95 @@ class _WarehouseForm:
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _LegacySelectTrigger:
+    def __init__(self):
+        self.clicked = False
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _MissingSelect:
+    def __init__(self):
+        self.first = self
+
+    def count(self):
+        return 0
+
+
+class _LegacyHeaderField:
+    def __init__(self):
+        self.trigger = _LegacySelectTrigger()
+        self.first = self
+
+    def locator(self, selector):
+        if selector == ".ant-select-selection":
+            return self.trigger
+        return _MissingSelect()
+
+
+class _HeaderFieldCollection:
+    def __init__(self, field):
+        self.field = field
+        self.first = field
+
+    def count(self):
+        return 1
+
+    def filter(self, **kwargs):
+        return self
+
+
+class _HeaderChoice:
+    def __init__(self):
+        self.clicked = False
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _LegacyHeaderDropdown:
+    def __init__(self):
+        self.choice = _HeaderChoice()
+        self.last = self
+
+    def count(self):
+        return 1
+
+    def get_by_text(self, text, exact):
+        if text == "昆山怡口净水系统有限公司" and exact:
+            return self.choice
+        return _MissingButton()
+
+
+class _LegacyHeaderForm:
+    def __init__(self):
+        self.field = _LegacyHeaderField()
+        self.fields = _HeaderFieldCollection(self.field)
+
+    def locator(self, selector):
+        if selector == ".ant-form-item":
+            return self.fields
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _LegacyHeaderPage:
+    def __init__(self):
+        self.dropdown = _LegacyHeaderDropdown()
+
+    def locator(self, selector):
+        if selector == ".ant-select-dropdown:visible":
+            return self.dropdown
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 class GYJInboundWriterTest(unittest.TestCase):
     def setUp(self):
         self.lines = [{
@@ -376,6 +465,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.select_header("仓库", "沈桥仓")
 
         self.assertEqual(adapter._headers, {"仓库": "沈桥仓"})
+
+    def test_selects_supplier_from_legacy_ant_design_select(self):
+        page = _LegacyHeaderPage()
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _LegacyHeaderForm()
+
+        adapter.select_header("供应商", "昆山怡口净水系统有限公司")
+
+        self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertTrue(page.dropdown.choice.clicked)
+        self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
 
 
 if __name__ == "__main__":
