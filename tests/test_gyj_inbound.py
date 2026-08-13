@@ -298,6 +298,9 @@ class _LegacySelectTrigger:
         self.key = ""
         self.first = self
 
+    def bounding_box(self):
+        return {"x": 100, "y": 200, "width": 260, "height": 36}
+
     def count(self):
         return 1
 
@@ -539,6 +542,7 @@ class _LegacyHeaderPage:
     def __init__(self, choice_text="昆山怡口净水系统有限公司"):
         self.dropdown = _LegacyHeaderDropdown(choice_text)
         self.selectors = []
+        self.mouse = _PageMouse()
 
     def locator(self, selector):
         self.selectors.append(selector)
@@ -548,6 +552,14 @@ class _LegacyHeaderPage:
 
     def wait_for_timeout(self, timeout):
         self.timeout = timeout
+
+
+class _PageMouse:
+    def __init__(self):
+        self.clicks = []
+
+    def click(self, x, y):
+        self.clicks.append((x, y))
 
 
 class _DelayedSelectedLegacyHeaderPage(_LegacyHeaderPage):
@@ -663,9 +675,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水系统有限公司")
 
-        self.assertTrue(adapter.form.field.trigger.clicked)
-        self.assertFalse(adapter.form.field.trigger.force)
-        self.assertEqual(adapter.form.field.trigger.timeout, 10000)
+        self.assertEqual(page.mouse.clicks, [(230.0, 218.0)])
         self.assertEqual(page.dropdown.waited, ("attached", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
@@ -677,9 +687,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(adapter.form.field.trigger.clicked)
-        self.assertFalse(adapter.form.field.trigger.force)
-        self.assertEqual(adapter.form.field.trigger.timeout, 10000)
+        self.assertEqual(page.mouse.clicks, [(230.0, 218.0)])
         self.assertTrue(adapter.form.field.trigger.search_input.focused)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertFalse(adapter.form.field.trigger.search_input.force)
@@ -727,8 +735,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(form.field.trigger.clicked)
-        self.assertFalse(form.field.trigger.force)
+        self.assertEqual(page.mouse.clicks, [(230.0, 218.0)])
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
