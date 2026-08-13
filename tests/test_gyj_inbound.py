@@ -193,6 +193,19 @@ class _ActualGYJSaveForm:
             return self.save_button
         return _MissingButton()
 
+    def locator(self, selector):
+        if selector == "button":
+            return _SaveButtonCollection(["取 消", "保存并审核", "保存"])
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _SaveButtonCollection:
+    def __init__(self, labels):
+        self.labels = labels
+
+    def all_inner_texts(self):
+        return self.labels
+
 
 class _ActualGYJSavePage:
     def wait_for_timeout(self, timeout):
@@ -783,6 +796,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.click_plain_save()
 
         self.assertTrue(form.save_button.clicked)
+
+    def test_reports_actual_button_labels_when_plain_save_is_not_unique(self):
+        form = _ActualGYJSaveForm()
+        form.get_by_role = lambda *args, **kwargs: _MissingButton()
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = form
+
+        with self.assertRaisesRegex(GYJInboundError, r"可用按钮：取 消 \| 保存并审核 \| 保存"):
+            adapter.click_plain_save()
 
     def test_finds_the_entry_row_between_header_and_summary(self):
         form = _ActualInboundRowsForm()

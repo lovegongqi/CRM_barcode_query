@@ -339,7 +339,12 @@ class GYJPlaywrightPage:
             raise GYJInboundError("GYJ 入库表单尚未打开")
         save = self.form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
         if save.count() != 1:
-            raise GYJInboundError("未找到唯一的 GYJ 普通保存按钮")
+            try:
+                labels = [text.strip() for text in self.form.locator("button").all_inner_texts()]
+            except Exception:
+                labels = []
+            suffix = f"（可用按钮：{' | '.join(label for label in labels if label)}）" if labels else ""
+            raise GYJInboundError(f"未找到唯一的 GYJ 普通保存按钮{suffix}")
         save.click()
         self.page.wait_for_timeout(800)
         page_text = self.page.locator("body").inner_text()
