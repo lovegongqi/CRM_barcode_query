@@ -451,6 +451,22 @@ class _RejectedQuantityRow(_ActualInboundRow):
     def __init__(self):
         self.quantity_input = _RejectedQuantityInput()
 
+    def inner_text(self):
+        return "条码 746037027 数量 1"
+
+    def locator(self, selector):
+        if selector == "input":
+            return _QuantityInputCollection([self.quantity_input])
+        return super().locator(selector)
+
+
+class _QuantityInputCollection:
+    def __init__(self, inputs):
+        self.inputs = inputs
+
+    def evaluate_all(self, script):
+        return [{"id": item.evaluate("element => ({")['id'], "value": item.value} for item in self.inputs]
+
 
 class _QuantityCommitPage(_ActualGYJSavePage):
     def __init__(self, row):
@@ -1131,7 +1147,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         row = _RejectedQuantityRow()
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
 
-        with self.assertRaisesRegex(GYJInboundError, r"应为 4.*当前值=1.*operNumber_jet-test"):
+        with self.assertRaisesRegex(GYJInboundError, r"应为 4.*当前值=1.*operNumber_jet-test.*746037027"):
             adapter._fill_quantity(row, 4)
 
     def test_waits_for_serial_entry_icon_after_product_selection(self):

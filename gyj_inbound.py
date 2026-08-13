@@ -362,6 +362,22 @@ class GYJPlaywrightPage:
         details = f"当前值={state.get('value', current_value) or '空'}"
         if state.get("id"):
             details += f"，输入框={state['id']}"
+        try:
+            row_text = " ".join(str(row.inner_text() or "").split())[:240]
+        except Exception:
+            row_text = ""
+        try:
+            row_inputs = row.locator("input").evaluate_all(
+                "elements => elements.map(element => ({id: element.id || '', value: element.value || ''}))"
+            ) or []
+        except Exception:
+            row_inputs = []
+        if row_text:
+            details += f"，行内容={row_text}"
+        if row_inputs:
+            details += "，行输入=" + " | ".join(
+                f"{item.get('id', '无ID')}={item.get('value', '')}" for item in row_inputs
+            )
         raise GYJInboundError(f"GYJ 无条码配件数量未回写（应为 {quantity}，{details}）")
 
     def add_product_line(self, line):
