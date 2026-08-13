@@ -1004,6 +1004,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn('data-copy="${escapeHtml(item.product_code)}"', inbound)
         self.assertIn('data-copy="${escapeHtml(item.description || \'无物料描述\')}"', inbound)
         self.assertNotIn("· 订单 ${escapeHtml(orders", inbound)
+        self.assertNotIn('class="inbound-product-total"', inbound)
 
     def test_inbound_result_surfaces_use_dark_contrast_without_gyj_state_cards(self):
         inbound = self.source("inbound.html")

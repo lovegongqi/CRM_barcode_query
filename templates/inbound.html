@@ -60,7 +60,6 @@
         .inbound-product-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px; }
         .inbound-product-title .inbound-copy { font-weight:800; }
         .inbound-product-title .inbound-product-name { font-weight:600; }
-        .inbound-product-total { color:#8eeaff; font-size:12px; }
         .inbound-product-toggle { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-weight:700; cursor:pointer; }
         .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; background:rgba(5,17,33,.84); }
         .inbound-serial-batch { display:flex; align-items:center; gap:7px; width:100%; }
@@ -367,7 +366,6 @@ function renderInboundResult(result) {
         const serials = item.serials || [];
         const unbarcoded = Number(item.unbarcoded_quantity) || 0;
         const productId = `item-${index}`;
-        const total = item.expected_quantity == null ? serials.length + unbarcoded : item.expected_quantity;
         const serialBatches = [];
         for (let index = 0; index < serials.length; index += 100) {
             const batch = serials.slice(index, index + 100);
@@ -375,7 +373,7 @@ function renderInboundResult(result) {
         }
         return `<section class="inbound-product">
             <div class="inbound-product-head" onclick="toggleInboundSerials('${productId}')">
-                <div class="inbound-product-title"><button class="inbound-copy" data-copy="${escapeHtml(item.product_code)}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.product_code)}</button><button class="inbound-copy inbound-product-name" data-copy="${escapeHtml(item.description || '无物料描述')}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.description || '无物料描述')}</button><span class="inbound-product-total">· ${escapeHtml(total)} 件</span></div>
+                <div class="inbound-product-title"><button class="inbound-copy" data-copy="${escapeHtml(item.product_code)}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.product_code)}</button><button class="inbound-copy inbound-product-name" data-copy="${escapeHtml(item.description || '无物料描述')}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.description || '无物料描述')}</button></div>
                 <button class="inbound-product-toggle" id="inboundToggle-${productId}" onclick="event.stopPropagation();toggleInboundSerials('${productId}')">展开条码</button>
             </div>
             <div class="inbound-serials" id="inboundSerials-${productId}" hidden>${serialBatches.join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
