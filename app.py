@@ -3736,8 +3736,23 @@ class GYJSession:
     def _captcha_input(self):
         return self._first_visible([
             "input[placeholder*='验证码']", "input[name*='captcha']",
-            "input[name*='verify']", "input[id*='captcha']", "input[id*='verify']",
+            "input[name*='verify']", "input[id*='captcha']", "input[id*='verify']", "#inputCode",
         ])
+
+    def _wait_for_login_form(self, attempts=60, interval_ms=250):
+        for _ in range(attempts):
+            username_input = self._first_visible([
+                "input[name='username']", "input[name='userName']", "input[name='account']",
+                "input[placeholder*='账号']", "input[placeholder*='用户名']", "input[type='text']",
+            ])
+            password_input = self._first_visible([
+                "input[name='password']", "input[name='pwd']", "input[type='password']",
+            ])
+            captcha_input = self._captcha_input()
+            if username_input and password_input and captcha_input:
+                return username_input, password_input
+            self.page.wait_for_timeout(interval_ms)
+        return None, None
 
     def captcha_preview(self):
         """返回当前可见验证码图片；只保存在本次 API 响应内。"""
@@ -3767,35 +3782,14 @@ class GYJSession:
                 if not self._ensure_browser():
                     return False, "GYJ 浏览器未启动"
                 self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
-                username_input = self._first_visible([
-                    "input[name='username']", "input[name='userName']", "input[name='account']",
-                    "input[placeholder*='账号']", "input[placeholder*='用户名']", "input[type='text']",
-                ])
-                password_input = self._first_visible([
-                    "input[name='password']", "input[name='pwd']", "input[type='password']",
-                ])
+                username_input, password_input = self._wait_for_login_form()
                 if not username_input or not password_input:
-                    return False, "未找到 GYJ 登录账号或密码输入框"
+                    return False, "未找到 GYJ 登录表单或验证码输入框"
                 username_input.fill(username)
                 password_input.fill(password)
-                login_button = self._first_visible([
-                    "button[type='submit']", "button:has-text('登录')", "input[type='submit']",
-                ])
-                if not login_button:
-                    return False, "未找到 GYJ 登录按钮"
-                login_button.click()
-                self.page.wait_for_timeout(1200)
-                if not self._is_login_page():
-                    self.logged_in = True
-                    self.waiting_captcha = False
-                    return True, "GYJ 登录成功"
-                if self._captcha_input():
-                    self.logged_in = False
-                    self.waiting_captcha = True
-                    return True, "GYJ 等待验证码"
                 self.logged_in = False
-                self.waiting_captcha = False
-                return False, "GYJ 登录失败，请检查账号和密码"
+                self.waiting_captcha = True
+                return True, "GYJ 等待验证码"
             except Exception as error:
                 self.logged_in = False
                 self.waiting_captcha = False
