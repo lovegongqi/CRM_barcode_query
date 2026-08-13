@@ -248,6 +248,10 @@ class GYJPlaywrightPage:
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
         rows = self.form.locator(".tr")
+        try:
+            rows.wait_for(state="attached", timeout=5000)
+        except Exception as error:
+            raise GYJInboundError("未找到 GYJ 入库明细行") from error
         if rows.count() < 3:
             raise GYJInboundError("未找到 GYJ 入库明细行")
         return rows.nth(rows.count() - 2)

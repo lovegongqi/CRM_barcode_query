@@ -211,6 +211,9 @@ class _RowCollection:
     def count(self):
         return len(self.rows)
 
+    def wait_for(self, state, timeout):
+        self.waited = (state, timeout)
+
     def nth(self, index):
         return self.rows[index]
 
@@ -220,10 +223,11 @@ class _ActualInboundRowsForm:
         self.header = object()
         self.entry = object()
         self.summary = object()
+        self.rows = _RowCollection([self.header, self.entry, self.summary])
 
     def locator(self, selector):
         if selector == ".tr":
-            return _RowCollection([self.header, self.entry, self.summary])
+            return self.rows
         if selector == "tr":
             return _RowCollection([])
         raise AssertionError(f"unexpected selector: {selector}")
@@ -761,6 +765,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         row = adapter._entry_row()
 
         self.assertIs(row, form.entry)
+        self.assertEqual(form.rows.waited, ("attached", 5000))
 
     def test_fills_quantity_by_its_row_specific_input_id(self):
         row = _ActualInboundRow()
