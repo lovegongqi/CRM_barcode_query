@@ -574,6 +574,8 @@ class _LegacyHeaderPage:
         self.selectors.append(selector)
         if selector in ('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', ".ant-select-dropdown"):
             return self.dropdown
+        if selector == ".introjs-skipbutton:visible":
+            return _MissingButton()
         raise AssertionError(f"unexpected selector: {selector}")
 
     def wait_for_timeout(self, timeout):
@@ -602,6 +604,29 @@ class _SupplierDiagnosticsPage(_LegacyHeaderPage):
     def __init__(self):
         super().__init__("昆山怡口净水")
         self.dropdown = _FailingHeaderDropdown("昆山怡口净水")
+
+
+class _TourSkipButton:
+    def __init__(self):
+        self.clicked = False
+        self.last = self
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _TourHeaderPage(_LegacyHeaderPage):
+    def __init__(self):
+        super().__init__("昆山怡口净水")
+        self.skip = _TourSkipButton()
+
+    def locator(self, selector):
+        if selector == ".introjs-skipbutton:visible":
+            return self.skip
+        return super().locator(selector)
 
 
 class GYJInboundWriterTest(unittest.TestCase):
@@ -721,6 +746,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertIn('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', page.selectors)
         self.assertNotIn(".ant-select-dropdown", page.selectors)
+
+    def test_dismisses_gyj_intro_tour_before_opening_supplier(self):
+        page = _TourHeaderPage()
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _SearchableLegacyHeaderForm()
+
+        adapter.select_header("供应商", "昆山怡口净水")
+
+        self.assertTrue(page.skip.clicked)
 
     def test_reports_supplier_control_state_when_candidate_menu_never_attaches(self):
         page = _SupplierDiagnosticsPage()

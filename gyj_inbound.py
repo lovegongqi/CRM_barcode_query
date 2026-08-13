@@ -99,6 +99,14 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 入库表单")
         return modal.last
 
+    def _dismiss_intro_tour(self):
+        try:
+            skip = self.page.locator(".introjs-skipbutton:visible")
+            if skip.count():
+                skip.last.click()
+        except Exception:
+            pass
+
     @staticmethod
     def _supplier_control_state(trigger):
         try:
@@ -152,6 +160,7 @@ class GYJPlaywrightPage:
     def select_header(self, label, value):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
+        self._dismiss_intro_tour()
         if label == "仓库":
             warehouse = self.form.locator(
                 '[id^="depotId_"] .ant-select-selection-selected-value'
