@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 
 from gyj_inbound import (
     GYJInboundError,
@@ -790,6 +791,19 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.add_product_line({"product_code": "906018301", "serials": [], "quantity": 60})
 
         self.assertTrue(adapter.form.button.clicked)
+
+    def test_reacquires_current_row_after_product_selection_for_serials(self):
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        before_selection = object()
+        after_selection = object()
+        adapter._entry_row = mock.Mock(side_effect=[before_selection, after_selection])
+        adapter._choose_product = mock.Mock()
+        adapter._fill_serials = mock.Mock()
+
+        adapter.add_product_line({"product_code": "996032157", "serials": ["8432604240024"], "quantity": 1})
+
+        adapter._choose_product.assert_called_once_with(before_selection, "996032157")
+        adapter._fill_serials.assert_called_once_with(after_selection, ["8432604240024"])
 
     def test_accepts_the_visible_default_warehouse_for_the_first_row(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())

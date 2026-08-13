@@ -312,6 +312,7 @@ class GYJPlaywrightPage:
             self._click_exact(self.form, "插入行")
         row = self._entry_row()
         self._choose_product(row, line["product_code"])
+        row = self._entry_row()
         if line.get("serials"):
             self._fill_serials(row, line["serials"])
         else:
