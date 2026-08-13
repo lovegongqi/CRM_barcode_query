@@ -983,6 +983,7 @@ class FrontendContractTest(unittest.TestCase):
     def test_inbound_page_has_shared_history_actions(self):
         inbound = self.source("inbound.html")
         self.assertIn('id="inboundHistory"', inbound)
+        self.assertIn('.inbound-progress[hidden] { display:none !important; }', inbound)
         self.assertIn("function loadInboundHistory", inbound)
         self.assertIn("function selectInboundHistory", inbound)
         self.assertIn("function deleteInboundHistory", inbound)
