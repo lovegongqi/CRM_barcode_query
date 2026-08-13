@@ -372,6 +372,41 @@ class InboundCRMTest(unittest.TestCase):
         self.assertEqual(reader.lookup_count, 3)
         self.assertEqual(reader.field.value, "SH202607210002")
 
+    def test_uses_enter_for_quick_search_when_the_list_has_no_text_button(self):
+        class Field:
+            def __init__(self):
+                self.value = ""
+                self.key = ""
+
+            def fill(self, value):
+                self.value = value
+
+            def press(self, key):
+                self.key = key
+
+        class Reader(PackingSlipCRMReader):
+            def __init__(self):
+                super().__init__(session=None)
+                self.field = Field()
+
+            def _find_labeled_input(self, label):
+                return self.field
+
+            def _click_exact_text(self, text):
+                return False
+
+            def _open_matching_result(self, packing_slip_no):
+                return self.field.value == packing_slip_no and self.field.key == "Enter"
+
+            def _pause(self, milliseconds=300):
+                return None
+
+        reader = Reader()
+
+        reader._search_and_open("SH202607210002")
+
+        self.assertEqual(reader.field.key, "Enter")
+
     def test_reports_visible_field_metadata_without_reading_values(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()

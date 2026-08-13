@@ -215,7 +215,10 @@ class PackingSlipCRMReader:
             raise PackingSlipReadError(f"未找到装箱单号输入框{suffix}")
         field.fill(packing_slip_no)
         if not (self._click_exact_text("查询") or self._click_exact_text("搜索")):
-            raise PackingSlipReadError("未找到查询按钮")
+            try:
+                field.press("Enter")
+            except Exception as error:
+                raise PackingSlipReadError("未找到查询按钮") from error
         self._pause()
         if not self._open_matching_result(packing_slip_no):
             raise PackingSlipReadError(f"未找到完全匹配的装箱单：{packing_slip_no}")
