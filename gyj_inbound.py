@@ -194,10 +194,7 @@ class GYJPlaywrightPage:
         ):
             self._headers[label] = value
             return
-        box = trigger.bounding_box()
-        if not box:
-            raise GYJInboundError(f"GYJ {label} 控件不可点击")
-        self.page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        trigger.click(force=True)
         search_input = trigger.locator("input").first
         if search_input.count() != 1:
             search_input = field.locator("input").first
