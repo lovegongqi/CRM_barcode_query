@@ -135,6 +135,24 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
 
 
 class GYJLoginFlowTest(unittest.TestCase):
+    def test_step1_waits_for_reactive_login_form_before_giving_up(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        username_input = mock.Mock()
+        password_input = mock.Mock()
+        captcha_input = mock.Mock()
+        session.page = mock.Mock()
+        session._ensure_browser = mock.Mock(return_value=True)
+        session._first_visible = mock.Mock(
+            side_effect=[None, None, username_input, password_input]
+        )
+        session._captcha_input = mock.Mock(return_value=captcha_input)
+
+        success, message = session.login_step1("gyj-user", "secret")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 等待验证码")
+        self.assertTrue(session.page.wait_for_timeout.called)
+
     def test_step1_returns_captcha_without_submitting_incomplete_login_form(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         username_input = mock.Mock()
