@@ -4,6 +4,9 @@ class GYJInboundError(RuntimeError):
 
 MAX_SERIALS_PER_LINE = 100
 MAX_SERIAL_TEXT_LENGTH = 2000
+GYJ_SUPPLIER = "昆山怡口净水系统有限公司"
+GYJ_SETTLEMENT_ACCOUNT = "江西天麓"
+GYJ_WAREHOUSE = "沈桥仓"
 
 
 def build_gyj_purchase_lines(result):
@@ -46,6 +49,38 @@ def build_gyj_purchase_lines(result):
     if not lines:
         raise GYJInboundError("没有可创建 GYJ 入库单的明细")
     return lines
+
+
+class GYJPurchaseInboundWriter:
+    def __init__(self, page, log=None, progress=None):
+        self.page = page
+        self.log = log
+        self.progress = progress
+
+    def _emit(self, message):
+        if self.log:
+            self.log(message)
+
+    def save_packing_slip(self, packing_slip_no, lines):
+        if not lines:
+            raise GYJInboundError("没有可保存的 GYJ 入库明细")
+        self._emit("正在新建 GYJ 采购入库单")
+        self.page.open_new_form()
+        self.page.select_header("供应商", GYJ_SUPPLIER)
+        self.page.select_header("结算账户", GYJ_SETTLEMENT_ACCOUNT)
+        self.page.select_header("仓库", GYJ_WAREHOUSE)
+        self.page.fill_remark(f"装箱单号：{packing_slip_no}")
+        for index, line in enumerate(lines, start=1):
+            self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
+            self.page.add_product_line(line)
+            if self.progress:
+                self.progress({"current_line": index, "total_lines": len(lines)})
+        self._emit("正在核对 GYJ 采购入库单")
+        self.page.verify_form(packing_slip_no, lines)
+        self._emit("核对通过，正在保存 GYJ 采购入库单")
+        order_no = self.page.click_plain_save()
+        self._emit("GYJ 采购入库单已保存")
+        return {"packing_slip_no": packing_slip_no, "order_no": order_no or ""}
 
 
 def _serial_chunks(serials):
