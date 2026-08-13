@@ -72,6 +72,9 @@ class FakeGYJWorker:
         self.logged_in = True
         return True, "GYJ 登录成功"
 
+    def captcha_preview(self):
+        return "data:image/png;base64,ZmFrZQ=="
+
     def check_login_status(self):
         return self.logged_in, ""
 
@@ -311,6 +314,16 @@ class InboundRouteTest(unittest.TestCase):
         self.assertTrue(response.get_json()["success"])
         self.assertEqual(worker.owner, "admin")
         self.assertEqual(worker.login_calls, [("gyj-user", "secret")])
+
+    def test_gyj_captcha_preview_is_returned_only_for_current_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.get("/api/inbound/gyj/captcha-preview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
+        self.assertEqual(worker.owner, "admin")
 
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):
         client = self._login("admin", "88293529")

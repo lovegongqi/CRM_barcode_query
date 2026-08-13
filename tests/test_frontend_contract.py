@@ -574,6 +574,14 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("fetch('/api/inbound/gyj/credentials'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/login/captcha'", inbound)
 
+    def test_inbound_gyj_captcha_preview_can_be_refreshed_without_storage(self):
+        inbound = self.source("inbound.html")
+        for element_id in ("gyjCaptchaImage", "gyjCaptchaRefreshBtn"):
+            self.assertIn(f'id="{element_id}"', inbound)
+        self.assertIn("function refreshGYJCaptchaPreview", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/captcha-preview'", inbound)
+        self.assertNotIn("gyj_captcha_image", inbound)
+
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
         inbound = self.source("inbound.html")
         self.assertIn("function escapeHtml", inbound)

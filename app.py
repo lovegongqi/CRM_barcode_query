@@ -9,6 +9,7 @@ os.environ['ASYNCIO_CORE_EVENT_LOOP'] = '0'
 
 import re
 import json
+import base64
 import sqlite3
 import time
 import builtins
@@ -3738,6 +3739,25 @@ class GYJSession:
             "input[name*='verify']", "input[id*='captcha']", "input[id*='verify']",
         ])
 
+    def captcha_preview(self):
+        """返回当前可见验证码图片；只保存在本次 API 响应内。"""
+        with self.lock:
+            if not self.is_alive():
+                return ""
+            image = self._first_visible([
+                "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
+                "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
+                "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
+                ".captcha img", ".verify img", ".verify-code img", ".captcha canvas",
+            ])
+            if not image:
+                return ""
+            try:
+                png = image.screenshot(type="png")
+                return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+            except Exception:
+                return ""
+
     def login_step1(self, username, password):
         if not username or not password:
             return False, "请输入 GYJ 账号和密码"
@@ -3916,6 +3936,9 @@ class GYJWorker:
 
     def login_step2(self, captcha):
         return self._call("login_step2", captcha)
+
+    def captcha_preview(self):
+        return self._call("captcha_preview")
 
     def check_login_status(self):
         return self._call("check_login_status")
@@ -9576,6 +9599,12 @@ def api_inbound_gyj_login_captcha():
         'logged_in': bool(getattr(worker, 'logged_in', ok)),
         'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
     }), (200 if ok else 409)
+
+
+@app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
+def api_inbound_gyj_captcha_preview():
+    worker = gyj_worker.get(_current_inbound_owner())
+    return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
 
 
 @app.route("/api/inbound/gyj/login-status", methods=["GET"])

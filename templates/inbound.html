@@ -146,7 +146,7 @@
             </div>
             <div class="inbound-form" id="gyjCaptchaRow" style="display:none;margin-top:12px;grid-template-columns:minmax(180px,1fr) auto;">
                 <div><label for="gyjCaptcha">验证码</label><input id="gyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()"></div>
-                <button class="btn btn-secondary" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button>
+                <div style="display:flex;gap:8px;align-items:end;"><img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;"><button class="btn btn-secondary" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button><button class="btn btn-secondary" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button></div>
             </div>
             <div style="margin-top:12px;"><button class="btn btn-primary" id="gyjStartBtn" onclick="startGYJPurchaseInbound()" disabled>创建并保存</button></div>
             <div class="inbound-progress" aria-live="polite">
@@ -411,11 +411,24 @@ async function checkGYJLoginStatus() {
         button.disabled = !!data.logged_in;
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
         document.getElementById('gyjStage').textContent = data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ');
         return !!data.logged_in;
     } catch (error) {
         document.getElementById('gyjStage').textContent = '无法确认 GYJ 登录状态';
         return false;
+    }
+}
+
+async function refreshGYJCaptchaPreview() {
+    const image = document.getElementById('gyjCaptchaImage');
+    try {
+        const data = await fetch('/api/inbound/gyj/captcha-preview').then(response => response.json());
+        image.src = data && data.success && data.captcha_image ? data.captcha_image : '';
+        image.style.display = image.src ? '' : 'none';
+    } catch (error) {
+        image.removeAttribute('src');
+        image.style.display = 'none';
     }
 }
 
@@ -447,6 +460,7 @@ async function startGYJBackgroundLogin() {
         const data = await response.json();
         document.getElementById('gyjPassword').value = '';
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
         document.getElementById('gyjStage').textContent = data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败');
     } catch (error) {
@@ -476,6 +490,7 @@ async function submitGYJCaptcha() {
         const data = await response.json();
         document.getElementById('gyjCaptcha').value = '';
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
         document.getElementById('gyjLoginBtn').disabled = !!data.logged_in;
         document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
