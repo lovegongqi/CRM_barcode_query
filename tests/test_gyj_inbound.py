@@ -302,6 +302,32 @@ class _LegacySelectTrigger:
         self.clicked = True
         self.force = force
 
+    def locator(self, selector):
+        return _MissingSelect()
+
+
+class _SelectedText:
+    def __init__(self, value):
+        self.value = value
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def inner_text(self):
+        return self.value
+
+
+class _SelectedLegacyTrigger(_LegacySelectTrigger):
+    def __init__(self, value):
+        super().__init__()
+        self.selected = _SelectedText(value)
+
+    def locator(self, selector):
+        if selector == '.ant-select-selection-selected-value, .ant-select-selection-item':
+            return self.selected
+        return _MissingSelect()
+
 
 class _MissingSelect:
     def __init__(self):
@@ -320,6 +346,12 @@ class _LegacyHeaderField:
         if selector == ".ant-select-selection":
             return self.trigger
         return _MissingSelect()
+
+
+class _SelectedLegacyHeaderField(_LegacyHeaderField):
+    def __init__(self, value):
+        self.trigger = _SelectedLegacyTrigger(value)
+        self.first = self
 
 
 class _HeaderFieldCollection:
@@ -346,8 +378,9 @@ class _HeaderChoice:
 
 
 class _LegacyHeaderDropdown:
-    def __init__(self):
+    def __init__(self, choice_text="昆山怡口净水系统有限公司"):
         self.choice = _HeaderChoice()
+        self.choice_text = choice_text
         self.last = self
         self.waited = None
 
@@ -358,7 +391,7 @@ class _LegacyHeaderDropdown:
         self.waited = (state, timeout)
 
     def get_by_text(self, text, exact):
-        if text == "昆山怡口净水系统有限公司" and exact:
+        if text == self.choice_text and exact:
             return self.choice
         return _MissingButton()
 
@@ -374,9 +407,15 @@ class _LegacyHeaderForm:
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _SelectedLegacyHeaderForm(_LegacyHeaderForm):
+    def __init__(self, value):
+        self.field = _SelectedLegacyHeaderField(value)
+        self.fields = _HeaderFieldCollection(self.field)
+
+
 class _LegacyHeaderPage:
-    def __init__(self):
-        self.dropdown = _LegacyHeaderDropdown()
+    def __init__(self, choice_text="昆山怡口净水系统有限公司"):
+        self.dropdown = _LegacyHeaderDropdown(choice_text)
 
     def locator(self, selector):
         if selector == ".ant-select-dropdown:visible":
@@ -486,6 +525,16 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(page.dropdown.waited, ("visible", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
+
+    def test_keeps_supplier_when_the_form_already_shows_the_default(self):
+        page = _LegacyHeaderPage("昆山怡口净水")
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _SelectedLegacyHeaderForm("昆山怡口净水")
+
+        adapter.select_header("供应商", "昆山怡口净水")
+
+        self.assertFalse(adapter.form.field.trigger.clicked)
+        self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
 
 if __name__ == "__main__":

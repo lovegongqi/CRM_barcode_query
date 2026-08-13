@@ -135,6 +135,12 @@ class GYJPlaywrightPage:
             trigger = field.locator(".ant-select-selection").first
         if trigger.count() != 1:
             raise GYJInboundError(f"GYJ 表头字段不是可选项：{label}")
+        selected = trigger.locator(
+            ".ant-select-selection-selected-value, .ant-select-selection-item"
+        ).first
+        if selected.count() == 1 and selected.inner_text().strip() == value:
+            self._headers[label] = value
+            return
         trigger.click(force=True)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
         dropdown.wait_for(state="visible", timeout=5000)
