@@ -9784,15 +9784,26 @@ def api_inbound_gyj_login_status():
 @app.route("/api/inbound/gyj/start", methods=["POST"])
 def api_inbound_gyj_start():
     owner = _current_inbound_owner()
-    with inbound_job_lock:
-        source_job_id = latest_inbound_job_by_owner.get(owner) or ''
-        source = inbound_jobs.get(source_job_id)
-        if not source or source.get('owner') != owner:
-            return jsonify({'success': False, 'error': '请先成功读取 CRM 装箱单'}), 409
-        if not source.get('done') or not source.get('success') or not isinstance(source.get('result'), dict):
-            return jsonify({'success': False, 'error': 'CRM 装箱单尚未成功读取完成'}), 409
-        packing_slip_no = source.get('packing_slip_no') or ''
-        source_result = dict(source['result'])
+    requested_packing_slip_no = str(
+        (request.get_json(silent=True) or {}).get('packing_slip_no') or ''
+    ).strip()
+    if requested_packing_slip_no:
+        history = get_inbound_history(requested_packing_slip_no)
+        if not history or not isinstance(history.get('result'), dict):
+            return jsonify({'success': False, 'error': '所选装箱单历史不存在'}), 404
+        packing_slip_no = history.get('packing_slip_no') or requested_packing_slip_no
+        source_result = dict(history['result'])
+        source_job_id = f'history:{packing_slip_no}'
+    else:
+        with inbound_job_lock:
+            source_job_id = latest_inbound_job_by_owner.get(owner) or ''
+            source = inbound_jobs.get(source_job_id)
+            if not source or source.get('owner') != owner:
+                return jsonify({'success': False, 'error': '请先成功读取 CRM 装箱单'}), 409
+            if not source.get('done') or not source.get('success') or not isinstance(source.get('result'), dict):
+                return jsonify({'success': False, 'error': 'CRM 装箱单尚未成功读取完成'}), 409
+            packing_slip_no = source.get('packing_slip_no') or ''
+            source_result = dict(source['result'])
 
     try:
         lines = build_gyj_purchase_lines(source_result)

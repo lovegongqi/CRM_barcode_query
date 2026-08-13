@@ -348,6 +348,28 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
         self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
 
+    def test_gyj_start_accepts_selected_shared_history_snapshot(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(started.status_code, 200)
+        status = self._wait_for_gyj_job(client, started.get_json()["job_id"])
+        self.assertTrue(status["success"])
+        self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+
     def test_gyj_start_requires_visible_gyj_login(self):
         client = self._login("admin", "88293529")
         source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")

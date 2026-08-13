@@ -28,6 +28,14 @@
         .btn-primary { color:#fff; background:#2563eb; }
         .btn-secondary { color:#334155; background:#e5e7eb; }
         .inbound-progress { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }
+        .inbound-history { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
+        .inbound-history-empty { width:100%; color:#667085; font-size:13px; }
+        .inbound-history-row { display:flex; align-items:center; gap:6px; max-width:100%; padding:7px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; }
+        .inbound-history-number, .inbound-copy { border:0; background:transparent; color:inherit; font:inherit; cursor:pointer; text-align:left; }
+        .inbound-history-number { font-weight:800; color:#2563eb; }
+        .inbound-history-time { color:#667085; font-size:11px; }
+        .inbound-history-action { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-size:12px; font-weight:700; cursor:pointer; }
+        .inbound-history-action.delete { color:#b42318; }
         .inbound-stat { min-width:0; padding:12px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; }
         .inbound-stat span { display:block; margin-bottom:5px; color:#667085; font-size:11px; font-weight:800; }
         .inbound-stat strong { overflow-wrap:anywhere; font-size:14px; }
@@ -43,10 +51,17 @@
         .inbound-warning { color:#b45309; }
         .inbound-products { display:grid; gap:10px; }
         .inbound-product { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; }
-        .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:#eef4ff; }
+        .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:#eef4ff; cursor:pointer; }
         .inbound-product-head strong, .inbound-product-head small { display:block; overflow-wrap:anywhere; }
         .inbound-product-head small { margin-top:3px; color:#667085; }
+        .inbound-product-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px; }
+        .inbound-product-title .inbound-copy { font-weight:800; }
+        .inbound-product-title .inbound-product-name { font-weight:600; }
+        .inbound-product-total { color:#667085; font-size:12px; }
+        .inbound-product-toggle { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-weight:700; cursor:pointer; }
         .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; }
+        .inbound-serial-batch { display:flex; align-items:center; gap:7px; width:100%; }
+        .inbound-serial-batch button { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-size:12px; font-weight:700; cursor:pointer; }
         .inbound-serials code { padding:4px 7px; border:1px solid #d9e1ec; border-radius:5px; background:#fff; color:#334155; }
         .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
         .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -98,7 +113,10 @@
             <button class="btn btn-primary" id="startInboundBtn" onclick="startInboundExtraction()">开始读取</button>
             <button class="btn btn-secondary" id="downloadInboundBtn" onclick="downloadInboundXlsx()" disabled>下载 Excel</button>
         </div>
-        <div class="inbound-progress" aria-live="polite">
+        <div class="inbound-history" id="inboundHistory" aria-live="polite">
+            <div class="inbound-history-empty">暂无历史装箱单。</div>
+        </div>
+        <div class="inbound-progress" aria-live="polite" hidden>
             <div class="inbound-stat"><span>当前阶段</span><strong id="inboundStage">等待开始</strong></div>
             <div class="inbound-stat"><span>查询通道</span><strong id="inboundSlot">--</strong></div>
             <div class="inbound-stat"><span>当前页</span><strong id="inboundCurrentPage">--</strong></div>
@@ -176,6 +194,7 @@ const INBOUND_STAGE_LABELS = {
 let inboundJobId = '';
 let inboundDownloadUrl = '';
 let inboundPollTimer = null;
+let selectedInboundHistoryNo = '';
 
 function escapeHtml(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
@@ -185,8 +204,106 @@ function escapeHtml(value) {
 
 function clearInboundResultSurfaces() {
     document.getElementById('inboundSummary').textContent = '任务完成后显示汇总。';
+    document.getElementById('inboundPageCounts').textContent = '尚未读取页面。';
     document.getElementById('inboundWarnings').textContent = '暂无警告。';
     document.getElementById('inboundProducts').textContent = '任务完成后显示完整条码。';
+}
+
+function renderInboundPageCounts(pageCounts) {
+    const rows = Array.isArray(pageCounts) ? pageCounts.slice().sort((left, right) => Number(left.page) - Number(right.page)) : [];
+    document.getElementById('inboundPageCounts').innerHTML = rows.length
+        ? rows.map(entry => `<div>第 ${escapeHtml(entry.page)} 页：${escapeHtml(entry.row_count)} 行</div>`).join('')
+        : '尚未读取页面。';
+}
+
+async function copyInboundText(value) {
+    const text = String(value == null ? '' : value);
+    if (!text) return;
+    try {
+        await navigator.clipboard.writeText(text);
+    } catch (error) {
+        const field = document.createElement('textarea');
+        field.value = text;
+        field.style.position = 'fixed';
+        field.style.opacity = '0';
+        document.body.appendChild(field);
+        field.select();
+        document.execCommand('copy');
+        field.remove();
+    }
+}
+
+function renderInboundHistory(records) {
+    const history = document.getElementById('inboundHistory');
+    history.innerHTML = records.length ? records.map(record => {
+        const packingSlipNo = String(record.packing_slip_no || '');
+        return `<div class="inbound-history-row">
+            <button class="inbound-history-number" data-packing-slip-no="${escapeHtml(packingSlipNo)}" onclick="selectInboundHistory(this.dataset.packingSlipNo)">${escapeHtml(packingSlipNo)}</button>
+            <span class="inbound-history-time">${escapeHtml(record.read_at || '')}</span>
+            <button class="inbound-history-action" data-packing-slip-no="${escapeHtml(packingSlipNo)}" onclick="jumpInboundHistoryToGYJ(this.dataset.packingSlipNo)">跳转 GYJ采购入库</button>
+            <button class="inbound-history-action delete" data-packing-slip-no="${escapeHtml(packingSlipNo)}" onclick="deleteInboundHistory(this.dataset.packingSlipNo)">删除</button>
+        </div>`;
+    }).join('') : '<div class="inbound-history-empty">暂无历史装箱单。</div>';
+}
+
+async function loadInboundHistory() {
+    try {
+        const response = await fetch('/api/inbound/history');
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '读取装箱单历史失败');
+        renderInboundHistory(Array.isArray(data.records) ? data.records : []);
+    } catch (error) {
+        document.getElementById('inboundStage').textContent = error.message || '读取装箱单历史失败';
+    }
+}
+
+async function selectInboundHistory(packingSlipNo, copyNumber=true) {
+    try {
+        const response = await fetch('/api/inbound/history/' + encodeURIComponent(packingSlipNo));
+        const data = await response.json();
+        if (!response.ok || !data.success || !data.record) throw new Error(data.error || '装箱单历史不存在');
+        selectedInboundHistoryNo = String(data.record.packing_slip_no || packingSlipNo);
+        sessionStorage.setItem('inbound_history_packing_slip_no', selectedInboundHistoryNo);
+        document.getElementById('packingSlipInput').value = selectedInboundHistoryNo;
+        document.getElementById('inboundStage').textContent = '已加载历史装箱单';
+        inboundDownloadUrl = '';
+        document.getElementById('downloadInboundBtn').disabled = true;
+        renderInboundPageCounts(data.record.page_counts || (data.record.result || {}).page_counts || []);
+        renderInboundResult(data.record.result || {});
+        if (copyNumber) copyInboundText(selectedInboundHistoryNo);
+    } catch (error) {
+        document.getElementById('inboundStage').textContent = error.message || '读取装箱单历史失败';
+    }
+}
+
+async function jumpInboundHistoryToGYJ(packingSlipNo) {
+    await selectInboundHistory(packingSlipNo, false);
+    if (selectedInboundHistoryNo === packingSlipNo) selectInboundWorkspace('gyj');
+}
+
+async function deleteInboundHistory(packingSlipNo) {
+    if (!window.confirm(`删除历史装箱单 ${packingSlipNo}？`)) return;
+    try {
+        const response = await fetch('/api/inbound/history/' + encodeURIComponent(packingSlipNo), {method: 'DELETE'});
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '删除装箱单历史失败');
+        if (selectedInboundHistoryNo === packingSlipNo) {
+            selectedInboundHistoryNo = '';
+            sessionStorage.removeItem('inbound_history_packing_slip_no');
+            clearInboundResultSurfaces();
+        }
+        await loadInboundHistory();
+    } catch (error) {
+        document.getElementById('inboundStage').textContent = error.message || '删除装箱单历史失败';
+    }
+}
+
+function toggleInboundSerials(productId) {
+    const serials = document.getElementById(`inboundSerials-${productId}`);
+    const button = document.getElementById(`inboundToggle-${productId}`);
+    if (!serials || !button) return;
+    serials.hidden = !serials.hidden;
+    button.textContent = serials.hidden ? '展开条码' : '收起条码';
 }
 
 function renderInboundStatus(data) {
@@ -204,15 +321,17 @@ function renderInboundStatus(data) {
         return `<div class="inbound-log ${level}">${escapeHtml(row.time || row.timestamp || '')} ${escapeHtml(row.message || row.text || '')}</div>`;
     }).join('') : '暂无日志';
 
-    const pageCounts = data.page_counts || [];
-    document.getElementById('inboundPageCounts').innerHTML = pageCounts.length
-        ? pageCounts.map(entry => `<div>第 ${escapeHtml(entry.page)} 页：${escapeHtml(entry.row_count)} 行</div>`).join('')
-        : '尚未读取页面。';
+    if (data.job_id || data.running || data.done) renderInboundPageCounts(data.page_counts || []);
 
     inboundDownloadUrl = data.done && data.success && data.download_url ? String(data.download_url) : '';
     document.getElementById('downloadInboundBtn').disabled = !inboundDownloadUrl;
     if (data.done) {
-        if (data.success && data.result) renderInboundResult(data.result);
+        if (data.success && data.result) {
+            selectedInboundHistoryNo = String(data.packing_slip_no || data.result.packing_slip_no || '');
+            if (selectedInboundHistoryNo) sessionStorage.setItem('inbound_history_packing_slip_no', selectedInboundHistoryNo);
+            renderInboundResult(data.result);
+            loadInboundHistory();
+        }
         else clearInboundResultSurfaces();
     }
     if (data.done && inboundPollTimer) {
@@ -241,16 +360,22 @@ function renderInboundResult(result) {
         ? warnings.map(message => `<div class="inbound-warning">${escapeHtml(message)}</div>`).join('')
         : '暂无警告。';
 
-    document.getElementById('inboundProducts').innerHTML = items.length ? items.map(item => {
+    document.getElementById('inboundProducts').innerHTML = items.length ? items.map((item, index) => {
         const serials = item.serials || [];
-        const orders = Array.isArray(item.order_numbers) ? item.order_numbers.join('、') : '';
         const unbarcoded = Number(item.unbarcoded_quantity) || 0;
+        const productId = `item-${index}`;
+        const total = item.expected_quantity == null ? serials.length + unbarcoded : item.expected_quantity;
+        const serialBatches = [];
+        for (let index = 0; index < serials.length; index += 100) {
+            const batch = serials.slice(index, index + 100);
+            serialBatches.push(`<div class="inbound-serial-batch"><button data-copy="${escapeHtml(batch.join(','))}" onclick="copyInboundText(this.dataset.copy)">复制第 ${Math.floor(index / 100) + 1} 批条码（${batch.length} 个）</button>${batch.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>`);
+        }
         return `<section class="inbound-product">
-            <div class="inbound-product-head">
-                <div><strong>${escapeHtml(item.product_code)}</strong><small>${escapeHtml(item.description || '无物料描述')} · 订单 ${escapeHtml(orders || '--')}</small></div>
-                <div>${escapeHtml(item.serial_count)} / ${escapeHtml(item.expected_quantity == null ? '--' : item.expected_quantity)}</div>
+            <div class="inbound-product-head" onclick="toggleInboundSerials('${productId}')">
+                <div class="inbound-product-title"><button class="inbound-copy" data-copy="${escapeHtml(item.product_code)}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.product_code)}</button><button class="inbound-copy inbound-product-name" data-copy="${escapeHtml(item.description || '无物料描述')}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.description || '无物料描述')}</button><span class="inbound-product-total">· ${escapeHtml(total)} 件</span></div>
+                <button class="inbound-product-toggle" id="inboundToggle-${productId}" onclick="event.stopPropagation();toggleInboundSerials('${productId}')">展开条码</button>
             </div>
-            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
+            <div class="inbound-serials" id="inboundSerials-${productId}" hidden>${serialBatches.join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
         </section>`;
     }).join('') : '未读取到可用条码。';
 }
@@ -515,7 +640,10 @@ async function startGYJPurchaseInbound() {
     button.disabled = true;
     button.textContent = '启动中...';
     try {
-        const response = await fetch('/api/inbound/gyj/start', {method: 'POST'});
+        const response = await fetch('/api/inbound/gyj/start', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({packing_slip_no: selectedInboundHistoryNo || undefined})
+        });
         const data = await response.json();
         if (!response.ok || !data.success) {
             document.getElementById('gyjStage').textContent = data.error || 'GYJ 采购入库任务启动失败';
@@ -612,6 +740,10 @@ document.addEventListener('DOMContentLoaded', () => {
     inboundJobId = sessionStorage.getItem('inbound_job_id') || '';
     gyjJobId = sessionStorage.getItem('inbound_gyj_job_id') || '';
     restoreInboundJob();
+    loadInboundHistory().then(() => {
+        const packingSlipNo = sessionStorage.getItem('inbound_history_packing_slip_no') || '';
+        if (packingSlipNo) selectInboundHistory(packingSlipNo, false);
+    });
     loadGYJCredentials();
     if (sessionStorage.getItem('inbound_workspace') === 'gyj') selectInboundWorkspace('gyj');
 });

@@ -980,6 +980,23 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("aurora-nav-label", aurora)
         self.assertNotIn("anchor.textContent =", aurora)
 
+    def test_inbound_page_has_shared_history_actions(self):
+        inbound = self.source("inbound.html")
+        self.assertIn('id="inboundHistory"', inbound)
+        self.assertIn("function loadInboundHistory", inbound)
+        self.assertIn("function selectInboundHistory", inbound)
+        self.assertIn("function deleteInboundHistory", inbound)
+        self.assertIn("/api/inbound/history", inbound)
+
+    def test_inbound_products_fold_serials_and_copy_chunked_values(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function toggleInboundSerials", inbound)
+        self.assertIn('class="inbound-product-head" onclick="toggleInboundSerials(\'${productId}\')"', inbound)
+        self.assertIn("serials.slice(index, index + 100)", inbound)
+        self.assertIn('data-copy="${escapeHtml(item.product_code)}"', inbound)
+        self.assertIn('data-copy="${escapeHtml(item.description || \'无物料描述\')}"', inbound)
+        self.assertNotIn("· 订单 ${escapeHtml(orders", inbound)
+
 
 if __name__ == "__main__":
     unittest.main()
