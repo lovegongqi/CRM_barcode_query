@@ -339,16 +339,10 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 无条码数量输入框") from error
         if quantity_input.count() != 1:
             raise GYJInboundError("未找到 GYJ 无条码数量输入框")
-        quantity_input.evaluate(
-            "(element, value) => {"
-            "const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;"
-            "setter.call(element, String(value));"
-            "element.dispatchEvent(new Event('input', {bubbles: true}));"
-            "element.dispatchEvent(new Event('change', {bubbles: true}));"
-            "element.dispatchEvent(new FocusEvent('blur', {bubbles: true}));"
-            "}",
-            str(quantity),
-        )
+        quantity_input.click()
+        quantity_input.press("ControlOrMeta+A")
+        quantity_input.press("Backspace")
+        quantity_input.type(str(quantity))
         quantity_input.press("Tab")
         self.page.wait_for_timeout(200)
         current_value = ""

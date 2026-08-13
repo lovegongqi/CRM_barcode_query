@@ -385,6 +385,7 @@ class _QuantityInput:
         self.keys = []
         self.typed = ""
         self.waited = None
+        self.clicked = False
 
     def count(self):
         return 1
@@ -401,6 +402,9 @@ class _QuantityInput:
     def type(self, value):
         self.typed += value
         self.value = value
+
+    def click(self):
+        self.clicked = True
 
     def evaluate(self, script, value=None):
         if value is not None:
@@ -1142,8 +1146,9 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter._fill_quantity(row, 10)
 
         self.assertEqual(row.quantity_input.value, "10")
-        self.assertEqual(row.quantity_input.typed, "")
-        self.assertEqual(row.quantity_input.keys, ["Tab"])
+        self.assertTrue(row.quantity_input.clicked)
+        self.assertEqual(row.quantity_input.typed, "10")
+        self.assertEqual(row.quantity_input.keys, ["ControlOrMeta+A", "Backspace", "Tab"])
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
 
     def test_waits_for_unbarcoded_quantity_to_commit_before_continuing(self):
