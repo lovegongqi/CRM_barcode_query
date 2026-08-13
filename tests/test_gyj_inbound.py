@@ -454,6 +454,8 @@ class _RejectedQuantityInput(_QuantityInput):
                 "readOnly": False,
                 "disabled": False,
                 "className": "ant-input-number-input",
+                "html": '<input id="operNumber_jet-test" value="1">',
+                "parentHtml": '<div class="quantity-control"><input></div>',
             }
         return self.value
 
@@ -1158,7 +1160,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         row = _RejectedQuantityRow()
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
 
-        with self.assertRaisesRegex(GYJInboundError, r"应为 4.*当前值=1.*operNumber_jet-test.*746037027"):
+        with self.assertRaisesRegex(GYJInboundError, r"应为 4.*当前值=1.*operNumber_jet-test.*quantity-control.*746037027"):
             adapter._fill_quantity(row, 4)
 
     def test_waits_for_serial_entry_icon_after_product_selection(self):

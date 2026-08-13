@@ -363,7 +363,8 @@ class GYJPlaywrightPage:
         try:
             state = quantity_input.evaluate(
                 "element => ({value: element.value || '', id: element.id || '', type: element.type || '', "
-                "readOnly: !!element.readOnly, disabled: !!element.disabled, className: element.className || ''})"
+                "readOnly: !!element.readOnly, disabled: !!element.disabled, className: element.className || '', "
+                "html: element.outerHTML || '', parentHtml: element.parentElement ? element.parentElement.outerHTML || '' : ''})"
             ) or {}
         except Exception:
             state = {}
@@ -373,6 +374,9 @@ class GYJPlaywrightPage:
         details += f"，只读={bool(state.get('readOnly'))}，禁用={bool(state.get('disabled'))}"
         if state.get("className"):
             details += f"，类={state['className']}"
+        for key, label in (("html", "控件"), ("parentHtml", "父级")):
+            if state.get(key):
+                details += f"，{label}=" + " ".join(str(state[key]).split())[:800]
         try:
             row_text = " ".join(str(row.inner_text() or "").split())[:240]
         except Exception:
