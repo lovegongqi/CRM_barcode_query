@@ -252,6 +252,10 @@ class GYJPlaywrightPage:
             rows.wait_for(state="attached", timeout=5000)
         except Exception as error:
             raise GYJInboundError("未找到 GYJ 入库明细行") from error
+        for _ in range(50):
+            if rows.count() >= 3:
+                break
+            self.page.wait_for_timeout(100)
         if rows.count() < 3:
             raise GYJInboundError("未找到 GYJ 入库明细行")
         return rows.nth(rows.count() - 2)

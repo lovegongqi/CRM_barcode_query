@@ -218,6 +218,15 @@ class _RowCollection:
         return self.rows[index]
 
 
+class _DelayedRowCollection(_RowCollection):
+    def __init__(self, rows):
+        super().__init__(rows)
+        self.ready = False
+
+    def count(self):
+        return len(self.rows) if self.ready else 0
+
+
 class _ActualInboundRowsForm:
     def __init__(self):
         self.header = object()
@@ -231,6 +240,21 @@ class _ActualInboundRowsForm:
         if selector == "tr":
             return _RowCollection([])
         raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _DelayedInboundRowsForm(_ActualInboundRowsForm):
+    def __init__(self):
+        super().__init__()
+        self.rows = _DelayedRowCollection([self.header, self.entry, self.summary])
+
+
+class _RowRenderPage(_ActualGYJSavePage):
+    def __init__(self, form):
+        self.form = form
+
+    def wait_for_timeout(self, timeout):
+        self.timeout = timeout
+        self.form.rows.ready = True
 
 
 class _QuantityInput:
@@ -766,6 +790,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertIs(row, form.entry)
         self.assertEqual(form.rows.waited, ("attached", 5000))
+
+    def test_waits_until_all_initial_detail_rows_render(self):
+        form = _DelayedInboundRowsForm()
+        adapter = GYJPlaywrightPage(_RowRenderPage(form))
+        adapter.form = form
+
+        row = adapter._entry_row()
+
+        self.assertIs(row, form.entry)
 
     def test_fills_quantity_by_its_row_specific_input_id(self):
         row = _ActualInboundRow()
