@@ -55,6 +55,22 @@ class FakeGYJWorker:
     def __init__(self, logged_in=True):
         self.logged_in = logged_in
         self.saved = []
+        self.login_calls = []
+        self.captcha_calls = []
+
+    def get(self, owner):
+        self.owner = owner
+        return self
+
+    def login_step1(self, username, password):
+        self.login_calls.append((username, password))
+        self.logged_in = True
+        return True, "GYJ 登录成功"
+
+    def login_step2(self, captcha):
+        self.captcha_calls.append(captcha)
+        self.logged_in = True
+        return True, "GYJ 登录成功"
 
     def check_login_status(self):
         return self.logged_in, ""
@@ -266,6 +282,35 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertIn("登录", response.get_json()["error"])
         self.assertEqual(worker.saved, [])
+
+    def test_gyj_credentials_never_return_password_and_are_owner_isolated(self):
+        admin = self._login("admin", "88293529")
+        saved = admin.post("/api/inbound/gyj/credentials", json={
+            "remember": True, "username": "gyj-admin", "password": "secret",
+        })
+        self.assertEqual(saved.status_code, 200)
+        payload = admin.get("/api/inbound/gyj/credentials").get_json()
+        self.assertTrue(payload["remember"])
+        self.assertEqual(payload["username"], "gyj-admin")
+        self.assertNotIn("password", payload)
+
+        other = self._login("inbound-other", "inbound-pass")
+        other_payload = other.get("/api/inbound/gyj/credentials").get_json()
+        self.assertFalse(other_payload["remember"])
+        self.assertEqual(other_payload["username"], "")
+
+    def test_gyj_background_login_forwards_credentials_only_to_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/login", json={
+                "username": "gyj-user", "password": "secret", "remember": False,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(worker.owner, "admin")
+        self.assertEqual(worker.login_calls, [("gyj-user", "secret")])
 
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):
         client = self._login("admin", "88293529")
