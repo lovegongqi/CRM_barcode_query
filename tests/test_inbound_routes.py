@@ -228,6 +228,8 @@ class InboundRouteTest(unittest.TestCase):
         with app_module.background_query_job_lock:
             app_module.background_query_jobs.clear()
             app_module.latest_background_query_job_by_owner.clear()
+        if hasattr(app_module, "clear_inbound_history"):
+            app_module.clear_inbound_history()
 
     def tearDown(self):
         if hasattr(app_module, "inbound_job_lock"):
@@ -245,6 +247,8 @@ class InboundRouteTest(unittest.TestCase):
         with app_module.background_query_job_lock:
             app_module.background_query_jobs.clear()
             app_module.latest_background_query_job_by_owner.clear()
+        if hasattr(app_module, "clear_inbound_history"):
+            app_module.clear_inbound_history()
         app_module.save_accounts(self._original_accounts)
 
     @staticmethod
@@ -485,6 +489,40 @@ class InboundRouteTest(unittest.TestCase):
         self.assertIn("attachment", disposition)
         self.assertIn(PACKING_SLIP_NO, disposition)
         self.assertTrue(download.data.startswith(b"PK"))
+
+    def test_inbound_history_survives_job_cleanup_and_is_shared(self):
+        result = {
+            "packing_slip_no": PACKING_SLIP_NO,
+            "page_counts": [{"page": 1, "row_count": 1}],
+            "items": [{"product_code": "916000024", "serials": ["SN00000001"]}],
+        }
+        app_module.upsert_inbound_history(result, "2026-08-13 16:00:00")
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs.clear()
+
+        self.assertEqual(
+            app_module.get_inbound_history(PACKING_SLIP_NO)["result"], result
+        )
+        admin = self._login("admin", "88293529")
+        other = self._login("inbound-other", "inbound-pass")
+        self.assertEqual(admin.get("/api/inbound/history").get_json()["records"][0]["packing_slip_no"], PACKING_SLIP_NO)
+        self.assertEqual(other.get("/api/inbound/history").get_json()["records"][0]["packing_slip_no"], PACKING_SLIP_NO)
+
+    def test_inbound_history_routes_return_detail_and_delete_snapshot(self):
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "page_counts": [{"page": 1, "row_count": 1}],
+            "items": [{"product_code": "916000024", "description": "中央净水机"}],
+        }, "2026-08-13 16:00:00")
+        client = self._login("admin", "88293529")
+
+        detail = client.get(f"/api/inbound/history/{PACKING_SLIP_NO}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.get_json()["record"]["result"]["items"][0]["product_code"], "916000024")
+        deleted = client.delete(f"/api/inbound/history/{PACKING_SLIP_NO}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.get_json()["success"])
+        self.assertEqual(client.get(f"/api/inbound/history/{PACKING_SLIP_NO}").status_code, 404)
 
     def test_new_start_removes_prior_completed_owner_job_and_result(self):
         client = self._login("admin", "88293529")

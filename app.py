@@ -5307,6 +5307,8 @@ def _run_inbound_job(job_id, worker):
             source.get('page_counts') or [],
             shipment_rows=source.get('shipment_rows') or [],
         )
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        upsert_inbound_history(result, finished_at)
         with inbound_job_lock:
             job = inbound_jobs.get(job_id)
             if job:
@@ -5319,7 +5321,7 @@ def _run_inbound_job(job_id, worker):
                     'current_page': (result.get('pages_read') or [0])[-1],
                     'page_counts': list(result.get('page_counts') or []),
                     'result': result,
-                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'finished_at': finished_at,
                 })
         log('装箱单入库明细整理完成', 'success')
     except Exception as error:
@@ -6038,6 +6040,7 @@ ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
 TRANSFER_RECORDS_DB_FILE = os.path.join(CONFIG_DIR, "transfer_records.sqlite3")
+INBOUND_HISTORY_DB_FILE = os.path.join(CONFIG_DIR, "inbound_history.sqlite3")
 RESULTS_DIR = os.path.join(DATA_BASE_DIR, "results")
 TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
@@ -7748,6 +7751,7 @@ def queried_dealer_history():
     return list(dealers.keys())
 
 TRANSFER_RECORDS_LOCK = threading.RLock()
+INBOUND_HISTORY_LOCK = threading.RLock()
 TRANSFER_RECORDS_PROCESS_TOKEN = uuid.uuid4().hex
 transfer_records_revision_counter = 0
 
@@ -7791,6 +7795,144 @@ def _transfer_records_connection():
         """
     )
     return connection
+
+
+def _inbound_history_connection():
+    os.makedirs(os.path.dirname(INBOUND_HISTORY_DB_FILE), exist_ok=True)
+    connection = sqlite3.connect(INBOUND_HISTORY_DB_FILE)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inbound_history (
+            packing_slip_no TEXT PRIMARY KEY,
+            read_at TEXT NOT NULL DEFAULT '',
+            page_counts_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    return connection
+
+
+def _inbound_history_summary(result):
+    result = result if isinstance(result, dict) else {}
+    items = result.get('items') or []
+    return {
+        'item_count': len(items),
+        'expected_total': result.get('expected_total') or 0,
+        'total_serials': result.get('total_serials') or 0,
+    }
+
+
+def _inbound_history_row_to_dict(row):
+    if not row:
+        return None
+    record = dict(row)
+    for key, default in (('page_counts', []), ('summary', {}), ('result', {})):
+        try:
+            record[key] = json.loads(record.pop(f'{key}_json') or json.dumps(default))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record[key] = default
+    return record
+
+
+def upsert_inbound_history(result, finished_at=''):
+    result = json.loads(json.dumps(result if isinstance(result, dict) else {}, ensure_ascii=False))
+    packing_slip_no = str(result.get('packing_slip_no') or '').strip()
+    if not packing_slip_no:
+        raise ValueError('装箱单号不能为空')
+    read_at = str(finished_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    page_counts = list(result.get('page_counts') or [])
+    summary = _inbound_history_summary(result)
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO inbound_history (
+                    packing_slip_no, read_at, page_counts_json, summary_json, result_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(packing_slip_no) DO UPDATE SET
+                    read_at=excluded.read_at,
+                    page_counts_json=excluded.page_counts_json,
+                    summary_json=excluded.summary_json,
+                    result_json=excluded.result_json
+                """,
+                (
+                    packing_slip_no, read_at, json.dumps(page_counts, ensure_ascii=False),
+                    json.dumps(summary, ensure_ascii=False), json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return {
+        'packing_slip_no': packing_slip_no,
+        'read_at': read_at,
+        'page_counts': page_counts,
+        'summary': summary,
+        'result': result,
+    }
+
+
+def load_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            rows = connection.execute(
+                'SELECT * FROM inbound_history ORDER BY datetime(read_at) DESC, rowid DESC'
+            ).fetchall()
+        finally:
+            connection.close()
+    records = []
+    for row in rows:
+        record = _inbound_history_row_to_dict(row)
+        if record:
+            record.pop('result', None)
+            records.append(record)
+    return records
+
+
+def get_inbound_history(packing_slip_no):
+    packing_slip_no = str(packing_slip_no or '').strip()
+    if not packing_slip_no:
+        return None
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            row = connection.execute(
+                'SELECT * FROM inbound_history WHERE packing_slip_no = ?', (packing_slip_no,)
+            ).fetchone()
+        finally:
+            connection.close()
+    return _inbound_history_row_to_dict(row)
+
+
+def delete_inbound_history(packing_slip_no):
+    packing_slip_no = str(packing_slip_no or '').strip()
+    if not packing_slip_no:
+        return False
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            deleted = connection.execute(
+                'DELETE FROM inbound_history WHERE packing_slip_no = ?', (packing_slip_no,)
+            ).rowcount > 0
+            connection.commit()
+            return deleted
+        finally:
+            connection.close()
+
+
+def clear_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute('DELETE FROM inbound_history')
+            connection.commit()
+        finally:
+            connection.close()
 
 
 def _normalize_transfer_record(record):
@@ -9535,6 +9677,23 @@ def api_inbound_status():
         if job and job.get('owner') != owner:
             return jsonify({'success': False, 'error': '入库任务不存在'}), 404
         return jsonify(_inbound_status_payload(job, owner))
+
+
+@app.route("/api/inbound/history", methods=["GET"])
+def api_inbound_history():
+    return jsonify({'success': True, 'records': load_inbound_history()})
+
+
+@app.route("/api/inbound/history/<packing_slip_no>", methods=["GET", "DELETE"])
+def api_inbound_history_record(packing_slip_no):
+    if request.method == "DELETE":
+        if not delete_inbound_history(packing_slip_no):
+            return jsonify({'success': False, 'error': '装箱单历史不存在'}), 404
+        return jsonify({'success': True})
+    record = get_inbound_history(packing_slip_no)
+    if not record:
+        return jsonify({'success': False, 'error': '装箱单历史不存在'}), 404
+    return jsonify({'success': True, 'record': record})
 
 
 @app.route("/api/inbound/export", methods=["GET"])
