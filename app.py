@@ -3720,6 +3720,13 @@ class GYJSession:
         self.page = self.context.new_page()
         return True
 
+    def _rebuild_browser_profile(self):
+        self._close_browser()
+        if os.path.exists(self.session_dir):
+            backup_dir = f"{self.session_dir}.failed-{uuid.uuid4().hex[:8]}"
+            os.replace(self.session_dir, backup_dir)
+        return self._ensure_browser()
+
     def _is_login_page(self):
         return "/user/login" in (self.page.url or "").lower()
 
@@ -3779,17 +3786,20 @@ class GYJSession:
             return False, "请输入 GYJ 账号和密码"
         with self.lock:
             try:
-                if not self._ensure_browser():
-                    return False, "GYJ 浏览器未启动"
-                self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
-                username_input, password_input = self._wait_for_login_form()
-                if not username_input or not password_input:
+                for attempt in range(2):
+                    if not self._ensure_browser():
+                        return False, "GYJ 浏览器未启动"
+                    self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+                    username_input, password_input = self._wait_for_login_form()
+                    if username_input and password_input:
+                        username_input.fill(username)
+                        password_input.fill(password)
+                        self.logged_in = False
+                        self.waiting_captcha = True
+                        return True, "GYJ 等待验证码"
+                    if attempt == 0 and self._rebuild_browser_profile():
+                        continue
                     return False, "未找到 GYJ 登录表单或验证码输入框"
-                username_input.fill(username)
-                password_input.fill(password)
-                self.logged_in = False
-                self.waiting_captcha = True
-                return True, "GYJ 等待验证码"
             except Exception as error:
                 self.logged_in = False
                 self.waiting_captcha = False
