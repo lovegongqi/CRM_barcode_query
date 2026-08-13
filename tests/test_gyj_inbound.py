@@ -382,7 +382,8 @@ class _RowRenderPage(_ActualGYJSavePage):
 class _QuantityInput:
     def __init__(self):
         self.value = ""
-        self.key = ""
+        self.keys = []
+        self.typed = ""
         self.waited = None
 
     def count(self):
@@ -395,7 +396,11 @@ class _QuantityInput:
         self.waited = (state, timeout)
 
     def press(self, key):
-        self.key = key
+        self.keys.append(key)
+
+    def type(self, value):
+        self.typed += value
+        self.value = value
 
     def evaluate(self, script):
         return self.value
@@ -431,6 +436,9 @@ class _RejectedQuantityInput(_QuantityInput):
         self.value = "1"
 
     def fill(self, value):
+        self.attempted = value
+
+    def type(self, value):
         self.attempted = value
 
     def evaluate(self, script):
@@ -1105,7 +1113,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter._fill_quantity(row, 10)
 
         self.assertEqual(row.quantity_input.value, "10")
-        self.assertEqual(row.quantity_input.key, "Tab")
+        self.assertEqual(row.quantity_input.typed, "10")
+        self.assertEqual(row.quantity_input.keys, ["ControlOrMeta+A", "Enter", "Tab"])
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
 
     def test_waits_for_unbarcoded_quantity_to_commit_before_continuing(self):
