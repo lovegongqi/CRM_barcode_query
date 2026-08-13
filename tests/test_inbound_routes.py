@@ -570,6 +570,31 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(status["stage"], "waiting")
         self.assertIn("等待查询通道", status["logs"][0]["message"])
 
+    def test_bulk_login_slot_becoming_available_starts_waiting_inbound_job(self):
+        client = self._login("admin", "88293529")
+        worker = FakeInboundWorker()
+        available = {"value": False}
+
+        def select_worker():
+            if available["value"]:
+                return worker, "query-2", "查询2", ""
+            return None, "", "", "所有已登录查询通道都在查询中，请稍后再试"
+
+        bulk_job = app_module._empty_bulk_login_job("query", [{
+            "id": "query-2", "label": "查询2", "kind": "query", "status": "opening",
+        }])
+        with app_module.bulk_login_job_lock:
+            app_module.bulk_login_jobs[bulk_job["job_id"]] = bulk_job
+        with mock.patch.object(app_module, "_select_idle_query_worker_desc", side_effect=select_worker):
+            started = client.post("/api/inbound/start", json={"packing_slip_no": PACKING_SLIP_NO})
+            self.assertEqual(started.status_code, 200)
+            available["value"] = True
+            app_module._update_bulk_login_slot(bulk_job["job_id"], "query-2", "logged_in", "登录成功")
+            status = self._wait_for_job(client, started.get_json()["job_id"])
+
+        self.assertTrue(status["success"])
+        self.assertEqual(status["slot_id"], "query-2")
+
     def test_session_revalidates_login_before_reading_packing_slip(self):
         crm_session = app_module.CRMSession()
         crm_session.logged_in = True

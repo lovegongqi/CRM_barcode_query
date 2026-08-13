@@ -4780,6 +4780,7 @@ def _finalize_bulk_login_job_if_ready(job_id):
             )
 
 def _update_bulk_login_slot(job_id, slot_id, status, message=''):
+    should_dispatch = False
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
@@ -4788,8 +4789,14 @@ def _update_bulk_login_slot(job_id, slot_id, status, message=''):
             if slot.get('id') == slot_id:
                 slot['status'] = status
                 slot['message'] = message
-                return dict(slot)
-    return None
+                should_dispatch = status == 'logged_in' and slot.get('kind') == 'query'
+                updated = dict(slot)
+                break
+        else:
+            return None
+    if should_dispatch:
+        dispatch_priority_query_work()
+    return updated
 
 def _submit_bulk_login_slot(job_id, slot, captcha):
     with bulk_login_job_lock:
