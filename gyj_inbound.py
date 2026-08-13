@@ -158,7 +158,7 @@ class GYJPlaywrightPage:
         if label == "供应商" and search_input.count() == 1:
             search_input.fill(value, force=True)
         dropdown_id = trigger.get_attribute("aria-controls") or ""
-        dropdown = self.page.locator(f"#{dropdown_id}") if dropdown_id else self.page.locator(
+        dropdown = self.page.locator(f'[id="{dropdown_id}"]') if dropdown_id else self.page.locator(
             ".ant-select-dropdown"
         )
         dropdown.wait_for(state="attached", timeout=5000)

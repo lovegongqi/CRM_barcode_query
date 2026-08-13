@@ -334,7 +334,7 @@ class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
         return _MissingSelect()
 
     def get_attribute(self, name):
-        return "supplier-options" if name == "aria-controls" else ""
+        return "3fadbb75-ffb1-4b24-a919-7d1f929814d7" if name == "aria-controls" else ""
 
 
 class _SelectedText:
@@ -509,7 +509,7 @@ class _LegacyHeaderPage:
 
     def locator(self, selector):
         self.selectors.append(selector)
-        if selector in ("#supplier-options", ".ant-select-dropdown"):
+        if selector in ('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', ".ant-select-dropdown"):
             return self.dropdown
         raise AssertionError(f"unexpected selector: {selector}")
 
@@ -641,7 +641,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertTrue(adapter.form.field.trigger.search_input.force)
         self.assertTrue(page.dropdown.choice.clicked)
-        self.assertIn("#supplier-options", page.selectors)
+        self.assertIn('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', page.selectors)
         self.assertNotIn(".ant-select-dropdown", page.selectors)
 
     def test_keeps_supplier_when_the_form_already_shows_the_default(self):
