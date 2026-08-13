@@ -30,40 +30,41 @@
         .inbound-progress { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }
         .inbound-progress[hidden] { display:none !important; }
         .inbound-history { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; }
-        .inbound-history-empty { width:100%; color:#667085; font-size:13px; }
-        .inbound-history-row { display:flex; align-items:center; gap:6px; max-width:100%; padding:7px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; }
+        .inbound-history-empty { width:100%; color:#9bb4cb; font-size:13px; }
+        .inbound-history-row { display:flex; align-items:center; gap:6px; max-width:100%; padding:7px; border:1px solid rgba(116,191,232,.25); border-radius:8px; background:rgba(8,25,48,.88); }
         .inbound-history-number, .inbound-copy { border:0; background:transparent; color:inherit; font:inherit; cursor:pointer; text-align:left; }
-        .inbound-history-number { font-weight:800; color:#2563eb; }
-        .inbound-history-time { color:#667085; font-size:11px; }
-        .inbound-history-action { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-size:12px; font-weight:700; cursor:pointer; }
-        .inbound-history-action.delete { color:#b42318; }
-        .inbound-stat { min-width:0; padding:12px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; }
-        .inbound-stat span { display:block; margin-bottom:5px; color:#667085; font-size:11px; font-weight:800; }
+        .inbound-history-number { font-weight:800; color:#6ee7ff; }
+        .inbound-history-time { color:#9bb4cb; font-size:11px; }
+        .inbound-history-action { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.28); border-radius:6px; background:rgba(13,44,72,.92); color:#d8f5ff; font-size:12px; font-weight:700; cursor:pointer; }
+        .inbound-history-action:hover, .inbound-product-toggle:hover, .inbound-serial-batch button:hover { border-color:#68d6ff; background:rgba(24,74,108,.98); }
+        .inbound-history-action.delete { color:#ff9aa8; }
+        .inbound-stat { min-width:0; padding:12px; border:1px solid rgba(116,191,232,.25); border-radius:8px; background:rgba(8,25,48,.88); color:#e7f6ff; }
+        .inbound-stat span { display:block; margin-bottom:5px; color:#9bb4cb; font-size:11px; font-weight:800; }
         .inbound-stat strong { overflow-wrap:anywhere; font-size:14px; }
         .inbound-results { display:grid; grid-template-columns:minmax(0,.75fr) minmax(0,1.25fr); gap:14px; }
         .inbound-panel { min-width:0; }
-        .inbound-panel h2 { margin-bottom:12px; padding-bottom:9px; border-bottom:1px solid #e5e7eb; font-size:15px; }
-        .inbound-box { min-height:54px; padding:10px 12px; border:1px solid #d9e1ec; border-radius:8px; background:#f8fafc; color:#475569; font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
+        .inbound-panel h2 { margin-bottom:12px; padding-bottom:9px; border-bottom:1px solid rgba(116,191,232,.22); color:#e6f6ff; font-size:15px; }
+        .inbound-box { min-height:54px; padding:10px 12px; border:1px solid rgba(116,191,232,.25); border-radius:8px; background:rgba(7,20,38,.93); color:#d5e9f8; font-size:12px; line-height:1.65; overflow-wrap:anywhere; }
         .inbound-logs { max-height:230px; overflow:auto; background:#0f172a; color:#d4d4d4; font-family:"Courier New",monospace; }
         .inbound-log { padding:2px 0; }
         .inbound-log.info { color:#4fc3f7; } .inbound-log.success { color:#81c784; } .inbound-log.warn { color:#ffb74d; } .inbound-log.error { color:#e57373; }
         .inbound-summary-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
-        .inbound-summary-grid span { padding:8px; border:1px solid #d9e1ec; border-radius:6px; background:#fff; }
-        .inbound-warning { color:#b45309; }
+        .inbound-summary-grid span { padding:8px; border:1px solid rgba(116,191,232,.25); border-radius:6px; background:rgba(13,44,72,.88); color:#d9f0ff; }
+        .inbound-warning { color:#ffd178; }
         .inbound-products { display:grid; gap:10px; }
-        .inbound-product { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; }
-        .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:#eef4ff; cursor:pointer; }
+        .inbound-product { border:1px solid rgba(116,191,232,.28); border-radius:8px; overflow:hidden; background:rgba(7,20,38,.92); }
+        .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:rgba(13,44,72,.92); color:#e6f6ff; cursor:pointer; }
         .inbound-product-head strong, .inbound-product-head small { display:block; overflow-wrap:anywhere; }
-        .inbound-product-head small { margin-top:3px; color:#667085; }
+        .inbound-product-head small { margin-top:3px; color:#9bb4cb; }
         .inbound-product-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px; }
         .inbound-product-title .inbound-copy { font-weight:800; }
         .inbound-product-title .inbound-product-name { font-weight:600; }
-        .inbound-product-total { color:#667085; font-size:12px; }
-        .inbound-product-toggle { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-weight:700; cursor:pointer; }
-        .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; }
+        .inbound-product-total { color:#8eeaff; font-size:12px; }
+        .inbound-product-toggle { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-weight:700; cursor:pointer; }
+        .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; background:rgba(5,17,33,.84); }
         .inbound-serial-batch { display:flex; align-items:center; gap:7px; width:100%; }
-        .inbound-serial-batch button { min-height:28px; padding:5px 8px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; color:#334155; font-size:12px; font-weight:700; cursor:pointer; }
-        .inbound-serials code { padding:4px 7px; border:1px solid #d9e1ec; border-radius:5px; background:#fff; color:#334155; }
+        .inbound-serial-batch button { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-size:12px; font-weight:700; cursor:pointer; }
+        .inbound-serials code { padding:4px 7px; border:1px solid rgba(116,191,232,.25); border-radius:5px; background:rgba(12,36,62,.95); color:#e6f6ff; }
         .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
         .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .aurora-account-logout { white-space:nowrap; }
@@ -168,11 +169,6 @@
                 <div style="display:flex;gap:8px;align-items:end;"><img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;"><button class="btn btn-secondary" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button><button class="btn btn-secondary" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button></div>
             </div>
             <div style="margin-top:12px;"><button class="btn btn-primary" id="gyjStartBtn" onclick="startGYJPurchaseInbound()" disabled>创建并保存</button></div>
-            <div class="inbound-progress" aria-live="polite">
-                <div class="inbound-stat"><span>当前阶段</span><strong id="gyjStage">请先登录 GYJ</strong></div>
-                <div class="inbound-stat"><span>入库明细</span><strong id="gyjProgress">--</strong></div>
-                <div class="inbound-stat"><span>保存规则</span><strong>仅保存，不审核</strong></div>
-            </div>
         </section>
         <div class="inbound-results">
             <section class="card inbound-panel">
@@ -504,10 +500,9 @@ function selectInboundWorkspace(workspace) {
 
 function renderGYJInboundStatus(data) {
     const stage = data.error || GYJ_STAGE_LABELS[data.stage] || data.stage || '等待开始';
-    document.getElementById('gyjStage').textContent = stage;
     const currentLine = Number(data.current_line) || 0;
     const totalLines = Number(data.total_lines) || 0;
-    document.getElementById('gyjProgress').textContent = totalLines ? `${currentLine} / ${totalLines} 行` : '--';
+    setGYJStatus(totalLines ? `${stage} · ${currentLine} / ${totalLines} 行` : stage);
     const startButton = document.getElementById('gyjStartBtn');
     startButton.disabled = !!data.running;
     startButton.textContent = data.running ? '保存中...' : '创建并保存';
@@ -528,6 +523,10 @@ function renderGYJInboundStatus(data) {
     }
 }
 
+function setGYJStatus(message) {
+    document.getElementById('gyjResult').textContent = message;
+}
+
 async function checkGYJLoginStatus() {
     try {
         const response = await fetch('/api/inbound/gyj/login-status');
@@ -538,10 +537,10 @@ async function checkGYJLoginStatus() {
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
         if (data.waiting_captcha) refreshGYJCaptchaPreview();
-        document.getElementById('gyjStage').textContent = data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ');
+        setGYJStatus(data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ'));
         return !!data.logged_in;
     } catch (error) {
-        document.getElementById('gyjStage').textContent = '无法确认 GYJ 登录状态';
+        setGYJStatus('无法确认 GYJ 登录状态');
         return false;
     }
 }
@@ -578,7 +577,7 @@ async function startGYJBackgroundLogin() {
     const password = document.getElementById('gyjPassword').value;
     const remember = document.getElementById('gyjRememberLogin').checked;
     if (!username || !password) {
-        document.getElementById('gyjStage').textContent = '请输入 GYJ 账号和密码';
+        setGYJStatus('请输入 GYJ 账号和密码');
         return;
     }
     const button = document.getElementById('gyjLoginBtn');
@@ -596,9 +595,9 @@ async function startGYJBackgroundLogin() {
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
         if (data.waiting_captcha) refreshGYJCaptchaPreview();
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
-        document.getElementById('gyjStage').textContent = data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败');
+        setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败'));
     } catch (error) {
-        document.getElementById('gyjStage').textContent = 'GYJ 后台登录失败';
+        setGYJStatus('GYJ 后台登录失败');
     } finally {
         if (!document.getElementById('gyjStartBtn').disabled) {
             button.textContent = 'GYJ 已登录';
@@ -612,7 +611,7 @@ async function startGYJBackgroundLogin() {
 async function submitGYJCaptcha() {
     const captcha = document.getElementById('gyjCaptcha').value.trim();
     if (!captcha) {
-        document.getElementById('gyjStage').textContent = '请输入 GYJ 验证码';
+        setGYJStatus('请输入 GYJ 验证码');
         return;
     }
     const button = document.getElementById('gyjCaptchaBtn');
@@ -628,9 +627,9 @@ async function submitGYJCaptcha() {
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
         document.getElementById('gyjLoginBtn').disabled = !!data.logged_in;
         document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
-        document.getElementById('gyjStage').textContent = data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 验证码验证失败');
+        setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 验证码验证失败'));
     } catch (error) {
-        document.getElementById('gyjStage').textContent = 'GYJ 验证码提交失败';
+        setGYJStatus('GYJ 验证码提交失败');
     } finally {
         button.disabled = false;
     }
@@ -647,7 +646,7 @@ async function startGYJPurchaseInbound() {
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
-            document.getElementById('gyjStage').textContent = data.error || 'GYJ 采购入库任务启动失败';
+            setGYJStatus(data.error || 'GYJ 采购入库任务启动失败');
             return;
         }
         gyjJobId = data.job_id || '';
@@ -655,7 +654,7 @@ async function startGYJPurchaseInbound() {
         renderGYJInboundStatus({...data, running: true, stage: 'waiting'});
         startGYJInboundPolling();
     } catch (error) {
-        document.getElementById('gyjStage').textContent = '无法启动 GYJ 采购入库任务';
+        setGYJStatus('无法启动 GYJ 采购入库任务');
     } finally {
         if (!gyjJobId || !gyjPollTimer) {
             button.disabled = false;
@@ -689,7 +688,7 @@ async function pollGYJInboundStatus(preferLatest=false) {
             return;
         }
         if (!response.ok || (data.error && !data.job_id)) {
-            document.getElementById('gyjStage').textContent = data.error || '无法读取 GYJ 采购入库状态';
+            setGYJStatus(data.error || '无法读取 GYJ 采购入库状态');
             return;
         }
         if (data.job_id) {
@@ -698,7 +697,7 @@ async function pollGYJInboundStatus(preferLatest=false) {
         }
         renderGYJInboundStatus(data);
     } catch (error) {
-        document.getElementById('gyjStage').textContent = 'GYJ 采购入库状态连接失败';
+        setGYJStatus('GYJ 采购入库状态连接失败');
     }
 }
 

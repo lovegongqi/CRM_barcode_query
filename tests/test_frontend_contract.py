@@ -545,7 +545,7 @@ class FrontendContractTest(unittest.TestCase):
         inbound = self.source("inbound.html")
         for element_id in (
             "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
-            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn", "gyjStage",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn",
             "gyjLogs", "gyjResult",
         ):
             with self.subTest(element_id=element_id):
@@ -562,7 +562,8 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("昆山怡口净水系统有限公司", inbound)
         self.assertIn("江西天麓", inbound)
         self.assertIn("沈桥仓", inbound)
-        self.assertIn("仅保存，不审核", inbound)
+        self.assertNotIn('id="gyjStage"', inbound)
+        self.assertNotIn('id="gyjProgress"', inbound)
 
     def test_inbound_gyj_login_uses_backend_credentials_contract(self):
         inbound = self.source("inbound.html")
@@ -634,6 +635,12 @@ class FrontendContractTest(unittest.TestCase):
             len(re.findall(r"grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)", aurora_css)),
             2,
         )
+
+    def test_inbound_navigation_uses_vertical_transfer_glyph(self):
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+        self.assertIn("'/transfer': ['⇄', '移库']", aurora)
+        self.assertIn("'/inbound': ['⇅', '入库']", aurora)
+        self.assertNotIn("'/inbound': ['⇩', '入库']", aurora)
 
     def test_login_and_access_pages_use_approved_compositions(self):
         login = self.source("login.html")
@@ -997,6 +1004,14 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn('data-copy="${escapeHtml(item.product_code)}"', inbound)
         self.assertIn('data-copy="${escapeHtml(item.description || \'无物料描述\')}"', inbound)
         self.assertNotIn("· 订单 ${escapeHtml(orders", inbound)
+
+    def test_inbound_result_surfaces_use_dark_contrast_without_gyj_state_cards(self):
+        inbound = self.source("inbound.html")
+        self.assertRegex(inbound, r"\.inbound-history-row\s*\{[^}]*background:rgba\(8,25,48,.88\)")
+        self.assertRegex(inbound, r"\.inbound-product-head\s*\{[^}]*background:rgba\(13,44,72,.92\)[^}]*color:#e6f6ff")
+        self.assertRegex(inbound, r"\.inbound-serials code\s*\{[^}]*background:rgba\(12,36,62,.95\)[^}]*color:#e6f6ff")
+        self.assertNotIn('id="gyjStage"', inbound)
+        self.assertNotIn('id="gyjProgress"', inbound)
 
 
 if __name__ == "__main__":
