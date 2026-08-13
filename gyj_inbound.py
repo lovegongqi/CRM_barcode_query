@@ -138,9 +138,14 @@ class GYJPlaywrightPage:
         selected = trigger.locator(
             ".ant-select-selection-selected-value, .ant-select-selection-item"
         ).first
-        if selected.count() == 1 and selected.inner_text().strip() == value:
-            self._headers[label] = value
-            return
+        for _ in range(40):
+            selected_value = selected.inner_text().strip() if selected.count() == 1 else ""
+            if selected_value == value or (
+                label == "供应商" and value and value in selected_value
+            ):
+                self._headers[label] = value
+                return
+            self.page.wait_for_timeout(200)
         trigger.click(force=True)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
         dropdown.wait_for(state="visible", timeout=5000)

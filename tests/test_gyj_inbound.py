@@ -318,6 +318,15 @@ class _SelectedText:
         return self.value
 
 
+class _DelayedSelectedText(_SelectedText):
+    def __init__(self, value):
+        super().__init__("")
+        self.final_value = value
+
+    def reveal(self):
+        self.value = self.final_value
+
+
 class _SelectedLegacyTrigger(_LegacySelectTrigger):
     def __init__(self, value):
         super().__init__()
@@ -327,6 +336,15 @@ class _SelectedLegacyTrigger(_LegacySelectTrigger):
         if selector == '.ant-select-selection-selected-value, .ant-select-selection-item':
             return self.selected
         return _MissingSelect()
+
+
+class _DelayedSelectedLegacyTrigger(_SelectedLegacyTrigger):
+    def __init__(self, value):
+        _LegacySelectTrigger.__init__(self)
+        self.selected = _DelayedSelectedText(value)
+
+    def reveal(self):
+        self.selected.reveal()
 
 
 class _MissingSelect:
@@ -351,6 +369,12 @@ class _LegacyHeaderField:
 class _SelectedLegacyHeaderField(_LegacyHeaderField):
     def __init__(self, value):
         self.trigger = _SelectedLegacyTrigger(value)
+        self.first = self
+
+
+class _DelayedSelectedLegacyHeaderField(_LegacyHeaderField):
+    def __init__(self, value):
+        self.trigger = _DelayedSelectedLegacyTrigger(value)
         self.first = self
 
 
@@ -413,6 +437,12 @@ class _SelectedLegacyHeaderForm(_LegacyHeaderForm):
         self.fields = _HeaderFieldCollection(self.field)
 
 
+class _DelayedSelectedLegacyHeaderForm(_LegacyHeaderForm):
+    def __init__(self, value):
+        self.field = _DelayedSelectedLegacyHeaderField(value)
+        self.fields = _HeaderFieldCollection(self.field)
+
+
 class _LegacyHeaderPage:
     def __init__(self, choice_text="昆山怡口净水系统有限公司"):
         self.dropdown = _LegacyHeaderDropdown(choice_text)
@@ -421,6 +451,19 @@ class _LegacyHeaderPage:
         if selector == ".ant-select-dropdown:visible":
             return self.dropdown
         raise AssertionError(f"unexpected selector: {selector}")
+
+    def wait_for_timeout(self, timeout):
+        self.timeout = timeout
+
+
+class _DelayedSelectedLegacyHeaderPage(_LegacyHeaderPage):
+    def __init__(self, form, choice_text="昆山怡口净水"):
+        super().__init__(choice_text)
+        self.form = form
+
+    def wait_for_timeout(self, timeout):
+        self.timeout = timeout
+        self.form.field.trigger.reveal()
 
 
 class GYJInboundWriterTest(unittest.TestCase):
@@ -534,6 +577,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.select_header("供应商", "昆山怡口净水")
 
         self.assertFalse(adapter.form.field.trigger.clicked)
+        self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
+
+    def test_waits_for_the_delayed_default_supplier_instead_of_opening_dropdown(self):
+        form = _DelayedSelectedLegacyHeaderForm("昆山怡口净水系统有限公司")
+        page = _DelayedSelectedLegacyHeaderPage(form)
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = form
+
+        adapter.select_header("供应商", "昆山怡口净水")
+
+        self.assertFalse(form.field.trigger.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
 
