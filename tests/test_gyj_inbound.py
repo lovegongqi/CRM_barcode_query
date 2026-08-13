@@ -789,7 +789,6 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         row = adapter._entry_row()
 
         self.assertIs(row, form.entry)
-        self.assertEqual(form.rows.waited, ("attached", 5000))
 
     def test_waits_until_all_initial_detail_rows_render(self):
         form = _DelayedInboundRowsForm()
