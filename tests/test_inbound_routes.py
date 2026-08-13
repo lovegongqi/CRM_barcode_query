@@ -134,6 +134,28 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
         self.assertEqual(page.captcha_image.screenshot_type, "png")
 
 
+class GYJLoginFlowTest(unittest.TestCase):
+    def test_step1_returns_captcha_without_submitting_incomplete_login_form(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        username_input = mock.Mock()
+        password_input = mock.Mock()
+        captcha_input = mock.Mock()
+        session.page = mock.Mock()
+        session._ensure_browser = mock.Mock(return_value=True)
+        session._first_visible = mock.Mock(side_effect=[username_input, password_input])
+        session._captcha_input = mock.Mock(return_value=captcha_input)
+
+        success, message = session.login_step1("gyj-user", "secret")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 等待验证码")
+        username_input.fill.assert_called_once_with("gyj-user")
+        password_input.fill.assert_called_once_with("secret")
+        self.assertFalse(session.logged_in)
+        self.assertTrue(session.waiting_captcha)
+        session.page.wait_for_timeout.assert_not_called()
+
+
 class InboundRouteTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

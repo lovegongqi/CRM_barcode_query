@@ -573,6 +573,7 @@ class FrontendContractTest(unittest.TestCase):
             self.assertIn(f"function {function_name}", inbound)
         self.assertIn("fetch('/api/inbound/gyj/credentials'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/login/captcha'", inbound)
+        self.assertIn("if (data.logged_in || data.waiting_captcha)", inbound)
 
     def test_inbound_gyj_captcha_preview_can_be_refreshed_without_storage(self):
         inbound = self.source("inbound.html")

@@ -3778,6 +3778,10 @@ class GYJSession:
                     return False, "未找到 GYJ 登录账号或密码输入框"
                 username_input.fill(username)
                 password_input.fill(password)
+                if self._captcha_input():
+                    self.logged_in = False
+                    self.waiting_captcha = True
+                    return True, "GYJ 等待验证码"
                 login_button = self._first_visible([
                     "button[type='submit']", "button:has-text('登录')", "input[type='submit']",
                 ])

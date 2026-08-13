@@ -464,7 +464,9 @@ async function startGYJBackgroundLogin() {
             body: JSON.stringify({username, password, remember})
         });
         const data = await response.json();
-        document.getElementById('gyjPassword').value = '';
+        if (data.logged_in || data.waiting_captcha) {
+            document.getElementById('gyjPassword').value = '';
+        }
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
         if (data.waiting_captcha) refreshGYJCaptchaPreview();
         document.getElementById('gyjStartBtn').disabled = !data.logged_in;
