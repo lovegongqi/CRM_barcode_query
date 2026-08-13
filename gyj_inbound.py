@@ -292,6 +292,10 @@ class GYJPlaywrightPage:
 
     def _fill_serials(self, row, serials):
         serial_button = row.locator(".ant-input-search-icon")
+        for _ in range(50):
+            if serial_button.count() == 1:
+                break
+            self.page.wait_for_timeout(100)
         if serial_button.count() != 1:
             raise GYJInboundError("未找到 GYJ 序列号录入按钮")
         serial_button.click()

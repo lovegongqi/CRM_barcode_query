@@ -304,6 +304,37 @@ class _ActualInboundRow:
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _SerialButton:
+    def __init__(self):
+        self.clicked = False
+        self.ready = False
+        self.first = self
+
+    def count(self):
+        return 1 if self.ready else 0
+
+    def click(self):
+        self.clicked = True
+
+
+class _SerialInputRow:
+    def __init__(self):
+        self.button = _SerialButton()
+
+    def locator(self, selector):
+        if selector == ".ant-input-search-icon":
+            return self.button
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _SerialRenderPage(_ActualGYJSavePage):
+    def __init__(self, row):
+        self.row = row
+
+    def wait_for_timeout(self, timeout):
+        self.row.button.ready = True
+
+
 class _ActionButton:
     def __init__(self):
         self.clicked = False
@@ -359,6 +390,16 @@ class _ProductSearchModal:
         if text in ("查 询", "查询") and exact:
             return self.query
         return _MissingButton()
+
+
+class _SerialEntryModal:
+    def __init__(self):
+        self.serial_input = _SelectSearchInput()
+
+    def locator(self, selector):
+        if selector == 'textarea[placeholder="多个序列号用逗号隔开，请少于2000个字符"]':
+            return self.serial_input
+        raise AssertionError(f"unexpected selector: {selector}")
 
 
 class _ProductSelectionRow:
@@ -843,6 +884,16 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(row.quantity_input.value, "10")
         self.assertEqual(row.quantity_input.key, "Tab")
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
+
+    def test_waits_for_serial_entry_icon_after_product_selection(self):
+        row = _SerialInputRow()
+        adapter = GYJPlaywrightPage(_SerialRenderPage(row))
+        adapter._visible_modal = lambda: _SerialEntryModal()
+        adapter._click_exact = lambda *args: None
+
+        adapter._fill_serials(row, ["8432604240024"])
+
+        self.assertTrue(row.button.clicked)
 
     def test_reports_product_search_result_count_when_item_is_missing(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
