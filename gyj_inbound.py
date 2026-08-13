@@ -271,7 +271,9 @@ class GYJPlaywrightPage:
         self.page.wait_for_timeout(800)
         result_rows = modal.locator("tr").filter(has_text=product_code)
         if result_rows.count() != 1:
-            raise GYJInboundError(f"未找到唯一的 GYJ 物料编码：{product_code}")
+            raise GYJInboundError(
+                f"未找到唯一的 GYJ 物料编码：{product_code}（结果行={result_rows.count()}）"
+            )
         checkbox = result_rows.first.locator('input[type="checkbox"]')
         if checkbox.count() != 1:
             raise GYJInboundError(f"GYJ 物料 {product_code} 没有可选项")

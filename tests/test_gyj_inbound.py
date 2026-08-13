@@ -195,7 +195,7 @@ class _ActualGYJSavePage:
         self.timeout = timeout
 
     def locator(self, selector):
-        if selector != "body":
+        if selector not in ("body", "[disabled]"):
             raise AssertionError(f"unexpected selector: {selector}")
         return self
 
@@ -254,6 +254,73 @@ class _ActualInboundRow:
     def locator(self, selector):
         if selector == 'input[id^="operNumber_"]':
             return self.quantity_input
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _ActionButton:
+    def __init__(self):
+        self.clicked = False
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def click(self):
+        self.clicked = True
+
+
+class _ProductSearchInput:
+    def __init__(self):
+        self.value = ""
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def filter(self, **kwargs):
+        return self
+
+    def fill(self, value):
+        self.value = value
+
+
+class _NoProductRows:
+    def __init__(self):
+        self.first = self
+
+    def count(self):
+        return 0
+
+    def filter(self, **kwargs):
+        return self
+
+
+class _ProductSearchModal:
+    def __init__(self):
+        self.search = _ProductSearchInput()
+        self.query = _ActionButton()
+        self.rows = _NoProductRows()
+
+    def locator(self, selector):
+        if selector == "input":
+            return self.search
+        if selector == "tr":
+            return self.rows
+        raise AssertionError(f"unexpected selector: {selector}")
+
+    def get_by_text(self, text, exact):
+        if text in ("查 询", "查询") and exact:
+            return self.query
+        return _MissingButton()
+
+
+class _ProductSelectionRow:
+    def __init__(self):
+        self.button = _ActionButton()
+
+    def locator(self, selector):
+        if selector == "button.ant-btn.ant-btn-icon-only":
+            return self.button
         raise AssertionError(f"unexpected selector: {selector}")
 
 
@@ -703,6 +770,14 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(row.quantity_input.value, "10")
         self.assertEqual(row.quantity_input.key, "Tab")
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
+
+    def test_reports_product_search_result_count_when_item_is_missing(self):
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        modal = _ProductSearchModal()
+        adapter._visible_modal = lambda: modal
+
+        with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
+            adapter._choose_product(_ProductSelectionRow(), "406005116")
 
     def test_inserts_another_row_after_the_first_prepared_line(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
