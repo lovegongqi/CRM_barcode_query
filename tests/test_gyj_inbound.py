@@ -246,6 +246,15 @@ class _NotificationOnlyGYJSavePage(_ActualGYJSavePage):
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _ValidationErrorGYJSavePage(_ActualGYJSavePage):
+    def locator(self, selector):
+        if selector == "body":
+            return _SaveNotification("")
+        if selector == ".ant-form-explain:visible, .ant-message-error:visible, .ant-notification-notice-description:visible":
+            return _SaveNotification("请选择结算账户")
+        return super().locator(selector)
+
+
 class _RowCollection:
     def __init__(self, rows):
         self.rows = rows
@@ -880,6 +889,14 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.click_plain_save()
 
         self.assertTrue(form.save_button.clicked)
+
+    def test_reports_gyj_visible_validation_error_after_save(self):
+        form = _ActualGYJSaveForm()
+        adapter = GYJPlaywrightPage(_ValidationErrorGYJSavePage())
+        adapter.form = form
+
+        with self.assertRaisesRegex(GYJInboundError, "请选择结算账户"):
+            adapter.click_plain_save()
 
     def test_reports_actual_button_labels_when_plain_save_is_not_unique(self):
         form = _ActualGYJSaveForm()

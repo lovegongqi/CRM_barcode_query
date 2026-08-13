@@ -366,6 +366,12 @@ class GYJPlaywrightPage:
             if "保存成功" in confirmation or "操作成功" in confirmation:
                 return ""
             self.page.wait_for_timeout(100)
+        feedback = [text.strip() for text in self.page.locator(
+            ".ant-form-explain:visible, .ant-message-error:visible, "
+            ".ant-notification-notice-description:visible"
+        ).all_inner_texts() if text.strip()]
+        if feedback:
+            raise GYJInboundError(f"GYJ 保存被拒绝：{' | '.join(feedback)}")
         raise GYJInboundError("GYJ 未确认采购入库单保存成功")
 
 
