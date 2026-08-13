@@ -174,9 +174,19 @@ class GYJPlaywrightPage:
                 input_visible = search_input.is_visible()
             except Exception:
                 input_visible = "未知"
+            try:
+                control_state = trigger.evaluate(
+                    "element => ({role: element.getAttribute('role') || '', "
+                    "class_name: element.className || '', visible: !!(element.offsetWidth || element.offsetHeight)})"
+                ) or {}
+                control_role = control_state.get("role") or "无"
+                control_visible = control_state.get("visible")
+            except Exception:
+                control_role = "未知"
+                control_visible = "未知"
             raise GYJInboundError(
                 f"GYJ 供应商候选未出现（控件展开={expanded}，输入框可见={input_visible}，"
-                f"候选层ID={dropdown_id or '无'}）"
+                f"候选层ID={dropdown_id or '无'}，控件角色={control_role}，控件可见={control_visible}）"
             ) from error
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")

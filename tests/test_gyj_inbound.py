@@ -317,6 +317,9 @@ class _LegacySelectTrigger:
     def get_attribute(self, name):
         return ""
 
+    def evaluate(self, script):
+        return {"class_name": "ant-select-selection", "role": "combobox"}
+
     def locator(self, selector):
         return _MissingSelect()
 
@@ -341,6 +344,9 @@ class _SelectSearchInput:
 
     def is_visible(self):
         return self.visible
+
+    def get_attribute(self, name):
+        return "" if name == "style" else None
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -684,7 +690,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GYJInboundError,
-            r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7",
+            r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7，控件角色=combobox",
         ):
             adapter.select_header("供应商", "昆山怡口净水")
 
