@@ -449,6 +449,13 @@ class GYJPlaywrightPage:
                 confirmation = f"{notice_text}\n{page_text}"
                 if "保存成功" in confirmation or "操作成功" in confirmation:
                     return ""
+                if any(
+                    response.startswith("200 addDepotHeadAndDetail ")
+                    and ('"code":200' in response or '"code": 200' in response)
+                    and ("操作成功" in response or "保存成功" in response)
+                    for response in responses
+                ):
+                    return ""
                 self.page.wait_for_timeout(100)
         finally:
             if can_capture and callable(getattr(self.page, "remove_listener", None)):

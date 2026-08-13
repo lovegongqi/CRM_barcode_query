@@ -292,6 +292,14 @@ class _SaveResponse:
         return '{"code":500,"message":"单据校验失败"}'
 
 
+class _SuccessfulSaveResponse(_SaveResponse):
+    status = 200
+    url = "https://cloud.gyjerp.com/jshERP-boot/depotHead/addDepotHeadAndDetail"
+
+    def text(self):
+        return '{"msg":"操作成功","code":200}'
+
+
 class _ResponseSaveButton(_SaveButton):
     def __init__(self, page):
         super().__init__()
@@ -303,9 +311,21 @@ class _ResponseSaveButton(_SaveButton):
             handler(_SaveResponse())
 
 
+class _SuccessfulResponseSaveButton(_ResponseSaveButton):
+    def click(self):
+        _SaveButton.click(self)
+        for handler in self.page.response_handlers:
+            handler(_SuccessfulSaveResponse())
+
+
 class _ResponseGYJSaveForm(_ActualGYJSaveForm):
     def __init__(self, page):
         self.save_button = _ResponseSaveButton(page)
+
+
+class _SuccessfulResponseGYJSaveForm(_ActualGYJSaveForm):
+    def __init__(self, page):
+        self.save_button = _SuccessfulResponseSaveButton(page)
 
 
 class _ResponseGYJSavePage(_ValidationErrorGYJSavePage):
@@ -1111,6 +1131,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         with self.assertRaisesRegex(GYJInboundError, r"接口反馈.*400.*单据校验失败"):
             adapter.click_plain_save()
+
+    def test_accepts_successful_gyj_save_api_response_without_a_toast(self):
+        page = _ResponseGYJSavePage()
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _SuccessfulResponseGYJSaveForm(page)
+
+        adapter.click_plain_save()
+
+        self.assertTrue(adapter.form.save_button.clicked)
 
     def test_reports_actual_button_labels_when_plain_save_is_not_unique(self):
         form = _ActualGYJSaveForm()
