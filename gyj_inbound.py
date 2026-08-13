@@ -130,6 +130,13 @@ class GYJPlaywrightPage:
         if field.count() != 1:
             raise GYJInboundError(f"未找到 GYJ 表头字段：{label}")
         field = field.first
+        try:
+            field_value = field.inner_text().strip()
+        except Exception:
+            field_value = ""
+        if label == "供应商" and value and value in field_value:
+            self._headers[label] = value
+            return
         trigger = field.locator(".ant-select-selector").first
         if trigger.count() != 1:
             trigger = field.locator(".ant-select-selection").first
@@ -138,15 +145,18 @@ class GYJPlaywrightPage:
         selected = trigger.locator(
             ".ant-select-selection-selected-value, .ant-select-selection-item"
         ).first
-        for _ in range(40):
-            selected_value = selected.inner_text().strip() if selected.count() == 1 else ""
-            if selected_value == value or (
-                label == "供应商" and value and value in selected_value
-            ):
-                self._headers[label] = value
-                return
-            self.page.wait_for_timeout(200)
+        selected_value = selected.inner_text().strip() if selected.count() == 1 else ""
+        if selected_value == value or (
+            label == "供应商" and value and value in selected_value
+        ):
+            self._headers[label] = value
+            return
         trigger.click(force=True)
+        search_input = trigger.locator("input").first
+        if search_input.count() != 1:
+            search_input = field.locator("input").first
+        if label == "供应商" and search_input.count() == 1:
+            search_input.fill(value)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
         dropdown.wait_for(state="visible", timeout=5000)
         if dropdown.count() < 1:

@@ -306,6 +306,29 @@ class _LegacySelectTrigger:
         return _MissingSelect()
 
 
+class _SelectSearchInput:
+    def __init__(self):
+        self.value = ""
+        self.first = self
+
+    def count(self):
+        return 1
+
+    def fill(self, value):
+        self.value = value
+
+
+class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
+    def __init__(self):
+        super().__init__()
+        self.search_input = _SelectSearchInput()
+
+    def locator(self, selector):
+        if selector == "input":
+            return self.search_input
+        return _MissingSelect()
+
+
 class _SelectedText:
     def __init__(self, value):
         self.value = value
@@ -372,6 +395,21 @@ class _SelectedLegacyHeaderField(_LegacyHeaderField):
         self.first = self
 
 
+class _SearchableLegacyHeaderField(_LegacyHeaderField):
+    def __init__(self):
+        self.trigger = _SearchableLegacySelectTrigger()
+        self.first = self
+
+
+class _FieldTextLegacyHeaderField(_LegacyHeaderField):
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    def inner_text(self):
+        return f"供应商 {self.value}"
+
+
 class _DelayedSelectedLegacyHeaderField(_LegacyHeaderField):
     def __init__(self, value):
         self.trigger = _DelayedSelectedLegacyTrigger(value)
@@ -434,6 +472,18 @@ class _LegacyHeaderForm:
 class _SelectedLegacyHeaderForm(_LegacyHeaderForm):
     def __init__(self, value):
         self.field = _SelectedLegacyHeaderField(value)
+        self.fields = _HeaderFieldCollection(self.field)
+
+
+class _SearchableLegacyHeaderForm(_LegacyHeaderForm):
+    def __init__(self):
+        self.field = _SearchableLegacyHeaderField()
+        self.fields = _HeaderFieldCollection(self.field)
+
+
+class _FieldTextLegacyHeaderForm(_LegacyHeaderForm):
+    def __init__(self, value):
+        self.field = _FieldTextLegacyHeaderField(value)
         self.fields = _HeaderFieldCollection(self.field)
 
 
@@ -569,6 +619,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
 
+    def test_searches_supplier_before_waiting_for_dropdown(self):
+        page = _LegacyHeaderPage("昆山怡口净水")
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _SearchableLegacyHeaderForm()
+
+        adapter.select_header("供应商", "昆山怡口净水")
+
+        self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
+        self.assertTrue(page.dropdown.choice.clicked)
+
     def test_keeps_supplier_when_the_form_already_shows_the_default(self):
         page = _LegacyHeaderPage("昆山怡口净水")
         adapter = GYJPlaywrightPage(page)
@@ -579,7 +640,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertFalse(adapter.form.field.trigger.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
-    def test_waits_for_the_delayed_default_supplier_instead_of_opening_dropdown(self):
+    def test_keeps_supplier_when_only_the_form_field_shows_the_default(self):
+        page = _LegacyHeaderPage("昆山怡口净水")
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _FieldTextLegacyHeaderForm("昆山怡口净水系统有限公司")
+
+        adapter.select_header("供应商", "昆山怡口净水")
+
+        self.assertFalse(adapter.form.field.trigger.clicked)
+        self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
+
+    def test_selects_supplier_immediately_when_default_has_not_rendered(self):
         form = _DelayedSelectedLegacyHeaderForm("昆山怡口净水系统有限公司")
         page = _DelayedSelectedLegacyHeaderPage(form)
         adapter = GYJPlaywrightPage(page)
@@ -587,7 +658,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertFalse(form.field.trigger.clicked)
+        self.assertTrue(form.field.trigger.clicked)
+        self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
 
