@@ -356,11 +356,17 @@ class GYJPlaywrightPage:
             suffix = f"（可用按钮：{' | '.join(label for label in labels if label)}）" if labels else ""
             raise GYJInboundError(f"未找到唯一的 GYJ 普通保存按钮{suffix}")
         save.click()
-        self.page.wait_for_timeout(800)
-        page_text = self.page.locator("body").inner_text()
-        if "保存成功" not in page_text and "操作成功" not in page_text:
-            raise GYJInboundError("GYJ 未确认采购入库单保存成功")
-        return ""
+        for _ in range(100):
+            notice_text = "\n".join(self.page.locator(
+                ".ant-message-notice-content, .ant-notification-notice-message, "
+                ".ant-notification-notice-description"
+            ).all_inner_texts())
+            page_text = self.page.locator("body").inner_text()
+            confirmation = f"{notice_text}\n{page_text}"
+            if "保存成功" in confirmation or "操作成功" in confirmation:
+                return ""
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError("GYJ 未确认采购入库单保存成功")
 
 
 def _serial_chunks(serials):

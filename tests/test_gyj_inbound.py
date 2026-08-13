@@ -214,12 +214,36 @@ class _ActualGYJSavePage:
         self.timeout = timeout
 
     def locator(self, selector):
+        if selector == ".ant-message-notice-content, .ant-notification-notice-message, .ant-notification-notice-description":
+            return _SaveNotification("")
         if selector not in ("body", "[disabled]"):
             raise AssertionError(f"unexpected selector: {selector}")
         return self
 
     def inner_text(self):
         return "保存成功"
+
+
+class _SaveNotification:
+    def __init__(self, text):
+        self.text = text
+
+    def all_inner_texts(self):
+        return [self.text]
+
+    def inner_text(self):
+        return self.text
+
+
+class _NotificationOnlyGYJSavePage(_ActualGYJSavePage):
+    def locator(self, selector):
+        if selector == "body":
+            return _SaveNotification("")
+        if selector == ".ant-message-notice-content, .ant-notification-notice-message, .ant-notification-notice-description":
+            return _SaveNotification("保存成功")
+        if selector == "[disabled]":
+            return self
+        raise AssertionError(f"unexpected selector: {selector}")
 
 
 class _RowCollection:
@@ -842,6 +866,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
     def test_uses_actual_plain_save_button_label(self):
         form = _ActualGYJSaveForm()
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+        adapter.form = form
+
+        adapter.click_plain_save()
+
+        self.assertTrue(form.save_button.clicked)
+
+    def test_accepts_the_asynchronous_gyj_save_notification(self):
+        form = _ActualGYJSaveForm()
+        adapter = GYJPlaywrightPage(_NotificationOnlyGYJSavePage())
         adapter.form = form
 
         adapter.click_plain_save()
