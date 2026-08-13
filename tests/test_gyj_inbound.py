@@ -322,7 +322,10 @@ class _LegacySelectTrigger:
         return ""
 
     def evaluate(self, script):
-        return {"class_name": "ant-select-selection", "role": "combobox"}
+        return {
+            "class_name": "ant-select-selection", "role": "combobox",
+            "visible": True, "tabindex": "0", "owner_class": "ant-select", "point_class": "ant-select-selection",
+        }
 
     def locator(self, selector):
         return _MissingSelect()
@@ -703,7 +706,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         with self.assertRaisesRegex(
             GYJInboundError,
-            r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7，控件角色=combobox",
+            r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7，控件角色=combobox，控件可见=True，控件tabindex=0，外层类=ant-select，点击点类=ant-select-selection",
         ):
             adapter.select_header("供应商", "昆山怡口净水")
 

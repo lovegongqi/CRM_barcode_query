@@ -178,17 +178,30 @@ class GYJPlaywrightPage:
                 input_visible = "未知"
             try:
                 control_state = trigger.evaluate(
-                    "element => ({role: element.getAttribute('role') || '', "
-                    "class_name: element.className || '', visible: !!(element.offsetWidth || element.offsetHeight)})"
+                    "element => { const box = element.getBoundingClientRect(); "
+                    "const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2); "
+                    "const owner = element.closest('.ant-select'); return {"
+                    "role: element.getAttribute('role') || '', class_name: element.className || '', "
+                    "tabindex: element.getAttribute('tabindex') || '', "
+                    "owner_class: owner ? owner.className || '' : '', "
+                    "point_class: point ? point.className || point.tagName || '' : '', "
+                    "visible: !!(element.offsetWidth || element.offsetHeight)} }"
                 ) or {}
                 control_role = control_state.get("role") or "无"
                 control_visible = control_state.get("visible")
+                control_tabindex = control_state.get("tabindex") or "无"
+                owner_class = control_state.get("owner_class") or "无"
+                point_class = control_state.get("point_class") or "无"
             except Exception:
                 control_role = "未知"
                 control_visible = "未知"
+                control_tabindex = "未知"
+                owner_class = "未知"
+                point_class = "未知"
             raise GYJInboundError(
                 f"GYJ 供应商候选未出现（控件展开={expanded}，输入框可见={input_visible}，"
-                f"候选层ID={dropdown_id or '无'}，控件角色={control_role}，控件可见={control_visible}）"
+                f"候选层ID={dropdown_id or '无'}，控件角色={control_role}，控件可见={control_visible}，"
+                f"控件tabindex={control_tabindex}，外层类={owner_class}，点击点类={point_class}）"
             ) from error
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")
