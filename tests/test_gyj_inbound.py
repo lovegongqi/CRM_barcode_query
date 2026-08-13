@@ -301,9 +301,10 @@ class _LegacySelectTrigger:
     def count(self):
         return 1
 
-    def click(self, force=False):
+    def click(self, force=False, timeout=None):
         self.clicked = True
         self.force = force
+        self.timeout = timeout
 
     def dispatch_event(self, name):
         self.mouse_down = name == "mousedown"
@@ -335,9 +336,10 @@ class _SelectSearchInput:
     def count(self):
         return 1
 
-    def fill(self, value, force=False):
+    def fill(self, value, force=False, timeout=None):
         self.value = value
         self.force = force
+        self.timeout = timeout
 
     def focus(self):
         self.focused = True
@@ -661,8 +663,9 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水系统有限公司")
 
-        self.assertTrue(adapter.form.field.trigger.focused)
-        self.assertEqual(adapter.form.field.trigger.key, "ArrowDown")
+        self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertFalse(adapter.form.field.trigger.force)
+        self.assertEqual(adapter.form.field.trigger.timeout, 10000)
         self.assertEqual(page.dropdown.waited, ("attached", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
@@ -674,11 +677,13 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(adapter.form.field.trigger.focused)
-        self.assertEqual(adapter.form.field.trigger.key, "ArrowDown")
+        self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertFalse(adapter.form.field.trigger.force)
+        self.assertEqual(adapter.form.field.trigger.timeout, 10000)
         self.assertTrue(adapter.form.field.trigger.search_input.focused)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
-        self.assertTrue(adapter.form.field.trigger.search_input.force)
+        self.assertFalse(adapter.form.field.trigger.search_input.force)
+        self.assertEqual(adapter.form.field.trigger.search_input.timeout, 10000)
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertIn('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', page.selectors)
         self.assertNotIn(".ant-select-dropdown", page.selectors)
@@ -722,8 +727,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(form.field.trigger.focused)
-        self.assertEqual(form.field.trigger.key, "ArrowDown")
+        self.assertTrue(form.field.trigger.clicked)
+        self.assertFalse(form.field.trigger.force)
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 

@@ -151,14 +151,13 @@ class GYJPlaywrightPage:
         ):
             self._headers[label] = value
             return
-        trigger.focus()
-        trigger.press("ArrowDown")
+        trigger.click(timeout=10000)
         search_input = trigger.locator("input").first
         if search_input.count() != 1:
             search_input = field.locator("input").first
         if label == "供应商" and search_input.count() == 1:
             search_input.focus()
-            search_input.fill(value, force=True)
+            search_input.fill(value, timeout=10000)
         dropdown_id = trigger.get_attribute("aria-controls") or ""
         dropdown = self.page.locator(f'[id="{dropdown_id}"]') if dropdown_id else self.page.locator(
             ".ant-select-dropdown"
