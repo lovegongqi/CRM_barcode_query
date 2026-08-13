@@ -310,12 +310,14 @@ class _SelectSearchInput:
     def __init__(self):
         self.value = ""
         self.first = self
+        self.force = False
 
     def count(self):
         return 1
 
-    def fill(self, value):
+    def fill(self, value, force=False):
         self.value = value
+        self.force = force
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -628,6 +630,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertTrue(adapter.form.field.trigger.clicked)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
+        self.assertTrue(adapter.form.field.trigger.search_input.force)
         self.assertTrue(page.dropdown.choice.clicked)
 
     def test_keeps_supplier_when_the_form_already_shows_the_default(self):

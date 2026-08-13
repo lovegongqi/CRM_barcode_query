@@ -156,7 +156,7 @@ class GYJPlaywrightPage:
         if search_input.count() != 1:
             search_input = field.locator("input").first
         if label == "供应商" and search_input.count() == 1:
-            search_input.fill(value)
+            search_input.fill(value, force=True)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
         dropdown.wait_for(state="visible", timeout=5000)
         if dropdown.count() < 1:
