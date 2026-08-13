@@ -355,23 +355,44 @@ class GYJPlaywrightPage:
                 labels = []
             suffix = f"（可用按钮：{' | '.join(label for label in labels if label)}）" if labels else ""
             raise GYJInboundError(f"未找到唯一的 GYJ 普通保存按钮{suffix}")
-        save.click()
-        for _ in range(100):
-            notice_text = "\n".join(self.page.locator(
-                ".ant-message-notice-content, .ant-notification-notice-message, "
-                ".ant-notification-notice-description"
-            ).all_inner_texts())
-            page_text = self.page.locator("body").inner_text()
-            confirmation = f"{notice_text}\n{page_text}"
-            if "保存成功" in confirmation or "操作成功" in confirmation:
-                return ""
-            self.page.wait_for_timeout(100)
+        responses = []
+
+        def capture_response(response):
+            url = str(getattr(response, "url", "")).split("?", 1)[0]
+            if "/jshERP-boot/" not in url:
+                return
+            try:
+                message = " ".join(str(response.text() or "").split())[:240]
+            except Exception:
+                message = ""
+            responses.append(f"{getattr(response, 'status', '未知')} {url.rsplit('/', 1)[-1]} {message}".strip())
+
+        can_capture = callable(getattr(self.page, "on", None))
+        if can_capture:
+            self.page.on("response", capture_response)
+        try:
+            save.click()
+            for _ in range(100):
+                notice_text = "\n".join(self.page.locator(
+                    ".ant-message-notice-content, .ant-notification-notice-message, "
+                    ".ant-notification-notice-description"
+                ).all_inner_texts())
+                page_text = self.page.locator("body").inner_text()
+                confirmation = f"{notice_text}\n{page_text}"
+                if "保存成功" in confirmation or "操作成功" in confirmation:
+                    return ""
+                self.page.wait_for_timeout(100)
+        finally:
+            if can_capture and callable(getattr(self.page, "remove_listener", None)):
+                self.page.remove_listener("response", capture_response)
         feedback = [text.strip() for text in self.page.locator(
             ".ant-form-explain:visible, .ant-message-error:visible, "
             ".ant-notification-notice-description:visible"
         ).all_inner_texts() if text.strip()]
         if feedback:
             raise GYJInboundError(f"GYJ 保存被拒绝：{' | '.join(feedback)}")
+        if responses:
+            raise GYJInboundError(f"GYJ 保存接口反馈：{' | '.join(responses[-3:])}")
         raise GYJInboundError("GYJ 未确认采购入库单保存成功")
 
 

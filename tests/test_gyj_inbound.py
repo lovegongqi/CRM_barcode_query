@@ -255,6 +255,48 @@ class _ValidationErrorGYJSavePage(_ActualGYJSavePage):
         return super().locator(selector)
 
 
+class _SaveResponse:
+    url = "https://cloud.gyjerp.com/jshERP-boot/depotHead/add"
+    status = 400
+
+    def text(self):
+        return '{"code":500,"message":"单据校验失败"}'
+
+
+class _ResponseSaveButton(_SaveButton):
+    def __init__(self, page):
+        super().__init__()
+        self.page = page
+
+    def click(self):
+        super().click()
+        for handler in self.page.response_handlers:
+            handler(_SaveResponse())
+
+
+class _ResponseGYJSaveForm(_ActualGYJSaveForm):
+    def __init__(self, page):
+        self.save_button = _ResponseSaveButton(page)
+
+
+class _ResponseGYJSavePage(_ValidationErrorGYJSavePage):
+    def __init__(self):
+        self.response_handlers = []
+
+    def on(self, event, handler):
+        if event == "response":
+            self.response_handlers.append(handler)
+
+    def locator(self, selector):
+        if selector == ".ant-form-explain:visible, .ant-message-error:visible, .ant-notification-notice-description:visible":
+            return _SaveNotification("")
+        return super().locator(selector)
+
+    def remove_listener(self, event, handler):
+        if event == "response":
+            self.response_handlers.remove(handler)
+
+
 class _RowCollection:
     def __init__(self, rows):
         self.rows = rows
@@ -896,6 +938,14 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.form = form
 
         with self.assertRaisesRegex(GYJInboundError, "请选择结算账户"):
+            adapter.click_plain_save()
+
+    def test_reports_gyj_save_api_rejection_when_no_page_error_is_visible(self):
+        page = _ResponseGYJSavePage()
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _ResponseGYJSaveForm(page)
+
+        with self.assertRaisesRegex(GYJInboundError, r"接口反馈.*400.*单据校验失败"):
             adapter.click_plain_save()
 
     def test_reports_actual_button_labels_when_plain_save_is_not_unique(self):
