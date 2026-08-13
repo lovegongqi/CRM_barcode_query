@@ -294,6 +294,8 @@ class _LegacySelectTrigger:
         self.clicked = False
         self.force = None
         self.mouse_down = False
+        self.focused = False
+        self.key = ""
         self.first = self
 
     def count(self):
@@ -305,6 +307,12 @@ class _LegacySelectTrigger:
 
     def dispatch_event(self, name):
         self.mouse_down = name == "mousedown"
+
+    def focus(self):
+        self.focused = True
+
+    def press(self, key):
+        self.key = key
 
     def get_attribute(self, name):
         return ""
@@ -647,7 +655,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水系统有限公司")
 
-        self.assertTrue(adapter.form.field.trigger.mouse_down)
+        self.assertTrue(adapter.form.field.trigger.focused)
+        self.assertEqual(adapter.form.field.trigger.key, "ArrowDown")
         self.assertEqual(page.dropdown.waited, ("attached", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
@@ -659,7 +668,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(adapter.form.field.trigger.mouse_down)
+        self.assertTrue(adapter.form.field.trigger.focused)
+        self.assertEqual(adapter.form.field.trigger.key, "ArrowDown")
         self.assertTrue(adapter.form.field.trigger.search_input.focused)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertTrue(adapter.form.field.trigger.search_input.force)
@@ -706,7 +716,8 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(form.field.trigger.mouse_down)
+        self.assertTrue(form.field.trigger.focused)
+        self.assertEqual(form.field.trigger.key, "ArrowDown")
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 

@@ -151,7 +151,8 @@ class GYJPlaywrightPage:
         ):
             self._headers[label] = value
             return
-        trigger.dispatch_event("mousedown")
+        trigger.focus()
+        trigger.press("ArrowDown")
         search_input = trigger.locator("input").first
         if search_input.count() != 1:
             search_input = field.locator("input").first
