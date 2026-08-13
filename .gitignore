@@ -12,6 +12,7 @@ results/
 
 # Browser/session state
 session/
+gyj_session/
 **/storage_state.json
 
 # Logs and process files

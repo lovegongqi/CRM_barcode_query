@@ -51,6 +51,89 @@ class FakeInboundWorker:
         }
 
 
+class FakeGYJWorker:
+    def __init__(self, logged_in=True):
+        self.logged_in = logged_in
+        self.saved = []
+        self.login_calls = []
+        self.captcha_calls = []
+
+    def get(self, owner):
+        self.owner = owner
+        return self
+
+    def login_step1(self, username, password):
+        self.login_calls.append((username, password))
+        self.logged_in = True
+        return True, "GYJ 登录成功"
+
+    def login_step2(self, captcha):
+        self.captcha_calls.append(captcha)
+        self.logged_in = True
+        return True, "GYJ 登录成功"
+
+    def captcha_preview(self):
+        return "data:image/png;base64,ZmFrZQ=="
+
+    def check_login_status(self):
+        return self.logged_in, ""
+
+    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+        self.saved.append((packing_slip_no, list(lines)))
+        if log:
+            log("正在新建 GYJ 采购入库单")
+        if progress:
+            progress({"current_line": len(lines), "total_lines": len(lines)})
+        return True, {"packing_slip_no": packing_slip_no, "order_no": "CG202608130001"}
+
+
+class _CaptchaImageLocator:
+    def __init__(self, visible=True):
+        self.first = self
+        self.visible = visible
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return self.visible
+
+    def screenshot(self, type):
+        self.screenshot_type = type
+        return b"actual-captcha"
+
+
+class _EmptyLocator:
+    first = None
+
+    def count(self):
+        return 0
+
+
+class _GYJLoginCaptchaPage:
+    url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self):
+        self.captcha_image = _CaptchaImageLocator()
+
+    def locator(self, selector):
+        if selector == "form#formLogin img":
+            return self.captcha_image
+        return _EmptyLocator()
+
+
+class GYJCaptchaPreviewTest(unittest.TestCase):
+    def test_uses_visible_login_form_captcha_image(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _GYJLoginCaptchaPage()
+        session.page = page
+
+        preview = session.captcha_preview()
+
+        self.assertEqual(preview, "data:image/png;base64,YWN0dWFsLWNhcHRjaGE=")
+        self.assertEqual(page.captcha_image.screenshot_type, "png")
+
+
 class InboundRouteTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -96,6 +179,10 @@ class InboundRouteTest(unittest.TestCase):
                 app_module.inbound_jobs.clear()
                 app_module.latest_inbound_job_by_owner.clear()
                 app_module.latest_inbound_job_by_slot.clear()
+        if hasattr(app_module, "inbound_gyj_job_lock"):
+            with app_module.inbound_gyj_job_lock:
+                app_module.inbound_gyj_jobs.clear()
+                app_module.latest_inbound_gyj_job_by_owner.clear()
         with app_module.batch_job_lock:
             app_module.batch_jobs.clear()
             app_module.latest_batch_job_by_slot.clear()
@@ -109,6 +196,10 @@ class InboundRouteTest(unittest.TestCase):
                 app_module.inbound_jobs.clear()
                 app_module.latest_inbound_job_by_owner.clear()
                 app_module.latest_inbound_job_by_slot.clear()
+        if hasattr(app_module, "inbound_gyj_job_lock"):
+            with app_module.inbound_gyj_job_lock:
+                app_module.inbound_gyj_jobs.clear()
+                app_module.latest_inbound_gyj_job_by_owner.clear()
         with app_module.batch_job_lock:
             app_module.batch_jobs.clear()
             app_module.latest_batch_job_by_slot.clear()
@@ -139,6 +230,17 @@ class InboundRouteTest(unittest.TestCase):
             time.sleep(0.01)
         self.fail("inbound job did not finish")
 
+    def _wait_for_gyj_job(self, client, job_id):
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            response = client.get(f"/api/inbound/gyj/status?job_id={job_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            if payload["done"]:
+                return payload
+            time.sleep(0.01)
+        self.fail("GYJ inbound job did not finish")
+
     def test_inbound_requires_its_own_permission(self):
         anonymous = app_module.app.test_client()
         page = anonymous.get("/inbound", follow_redirects=False)
@@ -165,6 +267,110 @@ class InboundRouteTest(unittest.TestCase):
         with mock.patch.object(app_module, "render_template", return_value="inbound page"):
             allowed_page = inbound_user.get("/inbound")
         self.assertEqual(allowed_page.status_code, 200)
+
+    def test_gyj_start_uses_only_the_current_successful_inbound_result(self):
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "duplicate_serials": [],
+                "items": [{
+                    "product_code": "916000024",
+                    "description": "中央净水机",
+                    "order_numbers": ["210524"],
+                    "serials": ["SN00000001"],
+                    "expected_quantity": 1,
+                    "serial_count": 1,
+                    "unbarcoded_quantity": 0,
+                    "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = FakeGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start")
+
+        self.assertEqual(started.status_code, 200)
+        job_id = started.get_json()["job_id"]
+        status = self._wait_for_gyj_job(client, job_id)
+        self.assertTrue(status["success"])
+        self.assertEqual(status["result"]["order_no"], "CG202608130001")
+        self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+        self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
+
+    def test_gyj_start_requires_visible_gyj_login(self):
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "items": [{
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001"],
+                    "expected_quantity": 1, "serial_count": 1,
+                    "unbarcoded_quantity": 0, "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("登录", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_credentials_never_return_password_and_are_owner_isolated(self):
+        admin = self._login("admin", "88293529")
+        saved = admin.post("/api/inbound/gyj/credentials", json={
+            "remember": True, "username": "gyj-admin", "password": "secret",
+        })
+        self.assertEqual(saved.status_code, 200)
+        payload = admin.get("/api/inbound/gyj/credentials").get_json()
+        self.assertTrue(payload["remember"])
+        self.assertEqual(payload["username"], "gyj-admin")
+        self.assertNotIn("password", payload)
+
+        other = self._login("inbound-other", "inbound-pass")
+        other_payload = other.get("/api/inbound/gyj/credentials").get_json()
+        self.assertFalse(other_payload["remember"])
+        self.assertEqual(other_payload["username"], "")
+
+    def test_gyj_background_login_forwards_credentials_only_to_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/login", json={
+                "username": "gyj-user", "password": "secret", "remember": False,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(worker.owner, "admin")
+        self.assertEqual(worker.login_calls, [("gyj-user", "secret")])
+
+    def test_gyj_captcha_preview_is_returned_only_for_current_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.get("/api/inbound/gyj/captcha-preview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
+        self.assertEqual(worker.owner, "admin")
 
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):
         client = self._login("admin", "88293529")

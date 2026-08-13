@@ -9,6 +9,7 @@ os.environ['ASYNCIO_CORE_EVENT_LOOP'] = '0'
 
 import re
 import json
+import base64
 import sqlite3
 import time
 import builtins
@@ -27,6 +28,12 @@ from inbound_extraction import (
     build_inbound_result,
     build_inbound_workbook,
     normalize_packing_slip_no,
+)
+from gyj_inbound import (
+    GYJInboundError,
+    GYJPlaywrightPage,
+    GYJPurchaseInboundWriter,
+    build_gyj_purchase_lines,
 )
 
 try:
@@ -3655,6 +3662,328 @@ class CRMWorker:
             self.logged_in_cache = False
         return result
 
+
+class GYJSession:
+    """独立、非持久化的 GYJ 浏览器会话；登录只通过可见页面完成。"""
+    login_url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self, session_dir):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.session_dir = session_dir
+        self.lock = threading.RLock()
+        self.logged_in = False
+        self.waiting_captcha = False
+
+    def is_alive(self):
+        try:
+            return bool(self.page and self.page.url)
+        except Exception:
+            return False
+
+    def _close_browser(self):
+        try:
+            if self.context:
+                self.context.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+        finally:
+            self.playwright = None
+            self.browser = None
+            self.context = None
+            self.page = None
+            self.logged_in = False
+            self.waiting_captcha = False
+
+    def _ensure_browser(self):
+        if self.is_alive():
+            return True
+        if not HAS_PLAYWRIGHT:
+            return False
+        self._close_browser()
+        os.makedirs(self.session_dir, exist_ok=True)
+        browser_cfg = load_crm_config().get("browser", {})
+        self.playwright = sync_playwright().start()
+        self.context = self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self.session_dir,
+            headless=browser_cfg.get("headless", True),
+            viewport=browser_cfg.get("viewport"),
+            user_agent=browser_cfg.get("user_agent"),
+            locale=browser_cfg.get("locale", "zh-CN"),
+            timezone_id=browser_cfg.get("timezone_id", "Asia/Shanghai"),
+            args=browser_cfg.get("args", []),
+        )
+        self.page = self.context.new_page()
+        return True
+
+    def _is_login_page(self):
+        return "/user/login" in (self.page.url or "").lower()
+
+    def _first_visible(self, selectors):
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                if locator.count() and locator.first.is_visible():
+                    return locator.first
+            except Exception:
+                continue
+        return None
+
+    def _captcha_input(self):
+        return self._first_visible([
+            "input[placeholder*='验证码']", "input[name*='captcha']",
+            "input[name*='verify']", "input[id*='captcha']", "input[id*='verify']",
+        ])
+
+    def captcha_preview(self):
+        """返回当前可见验证码图片；只保存在本次 API 响应内。"""
+        with self.lock:
+            if not self.is_alive():
+                return ""
+            image = self._first_visible([
+                "form#formLogin img",
+                "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
+                "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
+                "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
+                ".captcha img", ".verify img", ".verify-code img", ".captcha canvas",
+            ])
+            if not image:
+                return ""
+            try:
+                png = image.screenshot(type="png")
+                return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+            except Exception:
+                return ""
+
+    def login_step1(self, username, password):
+        if not username or not password:
+            return False, "请输入 GYJ 账号和密码"
+        with self.lock:
+            try:
+                if not self._ensure_browser():
+                    return False, "GYJ 浏览器未启动"
+                self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+                username_input = self._first_visible([
+                    "input[name='username']", "input[name='userName']", "input[name='account']",
+                    "input[placeholder*='账号']", "input[placeholder*='用户名']", "input[type='text']",
+                ])
+                password_input = self._first_visible([
+                    "input[name='password']", "input[name='pwd']", "input[type='password']",
+                ])
+                if not username_input or not password_input:
+                    return False, "未找到 GYJ 登录账号或密码输入框"
+                username_input.fill(username)
+                password_input.fill(password)
+                login_button = self._first_visible([
+                    "button[type='submit']", "button:has-text('登录')", "input[type='submit']",
+                ])
+                if not login_button:
+                    return False, "未找到 GYJ 登录按钮"
+                login_button.click()
+                self.page.wait_for_timeout(1200)
+                if not self._is_login_page():
+                    self.logged_in = True
+                    self.waiting_captcha = False
+                    return True, "GYJ 登录成功"
+                if self._captcha_input():
+                    self.logged_in = False
+                    self.waiting_captcha = True
+                    return True, "GYJ 等待验证码"
+                self.logged_in = False
+                self.waiting_captcha = False
+                return False, "GYJ 登录失败，请检查账号和密码"
+            except Exception as error:
+                self.logged_in = False
+                self.waiting_captcha = False
+                return False, str(error)
+
+    def login_step2(self, captcha):
+        if not str(captcha or "").strip():
+            return False, "请输入 GYJ 验证码"
+        with self.lock:
+            try:
+                if not self.is_alive():
+                    return False, "GYJ 登录会话已关闭，请重新后台登录"
+                captcha_input = self._captcha_input()
+                if not captcha_input:
+                    return False, "未找到 GYJ 验证码输入框，请重新后台登录"
+                captcha_input.fill(str(captcha).strip())
+                confirm = self._first_visible([
+                    "button:has-text('确定')", "button:has-text('登 录')", "button[type='submit']",
+                ])
+                if not confirm:
+                    return False, "未找到 GYJ 验证码确认按钮"
+                confirm.click()
+                self.page.wait_for_timeout(1200)
+                if not self._is_login_page():
+                    self.logged_in = True
+                    self.waiting_captcha = False
+                    return True, "GYJ 登录成功"
+                self.logged_in = False
+                self.waiting_captcha = bool(self._captcha_input())
+                return False, "GYJ 验证码无效或登录未完成"
+            except Exception as error:
+                return False, str(error)
+
+    def open_login(self):
+        with self.lock:
+            if not self._ensure_browser():
+                return False, "GYJ 浏览器未启动"
+            self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+            self.logged_in = False
+            self.waiting_captcha = False
+            return True, "GYJ 登录页面已打开，请在浏览器完成登录"
+
+    def check_login_status(self):
+        with self.lock:
+            if not self.is_alive():
+                return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
+            try:
+                url = (self.page.url or "").lower()
+                if "login" in url:
+                    self.logged_in = False
+                    self.waiting_captcha = bool(self._captcha_input())
+                    return False, "GYJ 等待验证码" if self.waiting_captcha else "仍在 GYJ 登录页，未登录"
+                if "cloud.gyjerp.com" not in url:
+                    self.logged_in = False
+                    return False, "无法确认 GYJ 登录状态"
+                self.logged_in = True
+                self.waiting_captcha = False
+                return True, "GYJ 已登录"
+            except Exception as error:
+                self.logged_in = False
+                return False, str(error)
+
+    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJPurchaseInboundWriter(
+                    GYJPlaywrightPage(self.page), log=log, progress=progress
+                ).save_packing_slip(packing_slip_no, lines)
+                return True, result
+            except GYJInboundError as error:
+                return False, str(error)
+            except Exception as error:
+                return False, str(error)
+
+    def shutdown(self):
+        with self.lock:
+            self._close_browser()
+            return True
+
+
+class GYJWorker:
+    """将 GYJ 的所有可见浏览器操作固定到同一线程。"""
+    def __init__(self, owner, session_dir):
+        self.owner = str(owner or '')
+        self.session_dir = session_dir
+        self.tasks = queue.Queue()
+        self.state_lock = threading.Lock()
+        self.browser_running = False
+        self.logged_in_cache = False
+        self.waiting_captcha_cache = False
+        self.current_task = ""
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _update_state(self, session):
+        with self.state_lock:
+            self.browser_running = session.is_alive()
+            self.logged_in_cache = bool(self.browser_running and session.logged_in)
+            self.waiting_captcha_cache = bool(self.browser_running and session.waiting_captcha)
+
+    def _run(self):
+        session = GYJSession(self.session_dir)
+        while True:
+            method_name, args, kwargs, result_queue = self.tasks.get()
+            try:
+                with self.state_lock:
+                    self.current_task = method_name
+                if method_name == "shutdown":
+                    result = session.shutdown()
+                    self._update_state(session)
+                    result_queue.put((True, result))
+                    return
+                result = getattr(session, method_name)(*args, **kwargs)
+                self._update_state(session)
+                result_queue.put((True, result))
+            except Exception as error:
+                self._update_state(session)
+                result_queue.put((False, str(error)))
+            finally:
+                with self.state_lock:
+                    self.current_task = ""
+
+    def _call(self, method_name, *args, **kwargs):
+        result_queue = queue.Queue(maxsize=1)
+        self.tasks.put((method_name, args, kwargs, result_queue))
+        ok, result = result_queue.get()
+        if ok:
+            return result
+        raise RuntimeError(result)
+
+    def open_login(self):
+        return self._call("open_login")
+
+    def login_step1(self, username, password):
+        return self._call("login_step1", username, password)
+
+    def login_step2(self, captcha):
+        return self._call("login_step2", captcha)
+
+    def captcha_preview(self):
+        return self._call("captcha_preview")
+
+    def check_login_status(self):
+        return self._call("check_login_status")
+
+    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+        return self._call("save_purchase_inbound", packing_slip_no, lines, log, progress)
+
+    def shutdown(self):
+        return self._call("shutdown")
+
+    @property
+    def waiting_captcha(self):
+        with self.state_lock:
+            return self.waiting_captcha_cache
+
+    @property
+    def logged_in(self):
+        with self.state_lock:
+            return self.logged_in_cache
+
+
+class GYJWorkerPool:
+    def __init__(self):
+        self.workers = {}
+        self.lock = threading.Lock()
+
+    def get(self, owner):
+        owner = str(owner or '').strip()
+        if not owner:
+            raise RuntimeError("未找到工具账号")
+        with self.lock:
+            if owner not in self.workers:
+                self.workers[owner] = GYJWorker(owner, _gyj_session_dir(owner))
+            return self.workers[owner]
+
+    def shutdown(self):
+        with self.lock:
+            workers = list(self.workers.values())
+        for worker in workers:
+            try:
+                worker.shutdown()
+            except Exception:
+                pass
+
 def _positive_int_env(name, default):
     try:
         value = int(os.environ.get(name, default))
@@ -3722,6 +4051,11 @@ def _crm_session_base_dir():
         return load_crm_config()["session"]["state_path"]
     except Exception:
         return os.path.join(RUNTIME_BASE_DIR, "session")
+
+
+def _gyj_session_dir(owner):
+    safe_owner = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner or "")) or "default"
+    return os.path.join(_runtime_data_base_dir(), "gyj_session", safe_owner)
 
 CRM_SLOT_STATE_FILE = os.path.join(_runtime_config_dir(), "crm_slot_state.json")
 crm_slot_state_lock = threading.Lock()
@@ -3849,6 +4183,7 @@ class CRMWorkerPool:
                 pass
 
 crm_pool = CRMWorkerPool()
+gyj_worker = GYJWorkerPool()
 
 def _desktop_startup_login_check_loop():
     """桌面应用启动后验证上次记住的 CRM 登录，避免显示假登录状态。"""
@@ -3939,6 +4274,10 @@ inbound_job_lock = threading.RLock()
 inbound_jobs = {}
 latest_inbound_job_by_owner = {}
 latest_inbound_job_by_slot = {}
+
+inbound_gyj_job_lock = threading.RLock()
+inbound_gyj_jobs = {}
+latest_inbound_gyj_job_by_owner = {}
 
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
@@ -4069,6 +4408,37 @@ def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
         for slot_id, mapped_job_id in list(latest_inbound_job_by_slot.items()):
             if mapped_job_id == job_id:
                 latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'packing_slip_no': str(packing_slip_no or ''),
+        'source_job_id': str(source_job_id or ''),
+        'stage': 'waiting',
+        'running': False,
+        'done': False,
+        'success': False,
+        'error': '',
+        'current_line': 0,
+        'total_lines': len(lines or []),
+        'log_seq': 0,
+        'logs': [],
+        'result': None,
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
+def _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_gyj_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_gyj_jobs.pop(job_id, None)
+        if latest_inbound_gyj_job_by_owner.get(owner) == job_id:
+            latest_inbound_gyj_job_by_owner.pop(owner, None)
 
 def _empty_summary_job(slot_id=None):
     return {
@@ -4931,6 +5301,7 @@ def _run_inbound_job(job_id, worker):
             packing_slip_no,
             source.get('rows') or [],
             source.get('page_counts') or [],
+            shipment_rows=source.get('shipment_rows') or [],
         )
         with inbound_job_lock:
             job = inbound_jobs.get(job_id)
@@ -4965,6 +5336,76 @@ def _run_inbound_job(job_id, worker):
         with inbound_job_lock:
             if latest_inbound_job_by_slot.get(slot_id) == job_id:
                 latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _run_inbound_gyj_job(job_id, worker, lines):
+    def set_stage(stage):
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = stage
+
+    def log(message, level='dim'):
+        text = str(message or '')
+        if '新建' in text:
+            set_stage('creating')
+        elif '录入' in text:
+            set_stage('filling')
+        elif '核对' in text:
+            set_stage('verifying')
+        elif '保存' in text:
+            set_stage('saving')
+        _job_log(inbound_gyj_job_lock, inbound_gyj_jobs, job_id, text, level, 300)
+
+    def progress(entry=None):
+        row = dict(entry or {})
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = 'filling'
+                job['current_line'] = int(row.get('current_line') or job.get('current_line') or 0)
+                job['total_lines'] = int(row.get('total_lines') or job.get('total_lines') or 0)
+
+    with inbound_gyj_job_lock:
+        job = inbound_gyj_jobs.get(job_id)
+        if not job:
+            return
+        job['stage'] = 'creating'
+        packing_slip_no = job['packing_slip_no']
+
+    try:
+        ok, result = worker.save_purchase_inbound(
+            packing_slip_no, lines, log=log, progress=progress,
+        )
+        if not ok:
+            raise GYJInboundError(_brief_batch_error(result, 800) or 'GYJ 采购入库保存失败')
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'success',
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'error': '',
+                    'result': result if isinstance(result, dict) else {},
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log('GYJ 采购入库单已保存', 'success')
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库保存失败'
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'failed',
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log(message, 'error')
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -5598,6 +6039,8 @@ TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
 CRM_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "crm_credentials.json")
 crm_credentials_lock = threading.Lock()
+GYJ_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "gyj_credentials.json")
+gyj_credentials_lock = threading.Lock()
 DEFAULT_OWN_DEALER_NAME = "江西省天麓工贸有限公司"
 DEFAULT_FROZEN_WAREHOUSE_NAME = "江西天麓冻结仓库"
 OWN_DEALER_NAME = DEFAULT_OWN_DEALER_NAME
@@ -5668,6 +6111,7 @@ def _migrate_config_files_from_barcode_dir():
         "runtime_config.json",
         "crm_slot_state.json",
         "crm_credentials.json",
+        "gyj_credentials.json",
     ):
         _migrate_root_config_file(filename)
     for filename in (
@@ -7848,6 +8292,58 @@ def save_remembered_crm_credentials(remember, username="", password=""):
     save_crm_credentials_store(data)
     return True
 
+
+def gyj_credentials_owner_key():
+    row = current_account()
+    if row and row.get("username"):
+        return str(row.get("username"))
+    return ""
+
+
+def load_gyj_credentials_store():
+    with gyj_credentials_lock:
+        try:
+            if not os.path.exists(GYJ_CREDENTIALS_FILE):
+                return {}
+            with open(GYJ_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+
+def save_gyj_credentials_store(data):
+    with gyj_credentials_lock:
+        os.makedirs(os.path.dirname(GYJ_CREDENTIALS_FILE), exist_ok=True)
+        with open(GYJ_CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_remembered_gyj_credentials():
+    key = gyj_credentials_owner_key()
+    row = load_gyj_credentials_store().get(key) if key else None
+    if not isinstance(row, dict) or not row.get("remember"):
+        return {"remember": False, "username": ""}
+    return {"remember": True, "username": str(row.get("username") or "")}
+
+
+def save_remembered_gyj_credentials(remember, username="", password=""):
+    key = gyj_credentials_owner_key()
+    if not key:
+        return False
+    data = load_gyj_credentials_store()
+    if remember:
+        data[key] = {
+            "remember": True,
+            "username": str(username or "").strip(),
+            "password": str(password or ""),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    else:
+        data.pop(key, None)
+    save_gyj_credentials_store(data)
+    return True
+
 PAGE_LINKS = [
     {'permission': 'crm', 'label': '查询', 'href': '/crm'},
     {'permission': 'results', 'label': '结果', 'href': '/'},
@@ -8932,6 +9428,28 @@ def _inbound_status_payload(job, owner=''):
     return payload
 
 
+def _inbound_gyj_status_payload(job, owner=''):
+    if not job:
+        return {
+            'job_id': '', 'owner': owner, 'packing_slip_no': '', 'source_job_id': '',
+            'stage': 'waiting', 'running': False, 'done': False, 'success': False,
+            'error': '', 'current_line': 0, 'total_lines': 0, 'logs': [],
+            'started_at': '', 'finished_at': '',
+        }
+    payload = {
+        key: job.get(key)
+        for key in (
+            'job_id', 'owner', 'packing_slip_no', 'source_job_id', 'stage', 'running',
+            'done', 'success', 'error', 'current_line', 'total_lines', 'started_at',
+            'finished_at',
+        )
+    }
+    payload['logs'] = list(job.get('logs') or [])
+    if job.get('done') and job.get('success') and isinstance(job.get('result'), dict):
+        payload['result'] = job['result']
+    return payload
+
+
 @app.route("/api/inbound/start", methods=["POST"])
 def api_inbound_start():
     data = request.get_json(silent=True) or {}
@@ -9035,6 +9553,152 @@ def api_inbound_export():
         download_name=f"{packing_slip_no}_入库明细.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.route("/api/inbound/gyj/credentials", methods=["GET", "POST"])
+def api_inbound_gyj_credentials():
+    if request.method == "GET":
+        return jsonify({"success": True, **get_remembered_gyj_credentials()})
+    data = request.get_json(silent=True) or {}
+    remember = bool(data.get("remember"))
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    if remember and (not username or not password):
+        return jsonify({"success": False, "error": "请输入 GYJ 账号和密码"}), 400
+    if not save_remembered_gyj_credentials(remember, username, password):
+        return jsonify({"success": False, "error": "保存 GYJ 登录信息失败"}), 500
+    return jsonify({"success": True, "remember": remember})
+
+
+@app.route("/api/inbound/gyj/login", methods=["POST"])
+def api_inbound_gyj_login():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    remember = bool(data.get("remember"))
+    if not username or not password:
+        return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
+    if not save_remembered_gyj_credentials(remember, username, password):
+        return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
+    worker = gyj_worker.get(_current_inbound_owner())
+    ok, message = worker.login_step1(username, password)
+    return jsonify({
+        'success': bool(ok), 'message': str(message or ''),
+        'logged_in': bool(worker.logged_in if hasattr(worker, 'logged_in') else ok),
+        'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False) or message == 'GYJ 等待验证码'),
+    }), (200 if ok else 409)
+
+
+@app.route("/api/inbound/gyj/login/captcha", methods=["POST"])
+def api_inbound_gyj_login_captcha():
+    data = request.get_json(silent=True) or {}
+    captcha = str(data.get("captcha") or "").strip()
+    worker = gyj_worker.get(_current_inbound_owner())
+    ok, message = worker.login_step2(captcha)
+    return jsonify({
+        'success': bool(ok), 'message': str(message or ''),
+        'logged_in': bool(getattr(worker, 'logged_in', ok)),
+        'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
+    }), (200 if ok else 409)
+
+
+@app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
+def api_inbound_gyj_captcha_preview():
+    worker = gyj_worker.get(_current_inbound_owner())
+    return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
+
+
+@app.route("/api/inbound/gyj/login-status", methods=["GET"])
+def api_inbound_gyj_login_status():
+    worker = gyj_worker.get(_current_inbound_owner())
+    ok, message = worker.check_login_status()
+    return jsonify({
+        'success': bool(ok), 'logged_in': bool(ok), 'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
+        'message': str(message or ''),
+    })
+
+
+@app.route("/api/inbound/gyj/start", methods=["POST"])
+def api_inbound_gyj_start():
+    owner = _current_inbound_owner()
+    with inbound_job_lock:
+        source_job_id = latest_inbound_job_by_owner.get(owner) or ''
+        source = inbound_jobs.get(source_job_id)
+        if not source or source.get('owner') != owner:
+            return jsonify({'success': False, 'error': '请先成功读取 CRM 装箱单'}), 409
+        if not source.get('done') or not source.get('success') or not isinstance(source.get('result'), dict):
+            return jsonify({'success': False, 'error': 'CRM 装箱单尚未成功读取完成'}), 409
+        packing_slip_no = source.get('packing_slip_no') or ''
+        source_result = dict(source['result'])
+
+    try:
+        lines = build_gyj_purchase_lines(source_result)
+    except GYJInboundError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+
+    worker = gyj_worker.get(owner)
+    logged_in, message = worker.check_login_status()
+    if not logged_in:
+        return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
+
+    with inbound_gyj_job_lock:
+        running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
+        running_job = inbound_gyj_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有 GYJ 采购入库任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+        _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner)
+        job = _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines)
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _append_job_log_unlocked(job, '已通过 GYJ 登录校验，准备创建采购入库单', 'info', 300)
+        inbound_gyj_jobs[job['job_id']] = job
+        latest_inbound_gyj_job_by_owner[owner] = job['job_id']
+
+    thread = threading.Thread(
+        target=_run_inbound_gyj_job,
+        args=(job['job_id'], worker, lines),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库任务启动失败'
+        with inbound_gyj_job_lock:
+            job.update({
+                'stage': 'failed', 'running': False, 'done': True, 'success': False,
+                'error': message, 'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+        return jsonify({'success': False, 'error': message}), 500
+
+    return jsonify({
+        'success': True,
+        'job_id': job['job_id'],
+        'packing_slip_no': packing_slip_no,
+        'total_lines': len(lines),
+    })
+
+
+@app.route("/api/inbound/gyj/status", methods=["GET"])
+def api_inbound_gyj_status():
+    owner = _current_inbound_owner()
+    requested_job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
+    with inbound_gyj_job_lock:
+        job_id = requested_job_id
+        if prefer_latest or not job_id:
+            job_id = latest_inbound_gyj_job_by_owner.get(owner) or ''
+        job = inbound_gyj_jobs.get(job_id)
+        if requested_job_id and (not job or job.get('owner') != owner):
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        return jsonify(_inbound_gyj_status_payload(job, owner))
 
 @app.route("/product-library")
 def product_library_page():

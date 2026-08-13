@@ -541,6 +541,54 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertIn("document.hidden", inbound)
 
+    def test_inbound_page_exposes_gyj_login_and_plain_save_flow(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn", "gyjStage",
+            "gyjLogs", "gyjResult",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in (
+            "selectInboundWorkspace", "startGYJBackgroundLogin", "startGYJPurchaseInbound",
+            "pollGYJInboundStatus",
+        ):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login-status'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/start'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/status?'", inbound)
+        self.assertIn("昆山怡口净水系统有限公司", inbound)
+        self.assertIn("江西天麓", inbound)
+        self.assertIn("沈桥仓", inbound)
+        self.assertIn("仅保存，不审核", inbound)
+
+    def test_inbound_gyj_login_uses_backend_credentials_contract(self):
+        inbound = self.source("inbound.html")
+        for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in ("loadGYJCredentials", "startGYJBackgroundLogin", "submitGYJCaptcha"):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/credentials'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login/captcha'", inbound)
+
+    def test_inbound_gyj_captcha_preview_can_be_refreshed_without_storage(self):
+        inbound = self.source("inbound.html")
+        for element_id in ("gyjCaptchaImage", "gyjCaptchaRefreshBtn"):
+            self.assertIn(f'id="{element_id}"', inbound)
+        self.assertIn("function refreshGYJCaptchaPreview", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/captcha-preview'", inbound)
+        self.assertNotIn("gyj_captcha_image", inbound)
+
+    def test_inbound_gyj_captcha_preview_hides_empty_response(self):
+        inbound = self.source("inbound.html")
+
+        self.assertIn("const captchaImage = data && data.success ? data.captcha_image : ''", inbound)
+        self.assertIn("captchaImage && captchaImage.startsWith('data:image/')", inbound)
+        self.assertIn("image.removeAttribute('src');", inbound)
+
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
         inbound = self.source("inbound.html")
         self.assertIn("function escapeHtml", inbound)

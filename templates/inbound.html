@@ -15,7 +15,11 @@
         .page-nav a { display:inline-flex; align-items:center; justify-content:center; min-height:34px; color:#667085; text-decoration:none; border:1px solid #d9e1ec; border-radius:6px; background:#fff; }
         .page-nav a.active { color:#fff; border-color:#2563eb; background:#2563eb; }
         .status-bar, .card { margin-bottom:16px; padding:18px; border:1px solid #d9e1ec; border-radius:8px; background:#fff; box-shadow:0 8px 24px rgba(15,23,42,.06); }
-        .status-bar { display:flex; justify-content:flex-end; padding:12px 14px; }
+        .status-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 14px; }
+        .inbound-workspace-tabs { display:flex; gap:8px; }
+        .inbound-workspace-tab { min-height:34px; padding:7px 12px; border:1px solid #cfd8e3; border-radius:7px; background:#fff; color:#475569; font-weight:800; cursor:pointer; }
+        .inbound-workspace-tab.active { border-color:#2563eb; background:#2563eb; color:#fff; }
+        .inbound-workspace[hidden] { display:none; }
         .inbound-form { display:grid; grid-template-columns:minmax(220px,1fr) auto auto; gap:10px; align-items:end; }
         label { display:block; margin-bottom:6px; color:#667085; font-size:12px; font-weight:700; }
         input { width:100%; min-height:40px; padding:9px 10px; border:1px solid #cfd8e3; border-radius:6px; background:#fff; font-size:14px; outline:none; }
@@ -74,12 +78,17 @@
     </div>
 
     <div class="status-bar aurora-account-status">
+        <div class="inbound-workspace-tabs" role="tablist" aria-label="入库工作区">
+            <button class="inbound-workspace-tab active" id="crmPackingTab" role="tab" aria-selected="true" onclick="selectInboundWorkspace('crm')">CRM装箱单</button>
+            <button class="inbound-workspace-tab" id="gyjPurchaseTab" role="tab" aria-selected="false" onclick="selectInboundWorkspace('gyj')">GYJ采购入库</button>
+        </div>
         <div class="aurora-account-session">
             <span class="aurora-account-name">{{ account.username if account else '未登录' }}</span>
             <a class="aurora-account-logout" href="/logout">退出工具账号</a>
         </div>
     </div>
 
+    <div class="inbound-workspace" id="crmPackingWorkspace">
     <section class="card">
         <div class="inbound-form">
             <div>
@@ -119,6 +128,43 @@
             <h2>按物料编码分组的条码</h2>
             <div class="inbound-products" id="inboundProducts">任务完成后显示完整条码。</div>
         </section>
+    </div>
+    </div>
+
+    <div class="inbound-workspace" id="gyjPurchaseWorkspace" hidden>
+        <section class="card">
+            <div class="inbound-form">
+                <div>
+                    <label>GYJ 采购入库</label>
+                    <div class="muted">使用当前账号最近一次成功读取的 CRM 装箱单。默认供应商：昆山怡口净水系统有限公司；结算账户：江西天麓；仓库：沈桥仓。</div>
+                </div>
+            </div>
+            <div class="inbound-form" style="margin-top:14px;grid-template-columns:minmax(150px,1fr) minmax(150px,1fr) auto;">
+                <div><label for="gyjUsername">GYJ 账号</label><input id="gyjUsername" autocomplete="username" placeholder="GYJ 用户名"></div>
+                <div><label for="gyjPassword">GYJ 密码</label><input id="gyjPassword" type="password" autocomplete="current-password" placeholder="GYJ 密码" onkeydown="if(event.key==='Enter')startGYJBackgroundLogin()"></div>
+                <div><label><input id="gyjRememberLogin" type="checkbox" style="width:auto;min-height:0;margin-right:6px;">记住账号密码</label><button class="btn btn-secondary" id="gyjLoginBtn" onclick="startGYJBackgroundLogin()">后台登录 GYJ</button></div>
+            </div>
+            <div class="inbound-form" id="gyjCaptchaRow" style="display:none;margin-top:12px;grid-template-columns:minmax(180px,1fr) auto;">
+                <div><label for="gyjCaptcha">验证码</label><input id="gyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()"></div>
+                <div style="display:flex;gap:8px;align-items:end;"><img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;"><button class="btn btn-secondary" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button><button class="btn btn-secondary" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button></div>
+            </div>
+            <div style="margin-top:12px;"><button class="btn btn-primary" id="gyjStartBtn" onclick="startGYJPurchaseInbound()" disabled>创建并保存</button></div>
+            <div class="inbound-progress" aria-live="polite">
+                <div class="inbound-stat"><span>当前阶段</span><strong id="gyjStage">请先登录 GYJ</strong></div>
+                <div class="inbound-stat"><span>入库明细</span><strong id="gyjProgress">--</strong></div>
+                <div class="inbound-stat"><span>保存规则</span><strong>仅保存，不审核</strong></div>
+            </div>
+        </section>
+        <div class="inbound-results">
+            <section class="card inbound-panel">
+                <h2>GYJ 实时日志</h2>
+                <div class="inbound-box inbound-logs" id="gyjLogs">暂无日志</div>
+            </section>
+            <section class="card inbound-panel">
+                <h2>保存结果</h2>
+                <div class="inbound-box" id="gyjResult">登录 GYJ 后可创建采购入库单。</div>
+            </section>
+        </div>
     </div>
 </div>
 
@@ -182,6 +228,7 @@ function renderInboundResult(result) {
             <span>物料 <strong>${escapeHtml(items.length)}</strong> 种</span>
             <span>应发 <strong>${escapeHtml(result.expected_total)}</strong> 件</span>
             <span>条码 <strong>${escapeHtml(result.total_serials)}</strong> 个</span>
+            <span>无条码配件 <strong>${escapeHtml(items.reduce((total, item) => total + (Number(item.unbarcoded_quantity) || 0), 0))}</strong> 件</span>
         </div>`;
 
     const warnings = [];
@@ -197,12 +244,13 @@ function renderInboundResult(result) {
     document.getElementById('inboundProducts').innerHTML = items.length ? items.map(item => {
         const serials = item.serials || [];
         const orders = Array.isArray(item.order_numbers) ? item.order_numbers.join('、') : '';
+        const unbarcoded = Number(item.unbarcoded_quantity) || 0;
         return `<section class="inbound-product">
             <div class="inbound-product-head">
                 <div><strong>${escapeHtml(item.product_code)}</strong><small>${escapeHtml(item.description || '无物料描述')} · 订单 ${escapeHtml(orders || '--')}</small></div>
                 <div>${escapeHtml(item.serial_count)} / ${escapeHtml(item.expected_quantity == null ? '--' : item.expected_quantity)}</div>
             </div>
-            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>
+            <div class="inbound-serials">${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
         </section>`;
     }).join('') : '未读取到可用条码。';
 }
@@ -304,6 +352,242 @@ function downloadInboundXlsx() {
     window.location.assign(url.href);
 }
 
+const GYJ_STAGE_LABELS = {
+    waiting: '等待开始', creating: '新建采购入库单', filling: '录入物料和条码',
+    verifying: '核对入库单', saving: '正在保存', success: '已保存', failed: '保存失败'
+};
+let gyjJobId = '';
+let gyjPollTimer = null;
+
+function selectInboundWorkspace(workspace) {
+    const isGYJ = workspace === 'gyj';
+    document.getElementById('crmPackingWorkspace').hidden = isGYJ;
+    document.getElementById('gyjPurchaseWorkspace').hidden = !isGYJ;
+    const crmTab = document.getElementById('crmPackingTab');
+    const gyjTab = document.getElementById('gyjPurchaseTab');
+    crmTab.classList.toggle('active', !isGYJ);
+    gyjTab.classList.toggle('active', isGYJ);
+    crmTab.setAttribute('aria-selected', String(!isGYJ));
+    gyjTab.setAttribute('aria-selected', String(isGYJ));
+    sessionStorage.setItem('inbound_workspace', isGYJ ? 'gyj' : 'crm');
+    if (isGYJ) {
+        checkGYJLoginStatus();
+        restoreGYJInboundJob();
+    }
+}
+
+function renderGYJInboundStatus(data) {
+    const stage = data.error || GYJ_STAGE_LABELS[data.stage] || data.stage || '等待开始';
+    document.getElementById('gyjStage').textContent = stage;
+    const currentLine = Number(data.current_line) || 0;
+    const totalLines = Number(data.total_lines) || 0;
+    document.getElementById('gyjProgress').textContent = totalLines ? `${currentLine} / ${totalLines} 行` : '--';
+    const startButton = document.getElementById('gyjStartBtn');
+    startButton.disabled = !!data.running;
+    startButton.textContent = data.running ? '保存中...' : '创建并保存';
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    document.getElementById('gyjLogs').innerHTML = logs.length ? logs.map(entry => {
+        const row = typeof entry === 'string' ? {message: entry, level: ''} : (entry || {});
+        const level = ['info', 'success', 'warn', 'error'].includes(row.level) ? row.level : '';
+        return `<div class="inbound-log ${level}">${escapeHtml(row.time || '')} ${escapeHtml(row.message || '')}</div>`;
+    }).join('') : '暂无日志';
+    if (data.done) {
+        document.getElementById('gyjResult').textContent = data.success
+            ? `已保存 GYJ 采购入库单${data.result && data.result.order_no ? '：' + data.result.order_no : ''}`
+            : (data.error || 'GYJ 采购入库保存失败');
+    }
+    if (data.done && gyjPollTimer) {
+        clearInterval(gyjPollTimer);
+        gyjPollTimer = null;
+    }
+}
+
+async function checkGYJLoginStatus() {
+    try {
+        const response = await fetch('/api/inbound/gyj/login-status');
+        const data = await response.json();
+        const button = document.getElementById('gyjLoginBtn');
+        button.textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
+        button.disabled = !!data.logged_in;
+        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
+        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
+        document.getElementById('gyjStage').textContent = data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ');
+        return !!data.logged_in;
+    } catch (error) {
+        document.getElementById('gyjStage').textContent = '无法确认 GYJ 登录状态';
+        return false;
+    }
+}
+
+async function refreshGYJCaptchaPreview() {
+    const image = document.getElementById('gyjCaptchaImage');
+    try {
+        const data = await fetch('/api/inbound/gyj/captcha-preview').then(response => response.json());
+        const captchaImage = data && data.success ? data.captcha_image : '';
+        if (captchaImage && captchaImage.startsWith('data:image/')) {
+            image.src = captchaImage;
+            image.style.display = '';
+        } else {
+            image.removeAttribute('src');
+            image.style.display = 'none';
+        }
+    } catch (error) {
+        image.removeAttribute('src');
+        image.style.display = 'none';
+    }
+}
+
+async function loadGYJCredentials() {
+    try {
+        const data = await fetch('/api/inbound/gyj/credentials').then(response => response.json());
+        if (!data || !data.success) return;
+        document.getElementById('gyjRememberLogin').checked = !!data.remember;
+        document.getElementById('gyjUsername').value = data.username || '';
+    } catch (error) {}
+}
+
+async function startGYJBackgroundLogin() {
+    const username = document.getElementById('gyjUsername').value.trim();
+    const password = document.getElementById('gyjPassword').value;
+    const remember = document.getElementById('gyjRememberLogin').checked;
+    if (!username || !password) {
+        document.getElementById('gyjStage').textContent = '请输入 GYJ 账号和密码';
+        return;
+    }
+    const button = document.getElementById('gyjLoginBtn');
+    button.disabled = true;
+    button.textContent = '后台登录中...';
+    try {
+        const response = await fetch('/api/inbound/gyj/login', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username, password, remember})
+        });
+        const data = await response.json();
+        document.getElementById('gyjPassword').value = '';
+        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
+        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
+        document.getElementById('gyjStage').textContent = data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败');
+    } catch (error) {
+        document.getElementById('gyjStage').textContent = 'GYJ 后台登录失败';
+    } finally {
+        if (!document.getElementById('gyjStartBtn').disabled) {
+            button.textContent = 'GYJ 已登录';
+        } else {
+            button.disabled = false;
+            button.textContent = '后台登录 GYJ';
+        }
+    }
+}
+
+async function submitGYJCaptcha() {
+    const captcha = document.getElementById('gyjCaptcha').value.trim();
+    if (!captcha) {
+        document.getElementById('gyjStage').textContent = '请输入 GYJ 验证码';
+        return;
+    }
+    const button = document.getElementById('gyjCaptchaBtn');
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/inbound/gyj/login/captcha', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({captcha})
+        });
+        const data = await response.json();
+        document.getElementById('gyjCaptcha').value = '';
+        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
+        if (data.waiting_captcha) refreshGYJCaptchaPreview();
+        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
+        document.getElementById('gyjLoginBtn').disabled = !!data.logged_in;
+        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
+        document.getElementById('gyjStage').textContent = data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 验证码验证失败');
+    } catch (error) {
+        document.getElementById('gyjStage').textContent = 'GYJ 验证码提交失败';
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function startGYJPurchaseInbound() {
+    const button = document.getElementById('gyjStartBtn');
+    button.disabled = true;
+    button.textContent = '启动中...';
+    try {
+        const response = await fetch('/api/inbound/gyj/start', {method: 'POST'});
+        const data = await response.json();
+        if (!response.ok || !data.success) {
+            document.getElementById('gyjStage').textContent = data.error || 'GYJ 采购入库任务启动失败';
+            return;
+        }
+        gyjJobId = data.job_id || '';
+        sessionStorage.setItem('inbound_gyj_job_id', gyjJobId);
+        renderGYJInboundStatus({...data, running: true, stage: 'waiting'});
+        startGYJInboundPolling();
+    } catch (error) {
+        document.getElementById('gyjStage').textContent = '无法启动 GYJ 采购入库任务';
+    } finally {
+        if (!gyjJobId || !gyjPollTimer) {
+            button.disabled = false;
+            button.textContent = '创建并保存';
+        }
+    }
+}
+
+async function pollGYJInboundStatus(preferLatest=false) {
+    if (document.hidden) return;
+    const params = new URLSearchParams();
+    const requestedJobId = gyjJobId && !preferLatest ? gyjJobId : '';
+    if (requestedJobId) params.set('job_id', requestedJobId);
+    else params.set('latest', '1');
+    try {
+        const response = await fetch('/api/inbound/gyj/status?' + params.toString());
+        const data = await response.json();
+        if (response.status === 404 && requestedJobId) {
+            gyjJobId = '';
+            sessionStorage.removeItem('inbound_gyj_job_id');
+            await pollGYJInboundStatus(true);
+            return;
+        }
+        if (preferLatest && !data.job_id) {
+            gyjJobId = '';
+            sessionStorage.removeItem('inbound_gyj_job_id');
+            if (gyjPollTimer) {
+                clearInterval(gyjPollTimer);
+                gyjPollTimer = null;
+            }
+            return;
+        }
+        if (!response.ok || (data.error && !data.job_id)) {
+            document.getElementById('gyjStage').textContent = data.error || '无法读取 GYJ 采购入库状态';
+            return;
+        }
+        if (data.job_id) {
+            gyjJobId = data.job_id;
+            sessionStorage.setItem('inbound_gyj_job_id', gyjJobId);
+        }
+        renderGYJInboundStatus(data);
+    } catch (error) {
+        document.getElementById('gyjStage').textContent = 'GYJ 采购入库状态连接失败';
+    }
+}
+
+function startGYJInboundPolling() {
+    if (gyjPollTimer) clearInterval(gyjPollTimer);
+    gyjPollTimer = setInterval(() => pollGYJInboundStatus(false), 1000);
+    pollGYJInboundStatus(false);
+}
+
+async function restoreGYJInboundJob() {
+    if (document.hidden) return;
+    if (gyjJobId) {
+        if (gyjPollTimer) await pollGYJInboundStatus(false);
+        else startGYJInboundPolling();
+        return;
+    }
+    await pollGYJInboundStatus(true);
+    if (gyjJobId && !gyjPollTimer) startGYJInboundPolling();
+}
+
 async function restoreInboundJob() {
     if (document.hidden) return;
     if (inboundJobId) {
@@ -316,12 +600,18 @@ async function restoreInboundJob() {
 }
 
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) restoreInboundJob();
+    if (!document.hidden) {
+        restoreInboundJob();
+        restoreGYJInboundJob();
+    }
 });
 
 document.addEventListener('DOMContentLoaded', () => {
     inboundJobId = sessionStorage.getItem('inbound_job_id') || '';
+    gyjJobId = sessionStorage.getItem('inbound_gyj_job_id') || '';
     restoreInboundJob();
+    loadGYJCredentials();
+    if (sessionStorage.getItem('inbound_workspace') === 'gyj') selectInboundWorkspace('gyj');
 });
 </script>
 </body>
