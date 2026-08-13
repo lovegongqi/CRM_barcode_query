@@ -4257,6 +4257,10 @@ MAX_BATCH_RETRY_LIMIT = 5
 BATCH_LOG_LIMIT = 5000
 
 query_slot_reservation_lock = threading.RLock()
+priority_query_work_lock = threading.RLock()
+priority_query_waiters = []
+priority_query_slot_reservations = {}
+PRIORITY_QUERY_WORK_ORDER = {'inbound': 1, 'service_close': 2, 'library': 3}
 
 batch_job_lock = threading.Lock()
 batch_jobs = {}
@@ -5733,6 +5737,9 @@ def _run_background_query_job(job_id, workers):
             else:
                 return
         while not stop_requested():
+            _yield_background_query_slot_to_priority_work(job_id, slot_id)
+            if stop_requested():
+                return
             try:
                 item_index = item_queue.get_nowait()
             except queue.Empty:
@@ -5944,6 +5951,7 @@ def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIM
             _batch_job_log(job_id, error, 'error')
             return
     for idx, barcode in enumerate(barcodes, start=1):
+        _yield_batch_query_slot_to_priority_work(job_id, worker.slot_id)
         with batch_job_lock:
             job = batch_jobs.get(job_id)
             if not job:
@@ -7094,6 +7102,113 @@ def _query_slot_has_running_inbound(slot_id):
         job = inbound_jobs.get(job_id)
         return bool(job and job.get('running'))
 
+
+def _query_slot_has_priority_reservation(slot_id):
+    with priority_query_work_lock:
+        return slot_id in priority_query_slot_reservations
+
+
+def _release_priority_query_slot(slot_id):
+    with priority_query_work_lock:
+        priority_query_slot_reservations.pop(slot_id, None)
+    dispatch_priority_query_work()
+
+
+def enqueue_priority_query_work(kind, job_id, launch):
+    with priority_query_work_lock:
+        priority_query_waiters.append({
+            'kind': kind,
+            'job_id': str(job_id or ''),
+            'launch': launch,
+            'sequence': time.monotonic(),
+        })
+        priority_query_waiters.sort(
+            key=lambda row: (PRIORITY_QUERY_WORK_ORDER.get(row['kind'], 99), row['sequence'])
+        )
+    dispatch_priority_query_work()
+
+
+def dispatch_priority_query_work():
+    with query_slot_reservation_lock:
+        while True:
+            with priority_query_work_lock:
+                if not priority_query_waiters:
+                    return
+            worker, slot_id, slot_label, _error = _select_idle_query_worker_desc()
+            if not worker:
+                return
+            with priority_query_work_lock:
+                if not priority_query_waiters or slot_id in priority_query_slot_reservations:
+                    continue
+                waiter = priority_query_waiters.pop(0)
+                priority_query_slot_reservations[slot_id] = waiter['job_id']
+            try:
+                waiter['launch'](worker, slot_id, slot_label)
+            except Exception:
+                _release_priority_query_slot(slot_id)
+                raise
+
+
+def _has_waiting_priority_query_work():
+    with priority_query_work_lock:
+        return bool(priority_query_waiters)
+
+
+def _yield_background_query_slot_to_priority_work(job_id, slot_id):
+    if not _has_waiting_priority_query_work():
+        return False
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if not job or not job.get('running') or slot_id not in (job.get('slot_ids') or []):
+            return False
+        job['slot_ids'] = [current for current in job.get('slot_ids') or [] if current != slot_id]
+    dispatch_priority_query_work()
+    if not _query_slot_has_priority_reservation(slot_id):
+        with background_query_job_lock:
+            job = background_query_jobs.get(job_id)
+            if job and job.get('running') and slot_id not in job.get('slot_ids', []):
+                job['slot_ids'].append(slot_id)
+        return False
+    while _query_slot_has_priority_reservation(slot_id):
+        with background_query_job_lock:
+            job = background_query_jobs.get(job_id)
+            if not job or job.get('stop_requested'):
+                return True
+        time.sleep(.05)
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if job and job.get('running') and slot_id not in job.get('slot_ids', []):
+            job['slot_ids'].append(slot_id)
+    return True
+
+
+def _yield_batch_query_slot_to_priority_work(job_id, slot_id):
+    if not _has_waiting_priority_query_work():
+        return False
+    with batch_job_lock:
+        job = batch_jobs.get(job_id)
+        if not job or not job.get('running') or latest_batch_job_by_slot.get(slot_id) != job_id:
+            return False
+        latest_batch_job_by_slot.pop(slot_id, None)
+    dispatch_priority_query_work()
+    if not _query_slot_has_priority_reservation(slot_id):
+        with batch_job_lock:
+            job = batch_jobs.get(job_id)
+            if job and job.get('running'):
+                latest_batch_job_by_slot[slot_id] = job_id
+        return False
+    while _query_slot_has_priority_reservation(slot_id):
+        with batch_job_lock:
+            job = batch_jobs.get(job_id)
+            if not job or job.get('stop_requested'):
+                return True
+        time.sleep(.05)
+    with batch_job_lock:
+        job = batch_jobs.get(job_id)
+        if job and job.get('running'):
+            latest_batch_job_by_slot[slot_id] = job_id
+    return True
+
 query_slot_cooldown_lock = threading.Lock()
 query_slot_cooldowns = {}
 
@@ -7134,6 +7249,8 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
     skipped_cooldown = 0
     for slot_id in reversed(slots):
         if slot_id in exclude_slot_ids:
+            continue
+        if _query_slot_has_priority_reservation(slot_id):
             continue
         if _query_slot_has_running_inbound(slot_id):
             continue
@@ -8974,15 +9091,8 @@ def api_service_close_start():
             reason += f"，未找到结果 {len(missing)} 个"
         return jsonify({'success': False, 'error': reason, **prepared})
 
-    workers, error = _select_idle_query_workers_desc()
-    if error:
-        return jsonify({'success': False, 'error': error})
-    slot_id, slot_label = workers[0][1], workers[0][2]
-    slot_ids = [row[1] for row in workers]
-    slot_label_text = "、".join(row[2] for row in workers)
-
     with service_close_job_lock:
-        job = _empty_service_close_job(slot_id, orders)
+        job = _empty_service_close_job('', orders)
         job.update({
             'running': True,
             'done': False,
@@ -8997,25 +9107,44 @@ def api_service_close_start():
             _append_job_log_unlocked(job, f"已跳过未找到结果的条码 {len(job['missing'])} 个：{', '.join(job['missing'][:10])}", "warn", 1000)
         if job['no_service']:
             _append_job_log_unlocked(job, f"已跳过无服务单条码 {len(job['no_service'])} 个：{', '.join(job['no_service'][:10])}", "warn", 1000)
-        job['slot_ids'] = slot_ids
-        _append_job_log_unlocked(job, f"已分配查询通道：{slot_label_text}", "info", 1000)
+        job['slot_ids'] = []
+        _append_job_log_unlocked(job, '等待查询通道', "info", 1000)
         service_close_jobs[job['job_id']] = job
-        for selected_slot_id in slot_ids:
-            latest_service_close_job_by_slot[selected_slot_id] = job['job_id']
 
-    threading.Thread(target=_run_service_close_job, args=(job['job_id'], workers, orders), daemon=True).start()
+    def launch(worker, slot_id, slot_label):
+        with service_close_job_lock:
+            current = service_close_jobs.get(job['job_id'])
+            if not current:
+                _release_priority_query_slot(slot_id)
+                return
+            current['slot_id'] = slot_id
+            current['slot_ids'] = [slot_id]
+            _append_job_log_unlocked(current, f'已分配查询通道：{slot_label}', 'info', 1000)
+            latest_service_close_job_by_slot[slot_id] = job['job_id']
+
+        def run():
+            try:
+                _run_service_close_job(job['job_id'], [(worker, slot_id, slot_label)], orders)
+            finally:
+                with service_close_job_lock:
+                    if latest_service_close_job_by_slot.get(slot_id) == job['job_id']:
+                        latest_service_close_job_by_slot.pop(slot_id, None)
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('service_close', job['job_id'], launch)
     return jsonify({
         'success': True,
         'job_id': job['job_id'],
-        'slot_id': slot_id,
-        'slot_ids': slot_ids,
-        'slot_label': slot_label_text,
+        'slot_id': '',
+        'slot_ids': [],
+        'slot_label': '等待查询通道',
         'orders': orders,
         'service_rows': _service_close_rows_payload(job),
         'total': len(orders),
         'missing': prepared.get("missing") or [],
         'no_service': prepared.get("no_service") or [],
-        'message': f'批量结单已开始，共 {len(orders)} 个服务单',
+        'message': f'批量结单已排队，共 {len(orders)} 个服务单',
     })
 
 @app.route("/api/service-close/status", methods=["GET"])
@@ -9628,60 +9757,52 @@ def api_inbound_start():
         return jsonify({'success': False, 'error': str(error)}), 400
 
     owner = _current_inbound_owner()
-    with query_slot_reservation_lock:
+    with inbound_job_lock:
+        running_job_id = latest_inbound_job_by_owner.get(owner)
+        running_job = inbound_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有入库读取任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+
+        _purge_completed_inbound_jobs_for_owner_unlocked(owner)
+        job = _empty_inbound_job(owner, packing_slip_no, '', '')
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _append_job_log_unlocked(job, '等待查询通道', 'info', 300)
+        inbound_jobs[job['job_id']] = job
+        latest_inbound_job_by_owner[owner] = job['job_id']
+
+    def launch(worker, slot_id, slot_label):
         with inbound_job_lock:
-            running_job_id = latest_inbound_job_by_owner.get(owner)
-            running_job = inbound_jobs.get(running_job_id)
-            if running_job and running_job.get('running'):
-                return jsonify({
-                    'success': False,
-                    'error': '当前账号已有入库读取任务正在运行',
-                    'job_id': running_job_id,
-                }), 409
-
-            worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
-            if not worker:
-                return jsonify({'success': False, 'error': error or '暂无可用查询通道'}), 409
-
-            _purge_completed_inbound_jobs_for_owner_unlocked(owner)
-            job = _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label)
-            job.update({
-                'running': True,
-                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            })
-            _append_job_log_unlocked(job, f"已预留查询通道：{slot_label}", 'info', 300)
-            inbound_jobs[job['job_id']] = job
-            latest_inbound_job_by_owner[owner] = job['job_id']
+            current = inbound_jobs.get(job['job_id'])
+            if not current:
+                _release_priority_query_slot(slot_id)
+                return
+            current.update({'slot_id': slot_id, 'slot_label': slot_label, 'stage': 'navigation'})
+            _append_job_log_unlocked(current, f'已分配查询通道：{slot_label}', 'info', 300)
             latest_inbound_job_by_slot[slot_id] = job['job_id']
 
-    thread = threading.Thread(
-        target=_run_inbound_job,
-        args=(job['job_id'], worker),
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception as error:
-        message = _brief_batch_error(error, 800) or '入库任务启动失败'
-        with inbound_job_lock:
-            job.update({
-                'stage': 'failed',
-                'running': False,
-                'done': True,
-                'success': False,
-                'error': message,
-                'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            })
-            if latest_inbound_job_by_slot.get(slot_id) == job['job_id']:
-                latest_inbound_job_by_slot.pop(slot_id, None)
-        return jsonify({'success': False, 'error': message}), 500
+        def run():
+            try:
+                _run_inbound_job(job['job_id'], worker)
+            finally:
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('inbound', job['job_id'], launch)
 
     return jsonify({
         'success': True,
         'job_id': job['job_id'],
         'packing_slip_no': packing_slip_no,
-        'slot_id': slot_id,
-        'slot_label': slot_label,
+        'slot_id': job.get('slot_id') or '',
+        'slot_label': job.get('slot_label') or '',
+        'stage': job.get('stage') or 'waiting',
     })
 
 
@@ -9947,10 +10068,6 @@ def api_product_library_query_start():
         if library_query_job['running']:
             return jsonify({'success': False, 'error': '已有条码匹配查询正在执行'})
 
-    worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
-    if error:
-        return jsonify({'success': False, 'error': error})
-
     with library_query_lock:
         if library_query_job['running']:
             return jsonify({'success': False, 'error': '已有条码匹配查询正在执行'})
@@ -9962,15 +10079,28 @@ def api_product_library_query_start():
             'error': '',
             'log_seq': 0,
             'logs': [],
-            'slot_id': slot_id,
-            'slot_label': slot_label,
+            'slot_id': '',
+            'slot_label': '',
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'finished_at': '',
         })
-    _library_query_log("准备启动 CRM 查询...", 'info')
-    _library_query_log(f"已分配查询通道：{slot_label}", 'info')
-    threading.Thread(target=_run_library_query_job, args=(barcode, worker, slot_id, slot_label), daemon=True).start()
-    return jsonify({'success': True, 'slot_id': slot_id, 'slot_label': slot_label, 'message': '条码查询已开始'})
+    _library_query_log("等待查询通道...", 'info')
+
+    def launch(worker, slot_id, slot_label):
+        with library_query_lock:
+            library_query_job['slot_id'] = slot_id
+            library_query_job['slot_label'] = slot_label
+        _library_query_log(f"已分配查询通道：{slot_label}", 'info')
+
+        def run():
+            try:
+                _run_library_query_job(barcode, worker, slot_id, slot_label)
+            finally:
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('library', f'library:{barcode}', launch)
+    return jsonify({'success': True, 'slot_id': '', 'slot_label': '等待查询通道', 'message': '条码查询已排队'})
 
 @app.route("/api/product-library/query/status")
 def api_product_library_query_status():

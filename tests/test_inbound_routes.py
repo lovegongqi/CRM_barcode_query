@@ -500,6 +500,26 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(response.get_json()["success"])
 
+    def test_inbound_waits_for_a_query_slot_instead_of_rejecting_the_request(self):
+        client = self._login("admin", "88293529")
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(None, "", "", "所有已登录查询通道都在查询中，请稍后再试"),
+        ):
+            response = client.post(
+                "/api/inbound/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["stage"], "waiting")
+        status = client.get(f"/api/inbound/status?job_id={payload['job_id']}").get_json()
+        self.assertTrue(status["running"])
+        self.assertEqual(status["stage"], "waiting")
+        self.assertIn("等待查询通道", status["logs"][0]["message"])
+
     def test_session_revalidates_login_before_reading_packing_slip(self):
         crm_session = app_module.CRMSession()
         crm_session.logged_in = True
@@ -779,9 +799,9 @@ class InboundRouteTest(unittest.TestCase):
 
         self.assertFalse(inbound_finished_before_batch_claim)
         self.assertTrue(responses["batch"].get_json()["success"])
-        self.assertEqual(responses["inbound"].status_code, 409)
-        self.assertFalse(responses["inbound"].get_json()["success"])
-        self.assertEqual(worker.inbound_calls, 0)
+        self.assertEqual(responses["inbound"].status_code, 200)
+        self.assertTrue(responses["inbound"].get_json()["success"])
+        self.assertEqual(worker.inbound_calls, 1)
 
     def test_start_reserves_slot_before_worker_runs_and_rejects_owner_conflict(self):
         class BlockingWorker(FakeInboundWorker):
