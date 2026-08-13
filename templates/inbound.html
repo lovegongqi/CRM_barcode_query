@@ -62,6 +62,7 @@
         .inbound-product-title .inbound-product-name { font-weight:600; }
         .inbound-product-toggle { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-weight:700; cursor:pointer; }
         .inbound-serials { display:flex; flex-wrap:wrap; gap:7px; padding:10px 12px; background:rgba(5,17,33,.84); }
+        .inbound-serials[hidden] { display:none !important; }
         .inbound-serial-batch { display:flex; align-items:center; gap:7px; width:100%; }
         .inbound-serial-batch button { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-size:12px; font-weight:700; cursor:pointer; }
         .inbound-serials code { padding:4px 7px; border:1px solid rgba(116,191,232,.25); border-radius:5px; background:rgba(12,36,62,.95); color:#e6f6ff; }
@@ -70,6 +71,8 @@
         .gyj-saved-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; padding:8px 10px; background:rgba(13,44,72,.88); }
         .gyj-saved-product-title { min-width:0; color:#e6f6ff; font-weight:700; overflow-wrap:anywhere; }
         .gyj-saved-product-quantity { color:#8eeaff; font-size:12px; white-space:nowrap; }
+        .gyj-saved-serial-toggle { margin-left:7px; padding:0; border:0; background:transparent; color:#8eeaff; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }
+        .gyj-saved-serial-toggle:hover { color:#e3f7ff; text-decoration:underline; }
         .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
         .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .aurora-account-logout { white-space:nowrap; }
@@ -541,7 +544,7 @@ function renderGYJSavedProducts(result) {
     document.getElementById('gyjResult').innerHTML = `<div>${packingSlipNo}${orderNo}</div>${products.length ? `<div class="gyj-saved-products">${products.map((product, index) => {
         const productId = `product-${index}`;
         const serials = Array.isArray(product.serials) ? product.serials : [];
-        return `<section class="gyj-saved-product"><div class="gyj-saved-product-head"><div class="gyj-saved-product-title">${escapeHtml(product.product_code)} ${escapeHtml(product.description || '无物料描述')}</div><span class="gyj-saved-product-quantity">${escapeHtml(product.quantity)} 件</span></div>${serials.length ? `<button class="inbound-product-toggle" id="gyjSavedToggle-${productId}" onclick="toggleGYJSavedSerials('${productId}')">展开条码</button><div class="inbound-serials" id="gyjSavedSerials-${productId}" hidden>${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>` : `<div class="inbound-serials"><code>无条码</code></div>`}</section>`;
+        return `<section class="gyj-saved-product"><div class="gyj-saved-product-head"><div class="gyj-saved-product-title">${escapeHtml(product.product_code)} ${escapeHtml(product.description || '无物料描述')}${serials.length ? `<button class="gyj-saved-serial-toggle" id="gyjSavedToggle-${productId}" onclick="toggleGYJSavedSerials('${productId}')">展开条码</button>` : ''}</div><span class="gyj-saved-product-quantity">${escapeHtml(product.quantity)} 件</span></div>${serials.length ? `<div class="inbound-serials" id="gyjSavedSerials-${productId}" hidden>${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>` : ''}</section>`;
     }).join('')}</div>` : ''}`;
 }
 

@@ -1031,7 +1031,11 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("function renderGYJSavedProducts", inbound)
         self.assertIn("function toggleGYJSavedSerials", inbound)
         self.assertIn("展开条码", inbound)
-        self.assertIn("无条码", inbound)
+        self.assertIn(".inbound-serials[hidden] { display:none !important; }", inbound)
+        self.assertIn('id="gyjSavedSerials-${productId}" hidden', inbound)
+        self.assertNotIn('`<div class="inbound-serials"><code>无条码</code></div>`', inbound)
+        self.assertIn('class="gyj-saved-serial-toggle"', inbound)
+        self.assertNotIn('`${serials.length ? `<button class="inbound-product-toggle"', inbound)
 
 
 if __name__ == "__main__":
