@@ -371,6 +371,17 @@ class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
         return "3fadbb75-ffb1-4b24-a919-7d1f929814d7" if name == "aria-controls" else ""
 
 
+class _BlockedSearchInput(_SelectSearchInput):
+    def fill(self, value, force=False, timeout=None):
+        raise TimeoutError("搜索输入框一直隐藏")
+
+
+class _BlockedSearchableLegacySelectTrigger(_SearchableLegacySelectTrigger):
+    def __init__(self):
+        super().__init__()
+        self.search_input = _BlockedSearchInput()
+
+
 class _SelectedText:
     def __init__(self, value):
         self.value = value
@@ -440,6 +451,12 @@ class _SelectedLegacyHeaderField(_LegacyHeaderField):
 class _SearchableLegacyHeaderField(_LegacyHeaderField):
     def __init__(self):
         self.trigger = _SearchableLegacySelectTrigger()
+        self.first = self
+
+
+class _BlockedSearchableLegacyHeaderField(_SearchableLegacyHeaderField):
+    def __init__(self):
+        self.trigger = _BlockedSearchableLegacySelectTrigger()
         self.first = self
 
 
@@ -526,6 +543,12 @@ class _SelectedLegacyHeaderForm(_LegacyHeaderForm):
 class _SearchableLegacyHeaderForm(_LegacyHeaderForm):
     def __init__(self):
         self.field = _SearchableLegacyHeaderField()
+        self.fields = _HeaderFieldCollection(self.field)
+
+
+class _BlockedSearchableLegacyHeaderForm(_LegacyHeaderForm):
+    def __init__(self):
+        self.field = _BlockedSearchableLegacyHeaderField()
         self.fields = _HeaderFieldCollection(self.field)
 
 
@@ -707,6 +730,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         with self.assertRaisesRegex(
             GYJInboundError,
             r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7，控件角色=combobox，控件可见=True，控件tabindex=0，外层类=ant-select，点击点类=ant-select-selection",
+        ):
+            adapter.select_header("供应商", "昆山怡口净水")
+
+    def test_reports_supplier_control_state_when_search_input_stays_hidden(self):
+        page = _LegacyHeaderPage("昆山怡口净水")
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _BlockedSearchableLegacyHeaderForm()
+
+        with self.assertRaisesRegex(
+            GYJInboundError,
+            r"GYJ 供应商输入框未打开（控件角色=combobox，控件可见=True，控件tabindex=0，外层类=ant-select，点击点类=ant-select-selection）",
         ):
             adapter.select_header("供应商", "昆山怡口净水")
 

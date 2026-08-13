@@ -100,6 +100,40 @@ class GYJPlaywrightPage:
         return modal.last
 
     @staticmethod
+    def _supplier_control_state(trigger):
+        try:
+            state = trigger.evaluate(
+                "element => { const box = element.getBoundingClientRect(); "
+                "const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2); "
+                "const owner = element.closest('.ant-select'); return {"
+                "role: element.getAttribute('role') || '', "
+                "visible: !!(element.offsetWidth || element.offsetHeight), "
+                "tabindex: element.getAttribute('tabindex') || '', "
+                "owner_class: owner ? owner.className || '' : '', "
+                "point_class: point ? point.className || point.tagName || '' : ''} }"
+            ) or {}
+            return {
+                "role": state.get("role") or "无",
+                "visible": state.get("visible"),
+                "tabindex": state.get("tabindex") or "无",
+                "owner_class": state.get("owner_class") or "无",
+                "point_class": state.get("point_class") or "无",
+            }
+        except Exception:
+            return {
+                "role": "未知", "visible": "未知", "tabindex": "未知",
+                "owner_class": "未知", "point_class": "未知",
+            }
+
+    @staticmethod
+    def _supplier_control_state_text(state):
+        return (
+            f"控件角色={state['role']}，控件可见={state['visible']}，"
+            f"控件tabindex={state['tabindex']}，外层类={state['owner_class']}，"
+            f"点击点类={state['point_class']}"
+        )
+
+    @staticmethod
     def _click_exact(scope, text):
         button = scope.get_by_text(text, exact=True)
         if button.count() != 1:
@@ -160,7 +194,14 @@ class GYJPlaywrightPage:
             search_input = field.locator("input").first
         if label == "供应商" and search_input.count() == 1:
             search_input.focus()
-            search_input.fill(value, timeout=10000)
+            try:
+                search_input.fill(value, timeout=10000)
+            except Exception as error:
+                raise GYJInboundError(
+                    "GYJ 供应商输入框未打开（"
+                    + self._supplier_control_state_text(self._supplier_control_state(trigger))
+                    + "）"
+                ) from error
         dropdown_id = trigger.get_attribute("aria-controls") or ""
         dropdown = self.page.locator(f'[id="{dropdown_id}"]') if dropdown_id else self.page.locator(
             ".ant-select-dropdown"
@@ -176,32 +217,10 @@ class GYJPlaywrightPage:
                 input_visible = search_input.is_visible()
             except Exception:
                 input_visible = "未知"
-            try:
-                control_state = trigger.evaluate(
-                    "element => { const box = element.getBoundingClientRect(); "
-                    "const point = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2); "
-                    "const owner = element.closest('.ant-select'); return {"
-                    "role: element.getAttribute('role') || '', class_name: element.className || '', "
-                    "tabindex: element.getAttribute('tabindex') || '', "
-                    "owner_class: owner ? owner.className || '' : '', "
-                    "point_class: point ? point.className || point.tagName || '' : '', "
-                    "visible: !!(element.offsetWidth || element.offsetHeight)} }"
-                ) or {}
-                control_role = control_state.get("role") or "无"
-                control_visible = control_state.get("visible")
-                control_tabindex = control_state.get("tabindex") or "无"
-                owner_class = control_state.get("owner_class") or "无"
-                point_class = control_state.get("point_class") or "无"
-            except Exception:
-                control_role = "未知"
-                control_visible = "未知"
-                control_tabindex = "未知"
-                owner_class = "未知"
-                point_class = "未知"
+            control_state = self._supplier_control_state(trigger)
             raise GYJInboundError(
                 f"GYJ 供应商候选未出现（控件展开={expanded}，输入框可见={input_visible}，"
-                f"候选层ID={dropdown_id or '无'}，控件角色={control_role}，控件可见={control_visible}，"
-                f"控件tabindex={control_tabindex}，外层类={owner_class}，点击点类={point_class}）"
+                f"候选层ID={dropdown_id or '无'}，{self._supplier_control_state_text(control_state)}）"
             ) from error
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")
