@@ -1013,6 +1013,17 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('id="gyjStage"', inbound)
         self.assertNotIn('id="gyjProgress"', inbound)
 
+    def test_inbound_workspace_tabs_use_the_dark_glass_theme(self):
+        inbound = self.source("inbound.html")
+        tab_rule = re.search(r"\.inbound-workspace-tab\s*\{([^}]*)\}", inbound, re.S)
+        active_rule = re.search(r"\.inbound-workspace-tab\.active\s*\{([^}]*)\}", inbound, re.S)
+        self.assertIsNotNone(tab_rule)
+        self.assertIsNotNone(active_rule)
+        self.assertRegex(tab_rule.group(1), r"background:\s*rgba\(13,44,72,.88\)")
+        self.assertRegex(tab_rule.group(1), r"color:\s*#d8f5ff")
+        self.assertRegex(active_rule.group(1), r"border-color:\s*#48cfff")
+        self.assertRegex(active_rule.group(1), r"color:\s*#f2fbff")
+
     def test_inbound_renders_saved_gyj_products_with_collapsed_serials(self):
         inbound = self.source("inbound.html")
         self.assertIn("function renderGYJSavedProducts", inbound)
