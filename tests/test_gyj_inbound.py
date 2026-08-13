@@ -349,9 +349,13 @@ class _LegacyHeaderDropdown:
     def __init__(self):
         self.choice = _HeaderChoice()
         self.last = self
+        self.waited = None
 
     def count(self):
         return 1
+
+    def wait_for(self, state, timeout):
+        self.waited = (state, timeout)
 
     def get_by_text(self, text, exact):
         if text == "昆山怡口净水系统有限公司" and exact:
@@ -479,6 +483,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertTrue(adapter.form.field.trigger.clicked)
         self.assertTrue(adapter.form.field.trigger.force)
+        self.assertEqual(page.dropdown.waited, ("visible", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
 

@@ -137,6 +137,7 @@ class GYJPlaywrightPage:
             raise GYJInboundError(f"GYJ 表头字段不是可选项：{label}")
         trigger.click(force=True)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
+        dropdown.wait_for(state="visible", timeout=5000)
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")
         choice = dropdown.last.get_by_text(value, exact=True)
