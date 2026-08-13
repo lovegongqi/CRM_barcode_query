@@ -551,7 +551,7 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', inbound)
         for function_name in (
-            "selectInboundWorkspace", "openGYJLogin", "startGYJPurchaseInbound",
+            "selectInboundWorkspace", "startGYJBackgroundLogin", "startGYJPurchaseInbound",
             "pollGYJInboundStatus",
         ):
             self.assertIn(f"function {function_name}", inbound)
