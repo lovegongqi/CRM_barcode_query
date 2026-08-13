@@ -5396,6 +5396,18 @@ def _run_inbound_gyj_job(job_id, worker, lines):
         )
         if not ok:
             raise GYJInboundError(_brief_batch_error(result, 800) or 'GYJ 采购入库保存失败')
+        saved_products = [
+            {
+                'product_code': str(line.get('product_code') or ''),
+                'description': str(line.get('description') or ''),
+                'quantity': int(line.get('quantity') or 0),
+                'serials': list(line.get('serials') or []),
+                'record_type': str(line.get('record_type') or ''),
+            }
+            for line in lines
+        ]
+        saved_result = dict(result) if isinstance(result, dict) else {}
+        saved_result['products'] = saved_products
         with inbound_gyj_job_lock:
             job = inbound_gyj_jobs.get(job_id)
             if job:
@@ -5405,7 +5417,7 @@ def _run_inbound_gyj_job(job_id, worker, lines):
                     'done': True,
                     'success': True,
                     'error': '',
-                    'result': result if isinstance(result, dict) else {},
+                    'result': saved_result,
                     'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
         log('GYJ 采购入库单已保存', 'success')

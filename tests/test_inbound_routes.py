@@ -386,6 +386,13 @@ class InboundRouteTest(unittest.TestCase):
         status = self._wait_for_gyj_job(client, job_id)
         self.assertTrue(status["success"])
         self.assertEqual(status["result"]["order_no"], "CG202608130001")
+        self.assertEqual(status["result"]["products"], [{
+            "product_code": "916000024",
+            "description": "中央净水机",
+            "quantity": 1,
+            "serials": ["SN00000001"],
+            "record_type": "条码",
+        }])
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
         self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
 

@@ -1013,6 +1013,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('id="gyjStage"', inbound)
         self.assertNotIn('id="gyjProgress"', inbound)
 
+    def test_inbound_renders_saved_gyj_products_with_collapsed_serials(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function renderGYJSavedProducts", inbound)
+        self.assertIn("function toggleGYJSavedSerials", inbound)
+        self.assertIn("展开条码", inbound)
+        self.assertIn("无条码", inbound)
+
 
 if __name__ == "__main__":
     unittest.main()

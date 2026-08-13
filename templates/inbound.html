@@ -65,6 +65,11 @@
         .inbound-serial-batch { display:flex; align-items:center; gap:7px; width:100%; }
         .inbound-serial-batch button { min-height:28px; padding:5px 8px; border:1px solid rgba(116,191,232,.3); border-radius:6px; background:rgba(20,60,91,.98); color:#e3f7ff; font-size:12px; font-weight:700; cursor:pointer; }
         .inbound-serials code { padding:4px 7px; border:1px solid rgba(116,191,232,.25); border-radius:5px; background:rgba(12,36,62,.95); color:#e6f6ff; }
+        .gyj-saved-products { display:grid; gap:8px; margin-top:10px; }
+        .gyj-saved-product { border:1px solid rgba(116,191,232,.25); border-radius:7px; overflow:hidden; background:rgba(7,20,38,.9); }
+        .gyj-saved-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; padding:8px 10px; background:rgba(13,44,72,.88); }
+        .gyj-saved-product-title { min-width:0; color:#e6f6ff; font-weight:700; overflow-wrap:anywhere; }
+        .gyj-saved-product-quantity { color:#8eeaff; font-size:12px; white-space:nowrap; }
         .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
         .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .aurora-account-logout { white-space:nowrap; }
@@ -513,14 +518,32 @@ function renderGYJInboundStatus(data) {
         return `<div class="inbound-log ${level}">${escapeHtml(row.time || '')} ${escapeHtml(row.message || '')}</div>`;
     }).join('') : '暂无日志';
     if (data.done) {
-        document.getElementById('gyjResult').textContent = data.success
-            ? `已保存 GYJ 采购入库单${data.result && data.result.order_no ? '：' + data.result.order_no : ''}`
-            : (data.error || 'GYJ 采购入库保存失败');
+        if (data.success) renderGYJSavedProducts(data.result || {});
+        else setGYJStatus(data.error || 'GYJ 采购入库保存失败');
     }
     if (data.done && gyjPollTimer) {
         clearInterval(gyjPollTimer);
         gyjPollTimer = null;
     }
+}
+
+function toggleGYJSavedSerials(productId) {
+    const serials = document.getElementById(`gyjSavedSerials-${productId}`);
+    const toggle = document.getElementById(`gyjSavedToggle-${productId}`);
+    if (!serials || !toggle) return;
+    serials.hidden = !serials.hidden;
+    toggle.textContent = serials.hidden ? '展开条码' : '收起条码';
+}
+
+function renderGYJSavedProducts(result) {
+    const products = Array.isArray(result.products) ? result.products : [];
+    const orderNo = result.order_no ? `：${escapeHtml(result.order_no)}` : '';
+    const packingSlipNo = result.packing_slip_no ? `装箱单号：${escapeHtml(result.packing_slip_no)}` : '已保存 GYJ 采购入库单';
+    document.getElementById('gyjResult').innerHTML = `<div>${packingSlipNo}${orderNo}</div>${products.length ? `<div class="gyj-saved-products">${products.map((product, index) => {
+        const productId = `product-${index}`;
+        const serials = Array.isArray(product.serials) ? product.serials : [];
+        return `<section class="gyj-saved-product"><div class="gyj-saved-product-head"><div class="gyj-saved-product-title">${escapeHtml(product.product_code)} ${escapeHtml(product.description || '无物料描述')}</div><span class="gyj-saved-product-quantity">${escapeHtml(product.quantity)} 件</span></div>${serials.length ? `<button class="inbound-product-toggle" id="gyjSavedToggle-${productId}" onclick="toggleGYJSavedSerials('${productId}')">展开条码</button><div class="inbound-serials" id="gyjSavedSerials-${productId}" hidden>${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>` : `<div class="inbound-serials"><code>无条码</code></div>`}</section>`;
+    }).join('')}</div>` : ''}`;
 }
 
 function setGYJStatus(message) {
