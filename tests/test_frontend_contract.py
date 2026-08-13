@@ -582,6 +582,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("fetch('/api/inbound/gyj/captcha-preview'", inbound)
         self.assertNotIn("gyj_captcha_image", inbound)
 
+    def test_inbound_gyj_captcha_preview_hides_empty_response(self):
+        inbound = self.source("inbound.html")
+
+        self.assertIn("const captchaImage = data && data.success ? data.captcha_image : ''", inbound)
+        self.assertIn("captchaImage && captchaImage.startsWith('data:image/')", inbound)
+        self.assertIn("image.removeAttribute('src');", inbound)
+
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
         inbound = self.source("inbound.html")
         self.assertIn("function escapeHtml", inbound)

@@ -424,8 +424,14 @@ async function refreshGYJCaptchaPreview() {
     const image = document.getElementById('gyjCaptchaImage');
     try {
         const data = await fetch('/api/inbound/gyj/captcha-preview').then(response => response.json());
-        image.src = data && data.success && data.captcha_image ? data.captcha_image : '';
-        image.style.display = image.src ? '' : 'none';
+        const captchaImage = data && data.success ? data.captcha_image : '';
+        if (captchaImage && captchaImage.startsWith('data:image/')) {
+            image.src = captchaImage;
+            image.style.display = '';
+        } else {
+            image.removeAttribute('src');
+            image.style.display = 'none';
+        }
     } catch (error) {
         image.removeAttribute('src');
         image.style.display = 'none';

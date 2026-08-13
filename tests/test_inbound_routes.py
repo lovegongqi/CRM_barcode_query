@@ -87,6 +87,53 @@ class FakeGYJWorker:
         return True, {"packing_slip_no": packing_slip_no, "order_no": "CG202608130001"}
 
 
+class _CaptchaImageLocator:
+    def __init__(self, visible=True):
+        self.first = self
+        self.visible = visible
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return self.visible
+
+    def screenshot(self, type):
+        self.screenshot_type = type
+        return b"actual-captcha"
+
+
+class _EmptyLocator:
+    first = None
+
+    def count(self):
+        return 0
+
+
+class _GYJLoginCaptchaPage:
+    url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self):
+        self.captcha_image = _CaptchaImageLocator()
+
+    def locator(self, selector):
+        if selector == "form#formLogin img":
+            return self.captcha_image
+        return _EmptyLocator()
+
+
+class GYJCaptchaPreviewTest(unittest.TestCase):
+    def test_uses_visible_login_form_captcha_image(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _GYJLoginCaptchaPage()
+        session.page = page
+
+        preview = session.captcha_preview()
+
+        self.assertEqual(preview, "data:image/png;base64,YWN0dWFsLWNhcHRjaGE=")
+        self.assertEqual(page.captcha_image.screenshot_type, "png")
+
+
 class InboundRouteTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

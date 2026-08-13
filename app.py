@@ -3745,6 +3745,7 @@ class GYJSession:
             if not self.is_alive():
                 return ""
             image = self._first_visible([
+                "form#formLogin img",
                 "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
                 "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
                 "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
