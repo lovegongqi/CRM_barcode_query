@@ -4444,6 +4444,7 @@ def _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines):
         'total_lines': len(lines or []),
         'log_seq': 0,
         'logs': [],
+        'completed_products': [],
         'result': None,
         'started_at': '',
         'finished_at': '',
@@ -5386,6 +5387,21 @@ def _run_inbound_gyj_job(job_id, worker, lines):
                 job['stage'] = 'filling'
                 job['current_line'] = int(row.get('current_line') or job.get('current_line') or 0)
                 job['total_lines'] = int(row.get('total_lines') or job.get('total_lines') or 0)
+                line = row.get('line')
+                if not isinstance(line, dict):
+                    current_index = job['current_line'] - 1
+                    line = lines[current_index] if 0 <= current_index < len(lines) else None
+                if isinstance(line, dict):
+                    product = {
+                        'product_code': str(line.get('product_code') or ''),
+                        'description': str(line.get('description') or ''),
+                        'quantity': int(line.get('quantity') or 0),
+                        'serials': list(line.get('serials') or []),
+                        'record_type': str(line.get('record_type') or ''),
+                    }
+                    completed = job.setdefault('completed_products', [])
+                    if len(completed) < job['current_line']:
+                        completed.append(product)
 
     with inbound_gyj_job_lock:
         job = inbound_gyj_jobs.get(job_id)
@@ -9720,7 +9736,7 @@ def _inbound_status_payload(job, owner=''):
     }
     payload['page_counts'] = list(job.get('page_counts') or [])
     payload['logs'] = list(job.get('logs') or [])
-    if job.get('done') and job.get('success') and isinstance(job.get('result'), dict):
+    if isinstance(job.get('result'), dict):
         payload['result'] = job['result']
         payload['download_url'] = f"/api/inbound/export?job_id={job['job_id']}"
     return payload
@@ -9743,8 +9759,13 @@ def _inbound_gyj_status_payload(job, owner=''):
         )
     }
     payload['logs'] = list(job.get('logs') or [])
-    if job.get('done') and job.get('success') and isinstance(job.get('result'), dict):
+    if isinstance(job.get('result'), dict):
         payload['result'] = job['result']
+    elif job.get('completed_products'):
+        payload['result'] = {
+            'packing_slip_no': job.get('packing_slip_no') or '',
+            'products': list(job.get('completed_products') or []),
+        }
     return payload
 
 

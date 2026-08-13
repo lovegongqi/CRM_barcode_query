@@ -396,6 +396,56 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
         self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
 
+    def test_gyj_status_exposes_each_completed_line_before_save_finishes(self):
+        class StreamingGYJWorker(FakeGYJWorker):
+            def __init__(self):
+                super().__init__()
+                self.first_line_done = threading.Event()
+                self.release = threading.Event()
+
+            def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+                self.saved.append((packing_slip_no, list(lines)))
+                progress({"current_line": 1, "total_lines": len(lines), "line": lines[0]})
+                self.first_line_done.set()
+                self.release.wait(timeout=2)
+                for index, line in enumerate(lines[1:], start=2):
+                    progress({"current_line": index, "total_lines": len(lines), "line": line})
+                return True, {"packing_slip_no": packing_slip_no, "order_no": "CG202608130002"}
+
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "duplicate_serials": [],
+                "items": [{
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001"],
+                    "expected_quantity": 1, "serial_count": 1,
+                    "unbarcoded_quantity": 1, "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = StreamingGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start")
+            self.assertEqual(started.status_code, 200)
+            self.assertTrue(worker.first_line_done.wait(timeout=1))
+            status = client.get(f"/api/inbound/gyj/status?job_id={started.get_json()['job_id']}").get_json()
+            self.assertTrue(status["running"])
+            self.assertEqual(status["result"]["products"], [{
+                "product_code": "916000024", "description": "中央净水机",
+                "quantity": 1, "serials": ["SN00000001"], "record_type": "条码",
+            }])
+            worker.release.set()
+            self._wait_for_gyj_job(client, started.get_json()["job_id"])
+
     def test_gyj_start_accepts_selected_shared_history_snapshot(self):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({

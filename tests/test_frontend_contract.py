@@ -1000,12 +1000,15 @@ class FrontendContractTest(unittest.TestCase):
     def test_inbound_products_fold_serials_and_copy_chunked_values(self):
         inbound = self.source("inbound.html")
         self.assertIn("function toggleInboundSerials", inbound)
-        self.assertIn('class="inbound-product-head" onclick="toggleInboundSerials(\'${productId}\')"', inbound)
+        self.assertIn("serials.length ? ` onclick=\"toggleInboundSerials('${productId}')\"`", inbound)
         self.assertIn("serials.slice(index, index + 100)", inbound)
         self.assertIn('data-copy="${escapeHtml(item.product_code)}"', inbound)
         self.assertIn('data-copy="${escapeHtml(item.description || \'无物料描述\')}"', inbound)
         self.assertNotIn("· 订单 ${escapeHtml(orders", inbound)
         self.assertNotIn('class="inbound-product-total"', inbound)
+        self.assertIn("条码 ${escapeHtml(serials.length)} 条", inbound)
+        self.assertIn("无条码配件 × ${escapeHtml(unbarcoded)}", inbound)
+        self.assertNotIn("${unbarcoded ? `<code>无条码配件", inbound)
 
     def test_inbound_result_surfaces_use_dark_contrast_without_gyj_state_cards(self):
         inbound = self.source("inbound.html")
@@ -1036,6 +1039,11 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('`<div class="inbound-serials"><code>无条码</code></div>`', inbound)
         self.assertIn('class="gyj-saved-serial-toggle"', inbound)
         self.assertNotIn('`${serials.length ? `<button class="inbound-product-toggle"', inbound)
+
+    def test_inbound_gyj_result_updates_while_lines_are_being_saved(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("if (data.result && Array.isArray(data.result.products))", inbound)
+        self.assertIn("'completed_products': []", (ROOT / "app.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

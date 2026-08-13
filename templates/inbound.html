@@ -55,6 +55,7 @@
         .inbound-products { display:grid; gap:10px; }
         .inbound-product { border:1px solid rgba(116,191,232,.28); border-radius:8px; overflow:hidden; background:rgba(7,20,38,.92); }
         .inbound-product-head { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; padding:10px 12px; background:rgba(13,44,72,.92); color:#e6f6ff; cursor:pointer; }
+        .inbound-product-head.no-serials { cursor:default; }
         .inbound-product-head strong, .inbound-product-head small { display:block; overflow-wrap:anywhere; }
         .inbound-product-head small { margin-top:3px; color:#9bb4cb; }
         .inbound-product-title { display:flex; flex-wrap:wrap; align-items:baseline; gap:5px; }
@@ -375,11 +376,11 @@ function renderInboundResult(result) {
             serialBatches.push(`<div class="inbound-serial-batch"><button data-copy="${escapeHtml(batch.join(','))}" onclick="copyInboundText(this.dataset.copy)">复制第 ${Math.floor(index / 100) + 1} 批条码（${batch.length} 个）</button>${batch.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>`);
         }
         return `<section class="inbound-product">
-            <div class="inbound-product-head" onclick="toggleInboundSerials('${productId}')">
-                <div class="inbound-product-title"><button class="inbound-copy" data-copy="${escapeHtml(item.product_code)}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.product_code)}</button><button class="inbound-copy inbound-product-name" data-copy="${escapeHtml(item.description || '无物料描述')}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.description || '无物料描述')}</button></div>
-                <button class="inbound-product-toggle" id="inboundToggle-${productId}" onclick="event.stopPropagation();toggleInboundSerials('${productId}')">展开条码</button>
+            <div class="inbound-product-head${serials.length ? '' : ' no-serials'}"${serials.length ? ` onclick="toggleInboundSerials('${productId}')"` : ''}>
+                <div class="inbound-product-title"><button class="inbound-copy" data-copy="${escapeHtml(item.product_code)}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.product_code)}</button><button class="inbound-copy inbound-product-name" data-copy="${escapeHtml(item.description || '无物料描述')}" onclick="event.stopPropagation();copyInboundText(this.dataset.copy)">${escapeHtml(item.description || '无物料描述')}</button>${serials.length ? `<span class="gyj-saved-product-quantity">条码 ${escapeHtml(serials.length)} 条</span>` : ''}${unbarcoded ? `<span class="gyj-saved-product-quantity">无条码配件 × ${escapeHtml(unbarcoded)}</span>` : ''}</div>
+                ${serials.length ? `<button class="inbound-product-toggle" id="inboundToggle-${productId}" onclick="event.stopPropagation();toggleInboundSerials('${productId}')">展开条码</button>` : ''}
             </div>
-            <div class="inbound-serials" id="inboundSerials-${productId}" hidden>${serialBatches.join('')}${unbarcoded ? `<code>无条码配件 × ${escapeHtml(unbarcoded)}</code>` : ''}</div>
+            ${serials.length ? `<div class="inbound-serials" id="inboundSerials-${productId}" hidden>${serialBatches.join('')}</div>` : ''}
         </section>`;
     }).join('') : '未读取到可用条码。';
 }
@@ -519,9 +520,10 @@ function renderGYJInboundStatus(data) {
         const level = ['info', 'success', 'warn', 'error'].includes(row.level) ? row.level : '';
         return `<div class="inbound-log ${level}">${escapeHtml(row.time || '')} ${escapeHtml(row.message || '')}</div>`;
     }).join('') : '暂无日志';
-    if (data.done) {
-        if (data.success) renderGYJSavedProducts(data.result || {});
-        else setGYJStatus(data.error || 'GYJ 采购入库保存失败');
+    if (data.result && Array.isArray(data.result.products)) {
+        renderGYJSavedProducts(data.result);
+    } else if (data.done && !data.success) {
+        setGYJStatus(data.error || 'GYJ 采购入库保存失败');
     }
     if (data.done && gyjPollTimer) {
         clearInterval(gyjPollTimer);
