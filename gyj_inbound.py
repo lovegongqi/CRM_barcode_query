@@ -151,12 +151,11 @@ class GYJPlaywrightPage:
         ):
             self._headers[label] = value
             return
-        trigger.click(force=True)
+        trigger.dispatch_event("mousedown")
         search_input = trigger.locator("input").first
         if search_input.count() != 1:
             search_input = field.locator("input").first
         if label == "供应商" and search_input.count() == 1:
-            search_input.click(force=True)
             search_input.focus()
             search_input.fill(value, force=True)
         dropdown_id = trigger.get_attribute("aria-controls") or ""

@@ -293,6 +293,7 @@ class _LegacySelectTrigger:
     def __init__(self):
         self.clicked = False
         self.force = None
+        self.mouse_down = False
         self.first = self
 
     def count(self):
@@ -301,6 +302,9 @@ class _LegacySelectTrigger:
     def click(self, force=False):
         self.clicked = True
         self.force = force
+
+    def dispatch_event(self, name):
+        self.mouse_down = name == "mousedown"
 
     def get_attribute(self, name):
         return ""
@@ -315,7 +319,6 @@ class _SelectSearchInput:
         self.first = self
         self.force = False
         self.focused = False
-        self.clicked = False
 
     def count(self):
         return 1
@@ -326,9 +329,6 @@ class _SelectSearchInput:
 
     def focus(self):
         self.focused = True
-
-    def click(self, force=False):
-        self.clicked = force
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -632,8 +632,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水系统有限公司")
 
-        self.assertTrue(adapter.form.field.trigger.clicked)
-        self.assertTrue(adapter.form.field.trigger.force)
+        self.assertTrue(adapter.form.field.trigger.mouse_down)
         self.assertEqual(page.dropdown.waited, ("attached", 5000))
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
@@ -645,8 +644,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(adapter.form.field.trigger.clicked)
-        self.assertTrue(adapter.form.field.trigger.search_input.clicked)
+        self.assertTrue(adapter.form.field.trigger.mouse_down)
         self.assertTrue(adapter.form.field.trigger.search_input.focused)
         self.assertEqual(adapter.form.field.trigger.search_input.value, "昆山怡口净水")
         self.assertTrue(adapter.form.field.trigger.search_input.force)
@@ -682,7 +680,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         adapter.select_header("供应商", "昆山怡口净水")
 
-        self.assertTrue(form.field.trigger.clicked)
+        self.assertTrue(form.field.trigger.mouse_down)
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水"})
 
