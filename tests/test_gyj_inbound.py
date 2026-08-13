@@ -319,6 +319,7 @@ class _SelectSearchInput:
         self.first = self
         self.force = False
         self.focused = False
+        self.visible = False
 
     def count(self):
         return 1
@@ -329,6 +330,9 @@ class _SelectSearchInput:
 
     def focus(self):
         self.focused = True
+
+    def is_visible(self):
+        return self.visible
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -475,6 +479,11 @@ class _LegacyHeaderDropdown:
         return _MissingButton()
 
 
+class _FailingHeaderDropdown(_LegacyHeaderDropdown):
+    def wait_for(self, state, timeout):
+        raise TimeoutError("候选菜单未挂载")
+
+
 class _LegacyHeaderForm:
     def __init__(self):
         self.field = _LegacyHeaderField()
@@ -533,6 +542,12 @@ class _DelayedSelectedLegacyHeaderPage(_LegacyHeaderPage):
     def wait_for_timeout(self, timeout):
         self.timeout = timeout
         self.form.field.trigger.reveal()
+
+
+class _SupplierDiagnosticsPage(_LegacyHeaderPage):
+    def __init__(self):
+        super().__init__("昆山怡口净水")
+        self.dropdown = _FailingHeaderDropdown("昆山怡口净水")
 
 
 class GYJInboundWriterTest(unittest.TestCase):
@@ -651,6 +666,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertIn('[id="3fadbb75-ffb1-4b24-a919-7d1f929814d7"]', page.selectors)
         self.assertNotIn(".ant-select-dropdown", page.selectors)
+
+    def test_reports_supplier_control_state_when_candidate_menu_never_attaches(self):
+        page = _SupplierDiagnosticsPage()
+        adapter = GYJPlaywrightPage(page)
+        adapter.form = _SearchableLegacyHeaderForm()
+
+        with self.assertRaisesRegex(
+            GYJInboundError,
+            r"控件展开=未知，输入框可见=False，候选层ID=3fadbb75-ffb1-4b24-a919-7d1f929814d7",
+        ):
+            adapter.select_header("供应商", "昆山怡口净水")
 
     def test_keeps_supplier_when_the_form_already_shows_the_default(self):
         page = _LegacyHeaderPage("昆山怡口净水")

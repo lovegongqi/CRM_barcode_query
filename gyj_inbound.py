@@ -162,7 +162,21 @@ class GYJPlaywrightPage:
         dropdown = self.page.locator(f'[id="{dropdown_id}"]') if dropdown_id else self.page.locator(
             ".ant-select-dropdown"
         )
-        dropdown.wait_for(state="attached", timeout=5000)
+        try:
+            dropdown.wait_for(state="attached", timeout=5000)
+        except Exception as error:
+            try:
+                expanded = trigger.get_attribute("aria-expanded") or "未知"
+            except Exception:
+                expanded = "未知"
+            try:
+                input_visible = search_input.is_visible()
+            except Exception:
+                input_visible = "未知"
+            raise GYJInboundError(
+                f"GYJ 供应商候选未出现（控件展开={expanded}，输入框可见={input_visible}，"
+                f"候选层ID={dropdown_id or '无'}）"
+            ) from error
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")
         choice = dropdown.last.get_by_text(value, exact=True)
