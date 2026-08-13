@@ -425,6 +425,25 @@ class _CommittedQuantityRow(_ActualInboundRow):
         self.quantity_input = _CommittedQuantityInput()
 
 
+class _RejectedQuantityInput(_QuantityInput):
+    def __init__(self):
+        super().__init__()
+        self.value = "1"
+
+    def fill(self, value):
+        self.attempted = value
+
+    def evaluate(self, script):
+        if "=> ({" in script:
+            return {"value": self.value, "id": "operNumber_jet-test", "type": "text"}
+        return self.value
+
+
+class _RejectedQuantityRow(_ActualInboundRow):
+    def __init__(self):
+        self.quantity_input = _RejectedQuantityInput()
+
+
 class _QuantityCommitPage(_ActualGYJSavePage):
     def __init__(self, row):
         self.row = row
@@ -1098,6 +1117,13 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertTrue(row.quantity_input.committed)
         self.assertEqual(row.quantity_input.evaluate("element => element.value"), "10")
+
+    def test_reports_actual_quantity_input_state_when_gyj_rejects_a_value(self):
+        row = _RejectedQuantityRow()
+        adapter = GYJPlaywrightPage(_ActualGYJSavePage())
+
+        with self.assertRaisesRegex(GYJInboundError, r"应为 4.*当前值=1.*operNumber_jet-test"):
+            adapter._fill_quantity(row, 4)
 
     def test_waits_for_serial_entry_icon_after_product_selection(self):
         row = _SerialInputRow()

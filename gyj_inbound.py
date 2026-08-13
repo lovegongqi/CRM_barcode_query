@@ -342,14 +342,25 @@ class GYJPlaywrightPage:
         quantity_input.fill(str(quantity))
         quantity_input.press("Tab")
         self.page.wait_for_timeout(200)
+        current_value = ""
         for _ in range(50):
             try:
-                if str(quantity_input.evaluate("element => element.value") or "").strip() == str(quantity):
+                current_value = str(quantity_input.evaluate("element => element.value") or "").strip()
+                if current_value == str(quantity):
                     return
             except Exception:
                 pass
             self.page.wait_for_timeout(100)
-        raise GYJInboundError(f"GYJ 无条码配件数量未回写（应为 {quantity}）")
+        try:
+            state = quantity_input.evaluate(
+                "element => ({value: element.value || '', id: element.id || '', type: element.type || ''})"
+            ) or {}
+        except Exception:
+            state = {}
+        details = f"当前值={state.get('value', current_value) or '空'}"
+        if state.get("id"):
+            details += f"，输入框={state['id']}"
+        raise GYJInboundError(f"GYJ 无条码配件数量未回写（应为 {quantity}，{details}）")
 
     def add_product_line(self, line):
         if self._entered_lines:
