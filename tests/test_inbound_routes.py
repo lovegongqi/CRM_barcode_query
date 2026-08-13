@@ -122,6 +122,20 @@ class _GYJLoginCaptchaPage:
         return _EmptyLocator()
 
 
+class _RestorableGYJPage:
+    def __init__(self, restored_url):
+        self.url = ""
+        self.restored_url = restored_url
+        self.gotos = []
+
+    def goto(self, url, wait_until, timeout):
+        self.gotos.append((url, wait_until, timeout))
+        self.url = self.restored_url
+
+    def locator(self, selector):
+        return _EmptyLocator()
+
+
 class GYJCaptchaPreviewTest(unittest.TestCase):
     def test_uses_visible_login_form_captcha_image(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
@@ -135,6 +149,21 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
 
 
 class GYJLoginFlowTest(unittest.TestCase):
+    def test_login_status_reopens_persistent_session_before_reporting_login_required(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage("https://cloud.gyjerp.com/bill/purchase_in")
+        session._ensure_browser = mock.Mock(
+            side_effect=lambda: setattr(session, "page", page) or True
+        )
+
+        success, message = session.check_login_status()
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 已登录")
+        self.assertEqual(page.gotos, [(
+            "https://cloud.gyjerp.com/bill/purchase_in", "domcontentloaded", 60000
+        )])
+
     def test_step1_rebuilds_its_profile_once_when_the_login_form_never_appears(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         username_input = mock.Mock()

@@ -33,6 +33,7 @@ from gyj_inbound import (
     GYJInboundError,
     GYJPlaywrightPage,
     GYJPurchaseInboundWriter,
+    GYJ_PURCHASE_IN_URL,
     build_gyj_purchase_lines,
 )
 
@@ -3845,7 +3846,17 @@ class GYJSession:
     def check_login_status(self):
         with self.lock:
             if not self.is_alive():
-                return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
+                try:
+                    if not self._ensure_browser():
+                        return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
+                    self.page.goto(
+                        GYJ_PURCHASE_IN_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                except Exception as error:
+                    self._close_browser()
+                    return False, f"GYJ 会话恢复失败：{error}"
             try:
                 url = (self.page.url or "").lower()
                 if "login" in url:
