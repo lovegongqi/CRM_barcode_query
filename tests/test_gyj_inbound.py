@@ -4,6 +4,7 @@ from gyj_inbound import (
     GYJInboundError,
     GYJPlaywrightPage,
     GYJPurchaseInboundWriter,
+    GYJ_SUPPLIER,
     build_gyj_purchase_lines,
 )
 
@@ -17,6 +18,9 @@ def inbound_result(items, duplicate_serials=None):
 
 
 class GYJInboundLineTest(unittest.TestCase):
+    def test_supplier_uses_the_visible_gyj_option_label(self):
+        self.assertEqual(GYJ_SUPPLIER, "昆山怡口净水")
+
     def test_splits_serials_into_chunks_of_at_most_100(self):
         result = inbound_result([
             {
@@ -288,13 +292,15 @@ class _WarehouseForm:
 class _LegacySelectTrigger:
     def __init__(self):
         self.clicked = False
+        self.force = None
         self.first = self
 
     def count(self):
         return 1
 
-    def click(self):
+    def click(self, force=False):
         self.clicked = True
+        self.force = force
 
 
 class _MissingSelect:
@@ -393,9 +399,7 @@ class GYJInboundWriterTest(unittest.TestCase):
         self.assertEqual(page.clicked, ["新增", "保存"])
         self.assertNotIn("保存并审核", page.clicked)
         self.assertEqual(page.headers, {
-            "供应商": "昆山怡口净水系统有限公司",
-            "结算账户": "江西天麓",
-            "仓库": "沈桥仓",
+            "供应商": "昆山怡口净水",
         })
         self.assertEqual(page.remark, "装箱单号：SH202607210002")
         self.assertEqual(result["order_no"], "CG202608130001")
@@ -474,6 +478,7 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.select_header("供应商", "昆山怡口净水系统有限公司")
 
         self.assertTrue(adapter.form.field.trigger.clicked)
+        self.assertTrue(adapter.form.field.trigger.force)
         self.assertTrue(page.dropdown.choice.clicked)
         self.assertEqual(adapter._headers, {"供应商": "昆山怡口净水系统有限公司"})
 

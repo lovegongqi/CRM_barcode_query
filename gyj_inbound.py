@@ -4,7 +4,7 @@ class GYJInboundError(RuntimeError):
 
 MAX_SERIALS_PER_LINE = 100
 MAX_SERIAL_TEXT_LENGTH = 2000
-GYJ_SUPPLIER = "昆山怡口净水系统有限公司"
+GYJ_SUPPLIER = "昆山怡口净水"
 GYJ_SETTLEMENT_ACCOUNT = "江西天麓"
 GYJ_WAREHOUSE = "沈桥仓"
 GYJ_PURCHASE_IN_URL = "https://cloud.gyjerp.com/bill/purchase_in"
@@ -68,8 +68,6 @@ class GYJPurchaseInboundWriter:
         self._emit("正在新建 GYJ 采购入库单")
         self.page.open_new_form()
         self.page.select_header("供应商", GYJ_SUPPLIER)
-        self.page.select_header("结算账户", GYJ_SETTLEMENT_ACCOUNT)
-        self.page.select_header("仓库", GYJ_WAREHOUSE)
         self.page.fill_remark(f"装箱单号：{packing_slip_no}")
         for index, line in enumerate(lines, start=1):
             self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
@@ -137,7 +135,7 @@ class GYJPlaywrightPage:
             trigger = field.locator(".ant-select-selection").first
         if trigger.count() != 1:
             raise GYJInboundError(f"GYJ 表头字段不是可选项：{label}")
-        trigger.click()
+        trigger.click(force=True)
         dropdown = self.page.locator(".ant-select-dropdown:visible")
         if dropdown.count() < 1:
             raise GYJInboundError(f"未打开 GYJ {label} 下拉列表")
@@ -226,8 +224,6 @@ class GYJPlaywrightPage:
     def verify_form(self, packing_slip_no, lines):
         required = {
             "供应商": GYJ_SUPPLIER,
-            "结算账户": GYJ_SETTLEMENT_ACCOUNT,
-            "仓库": GYJ_WAREHOUSE,
         }
         if self._headers != required:
             raise GYJInboundError("GYJ 表头核对失败")
