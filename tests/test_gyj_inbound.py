@@ -186,7 +186,10 @@ class _ActualGYJSaveForm:
         self.save_button = _SaveButton()
 
     def get_by_text(self, text, exact):
-        if text == "保存（Ctrl+S）" and exact:
+        return _MissingButton()
+
+    def get_by_role(self, role, name, exact):
+        if role == "button" and name == "保存（Ctrl+S）" and exact:
             return self.save_button
         return _MissingButton()
 

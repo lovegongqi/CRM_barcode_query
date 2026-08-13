@@ -337,7 +337,7 @@ class GYJPlaywrightPage:
     def click_plain_save(self):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
-        save = self.form.get_by_text("保存（Ctrl+S）", exact=True)
+        save = self.form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
         if save.count() != 1:
             raise GYJInboundError("未找到唯一的 GYJ 普通保存按钮")
         save.click()
