@@ -541,6 +541,29 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertIn("document.hidden", inbound)
 
+    def test_inbound_page_exposes_gyj_login_and_plain_save_flow(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn", "gyjStage",
+            "gyjLogs", "gyjResult",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in (
+            "selectInboundWorkspace", "openGYJLogin", "startGYJPurchaseInbound",
+            "pollGYJInboundStatus",
+        ):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/login-status'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/start'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/status?'", inbound)
+        self.assertIn("昆山怡口净水系统有限公司", inbound)
+        self.assertIn("江西天麓", inbound)
+        self.assertIn("沈桥仓", inbound)
+        self.assertIn("仅保存，不审核", inbound)
+
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
         inbound = self.source("inbound.html")
         self.assertIn("function escapeHtml", inbound)

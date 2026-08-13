@@ -28,6 +28,12 @@ from inbound_extraction import (
     build_inbound_workbook,
     normalize_packing_slip_no,
 )
+from gyj_inbound import (
+    GYJInboundError,
+    GYJPlaywrightPage,
+    GYJPurchaseInboundWriter,
+    build_gyj_purchase_lines,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -3655,6 +3661,158 @@ class CRMWorker:
             self.logged_in_cache = False
         return result
 
+
+class GYJSession:
+    """独立、非持久化的 GYJ 浏览器会话；登录只通过可见页面完成。"""
+    login_url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.lock = threading.RLock()
+        self.logged_in = False
+
+    def is_alive(self):
+        try:
+            return bool(self.page and self.page.url)
+        except Exception:
+            return False
+
+    def _close_browser(self):
+        try:
+            if self.context:
+                self.context.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+        finally:
+            self.playwright = None
+            self.browser = None
+            self.context = None
+            self.page = None
+            self.logged_in = False
+
+    def _ensure_browser(self):
+        if self.is_alive():
+            return True
+        if not HAS_PLAYWRIGHT:
+            return False
+        self._close_browser()
+        self.playwright = sync_playwright().start()
+        # 不指定 user_data_dir：工具不会保存 GYJ 的 Cookie、密码或登录状态文件。
+        self.browser = self.playwright.chromium.launch(headless=False)
+        self.context = self.browser.new_context(locale="zh-CN", timezone_id="Asia/Shanghai")
+        self.page = self.context.new_page()
+        return True
+
+    def open_login(self):
+        with self.lock:
+            if not self._ensure_browser():
+                return False, "GYJ 浏览器未启动"
+            self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+            self.logged_in = False
+            return True, "GYJ 登录页面已打开，请在浏览器完成登录"
+
+    def check_login_status(self):
+        with self.lock:
+            if not self.is_alive():
+                return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
+            try:
+                url = (self.page.url or "").lower()
+                if "login" in url:
+                    self.logged_in = False
+                    return False, "仍在 GYJ 登录页，请完成登录"
+                if "cloud.gyjerp.com" not in url:
+                    self.logged_in = False
+                    return False, "无法确认 GYJ 登录状态"
+                self.logged_in = True
+                return True, "GYJ 已登录"
+            except Exception as error:
+                self.logged_in = False
+                return False, str(error)
+
+    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJPurchaseInboundWriter(
+                    GYJPlaywrightPage(self.page), log=log, progress=progress
+                ).save_packing_slip(packing_slip_no, lines)
+                return True, result
+            except GYJInboundError as error:
+                return False, str(error)
+            except Exception as error:
+                return False, str(error)
+
+    def shutdown(self):
+        with self.lock:
+            self._close_browser()
+            return True
+
+
+class GYJWorker:
+    """将 GYJ 的所有可见浏览器操作固定到同一线程。"""
+    def __init__(self):
+        self.tasks = queue.Queue()
+        self.state_lock = threading.Lock()
+        self.browser_running = False
+        self.logged_in_cache = False
+        self.current_task = ""
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _update_state(self, session):
+        with self.state_lock:
+            self.browser_running = session.is_alive()
+            self.logged_in_cache = bool(self.browser_running and session.logged_in)
+
+    def _run(self):
+        session = GYJSession()
+        while True:
+            method_name, args, kwargs, result_queue = self.tasks.get()
+            try:
+                with self.state_lock:
+                    self.current_task = method_name
+                if method_name == "shutdown":
+                    result = session.shutdown()
+                    self._update_state(session)
+                    result_queue.put((True, result))
+                    return
+                result = getattr(session, method_name)(*args, **kwargs)
+                self._update_state(session)
+                result_queue.put((True, result))
+            except Exception as error:
+                self._update_state(session)
+                result_queue.put((False, str(error)))
+            finally:
+                with self.state_lock:
+                    self.current_task = ""
+
+    def _call(self, method_name, *args, **kwargs):
+        result_queue = queue.Queue(maxsize=1)
+        self.tasks.put((method_name, args, kwargs, result_queue))
+        ok, result = result_queue.get()
+        if ok:
+            return result
+        raise RuntimeError(result)
+
+    def open_login(self):
+        return self._call("open_login")
+
+    def check_login_status(self):
+        return self._call("check_login_status")
+
+    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+        return self._call("save_purchase_inbound", packing_slip_no, lines, log, progress)
+
+    def shutdown(self):
+        return self._call("shutdown")
+
 def _positive_int_env(name, default):
     try:
         value = int(os.environ.get(name, default))
@@ -3849,6 +4007,7 @@ class CRMWorkerPool:
                 pass
 
 crm_pool = CRMWorkerPool()
+gyj_worker = GYJWorker()
 
 def _desktop_startup_login_check_loop():
     """桌面应用启动后验证上次记住的 CRM 登录，避免显示假登录状态。"""
@@ -3939,6 +4098,10 @@ inbound_job_lock = threading.RLock()
 inbound_jobs = {}
 latest_inbound_job_by_owner = {}
 latest_inbound_job_by_slot = {}
+
+inbound_gyj_job_lock = threading.RLock()
+inbound_gyj_jobs = {}
+latest_inbound_gyj_job_by_owner = {}
 
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
@@ -4069,6 +4232,37 @@ def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
         for slot_id, mapped_job_id in list(latest_inbound_job_by_slot.items()):
             if mapped_job_id == job_id:
                 latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'packing_slip_no': str(packing_slip_no or ''),
+        'source_job_id': str(source_job_id or ''),
+        'stage': 'waiting',
+        'running': False,
+        'done': False,
+        'success': False,
+        'error': '',
+        'current_line': 0,
+        'total_lines': len(lines or []),
+        'log_seq': 0,
+        'logs': [],
+        'result': None,
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
+def _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_gyj_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_gyj_jobs.pop(job_id, None)
+        if latest_inbound_gyj_job_by_owner.get(owner) == job_id:
+            latest_inbound_gyj_job_by_owner.pop(owner, None)
 
 def _empty_summary_job(slot_id=None):
     return {
@@ -4966,6 +5160,76 @@ def _run_inbound_job(job_id, worker):
         with inbound_job_lock:
             if latest_inbound_job_by_slot.get(slot_id) == job_id:
                 latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _run_inbound_gyj_job(job_id, worker, lines):
+    def set_stage(stage):
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = stage
+
+    def log(message, level='dim'):
+        text = str(message or '')
+        if '新建' in text:
+            set_stage('creating')
+        elif '录入' in text:
+            set_stage('filling')
+        elif '核对' in text:
+            set_stage('verifying')
+        elif '保存' in text:
+            set_stage('saving')
+        _job_log(inbound_gyj_job_lock, inbound_gyj_jobs, job_id, text, level, 300)
+
+    def progress(entry=None):
+        row = dict(entry or {})
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = 'filling'
+                job['current_line'] = int(row.get('current_line') or job.get('current_line') or 0)
+                job['total_lines'] = int(row.get('total_lines') or job.get('total_lines') or 0)
+
+    with inbound_gyj_job_lock:
+        job = inbound_gyj_jobs.get(job_id)
+        if not job:
+            return
+        job['stage'] = 'creating'
+        packing_slip_no = job['packing_slip_no']
+
+    try:
+        ok, result = worker.save_purchase_inbound(
+            packing_slip_no, lines, log=log, progress=progress,
+        )
+        if not ok:
+            raise GYJInboundError(_brief_batch_error(result, 800) or 'GYJ 采购入库保存失败')
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'success',
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'error': '',
+                    'result': result if isinstance(result, dict) else {},
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log('GYJ 采购入库单已保存', 'success')
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库保存失败'
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'failed',
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log(message, 'error')
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -8933,6 +9197,28 @@ def _inbound_status_payload(job, owner=''):
     return payload
 
 
+def _inbound_gyj_status_payload(job, owner=''):
+    if not job:
+        return {
+            'job_id': '', 'owner': owner, 'packing_slip_no': '', 'source_job_id': '',
+            'stage': 'waiting', 'running': False, 'done': False, 'success': False,
+            'error': '', 'current_line': 0, 'total_lines': 0, 'logs': [],
+            'started_at': '', 'finished_at': '',
+        }
+    payload = {
+        key: job.get(key)
+        for key in (
+            'job_id', 'owner', 'packing_slip_no', 'source_job_id', 'stage', 'running',
+            'done', 'success', 'error', 'current_line', 'total_lines', 'started_at',
+            'finished_at',
+        )
+    }
+    payload['logs'] = list(job.get('logs') or [])
+    if job.get('done') and job.get('success') and isinstance(job.get('result'), dict):
+        payload['result'] = job['result']
+    return payload
+
+
 @app.route("/api/inbound/start", methods=["POST"])
 def api_inbound_start():
     data = request.get_json(silent=True) or {}
@@ -9036,6 +9322,100 @@ def api_inbound_export():
         download_name=f"{packing_slip_no}_入库明细.xlsx",
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.route("/api/inbound/gyj/login", methods=["POST"])
+def api_inbound_gyj_login():
+    ok, message = gyj_worker.open_login()
+    return jsonify({'success': bool(ok), 'message': str(message or '')}), (200 if ok else 500)
+
+
+@app.route("/api/inbound/gyj/login-status", methods=["GET"])
+def api_inbound_gyj_login_status():
+    ok, message = gyj_worker.check_login_status()
+    return jsonify({'success': bool(ok), 'logged_in': bool(ok), 'message': str(message or '')})
+
+
+@app.route("/api/inbound/gyj/start", methods=["POST"])
+def api_inbound_gyj_start():
+    owner = _current_inbound_owner()
+    with inbound_job_lock:
+        source_job_id = latest_inbound_job_by_owner.get(owner) or ''
+        source = inbound_jobs.get(source_job_id)
+        if not source or source.get('owner') != owner:
+            return jsonify({'success': False, 'error': '请先成功读取 CRM 装箱单'}), 409
+        if not source.get('done') or not source.get('success') or not isinstance(source.get('result'), dict):
+            return jsonify({'success': False, 'error': 'CRM 装箱单尚未成功读取完成'}), 409
+        packing_slip_no = source.get('packing_slip_no') or ''
+        source_result = dict(source['result'])
+
+    try:
+        lines = build_gyj_purchase_lines(source_result)
+    except GYJInboundError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+
+    logged_in, message = gyj_worker.check_login_status()
+    if not logged_in:
+        return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
+
+    with inbound_gyj_job_lock:
+        running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
+        running_job = inbound_gyj_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有 GYJ 采购入库任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+        _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner)
+        job = _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines)
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _append_job_log_unlocked(job, '已通过 GYJ 登录校验，准备创建采购入库单', 'info', 300)
+        inbound_gyj_jobs[job['job_id']] = job
+        latest_inbound_gyj_job_by_owner[owner] = job['job_id']
+
+    thread = threading.Thread(
+        target=_run_inbound_gyj_job,
+        args=(job['job_id'], gyj_worker, lines),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库任务启动失败'
+        with inbound_gyj_job_lock:
+            job.update({
+                'stage': 'failed', 'running': False, 'done': True, 'success': False,
+                'error': message, 'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+        return jsonify({'success': False, 'error': message}), 500
+
+    return jsonify({
+        'success': True,
+        'job_id': job['job_id'],
+        'packing_slip_no': packing_slip_no,
+        'total_lines': len(lines),
+    })
+
+
+@app.route("/api/inbound/gyj/status", methods=["GET"])
+def api_inbound_gyj_status():
+    owner = _current_inbound_owner()
+    requested_job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
+    with inbound_gyj_job_lock:
+        job_id = requested_job_id
+        if prefer_latest or not job_id:
+            job_id = latest_inbound_gyj_job_by_owner.get(owner) or ''
+        job = inbound_gyj_jobs.get(job_id)
+        if requested_job_id and (not job or job.get('owner') != owner):
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        return jsonify(_inbound_gyj_status_payload(job, owner))
 
 @app.route("/product-library")
 def product_library_page():
