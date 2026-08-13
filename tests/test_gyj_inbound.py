@@ -67,6 +67,35 @@ class GYJInboundLineTest(unittest.TestCase):
             "record_type": "无条码配件",
         }])
 
+    def test_places_serial_number_lines_before_unbarcoded_accessories(self):
+        result = inbound_result([
+            {
+                "product_code": "247296319",
+                "description": "配件",
+                "order_numbers": [],
+                "serials": [],
+                "expected_quantity": 10,
+                "serial_count": 0,
+                "unbarcoded_quantity": 10,
+                "quantity_mismatch": False,
+            },
+            {
+                "product_code": "906018301",
+                "description": "主产品",
+                "order_numbers": [],
+                "serials": ["SN001", "SN002"],
+                "expected_quantity": 2,
+                "serial_count": 2,
+                "unbarcoded_quantity": 0,
+                "quantity_mismatch": False,
+            },
+        ])
+
+        lines = build_gyj_purchase_lines(result)
+
+        self.assertEqual([line["record_type"] for line in lines], ["条码", "无条码配件"])
+        self.assertEqual([line["product_code"] for line in lines], ["906018301", "247296319"])
+
     def test_rejects_source_result_with_duplicate_serials(self):
         with self.assertRaisesRegex(GYJInboundError, "重复条码"):
             build_gyj_purchase_lines(inbound_result([], ["SN0001"]))
@@ -368,6 +397,9 @@ class _QuantityInput:
     def press(self, key):
         self.key = key
 
+    def evaluate(self, script):
+        return self.value
+
 
 class _ActualInboundRow:
     def __init__(self):
@@ -377,6 +409,29 @@ class _ActualInboundRow:
         if selector == 'input[id^="operNumber_"]':
             return self.quantity_input
         raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _CommittedQuantityInput(_QuantityInput):
+    def __init__(self):
+        super().__init__()
+        self.committed = False
+
+    def evaluate(self, script):
+        return self.value if self.committed else ""
+
+
+class _CommittedQuantityRow(_ActualInboundRow):
+    def __init__(self):
+        self.quantity_input = _CommittedQuantityInput()
+
+
+class _QuantityCommitPage(_ActualGYJSavePage):
+    def __init__(self, row):
+        self.row = row
+
+    def wait_for_timeout(self, timeout):
+        self.timeout = timeout
+        self.row.quantity_input.committed = True
 
 
 class _SerialButton:
@@ -395,10 +450,14 @@ class _SerialButton:
 class _SerialInputRow:
     def __init__(self):
         self.button = _SerialButton()
+        self.quantity_input = _QuantityInput()
+        self.quantity_input.value = "1"
 
     def locator(self, selector):
         if selector == ".ant-input-search-icon":
             return self.button
+        if selector == 'input[id^="operNumber_"]':
+            return self.quantity_input
         raise AssertionError(f"unexpected selector: {selector}")
 
 
@@ -468,13 +527,58 @@ class _ProductSearchModal:
 
 
 class _SerialEntryModal:
-    def __init__(self):
+    def __init__(self, serial_count=1):
         self.serial_input = _SelectSearchInput()
+        self.rows = _RowCollection([object()] * serial_count)
 
     def locator(self, selector):
         if selector == 'textarea[placeholder="多个序列号用逗号隔开，请少于2000个字符"]':
             return self.serial_input
+        if selector == ".ant-table-tbody > tr":
+            return self.rows
         raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _DelayedSerialRows(_RowCollection):
+    def __init__(self, serial_count):
+        super().__init__([object()] * serial_count)
+        self.ready = False
+
+    def count(self):
+        return len(self.rows) if self.ready else 0
+
+
+class _DelayedSerialEntryModal(_SerialEntryModal):
+    def __init__(self, serial_count):
+        super().__init__(serial_count)
+        self.rows = _DelayedSerialRows(serial_count)
+
+
+class _SerialQuantityInput(_QuantityInput):
+    def __init__(self, expected):
+        super().__init__()
+        self.expected = str(expected)
+
+class _SerialQuantityRow(_SerialInputRow):
+    def __init__(self, expected):
+        super().__init__()
+        self.quantity_input = _SerialQuantityInput(expected)
+
+    def locator(self, selector):
+        if selector == 'input[id^="operNumber_"]':
+            return self.quantity_input
+        return super().locator(selector)
+
+
+class _SerialCommitPage(_SerialRenderPage):
+    def __init__(self, row, modal):
+        super().__init__(row)
+        self.modal = modal
+
+    def wait_for_timeout(self, timeout):
+        super().wait_for_timeout(timeout)
+        self.modal.rows.ready = True
+        self.row.quantity_input.value = self.row.quantity_input.expected
 
 
 class _ProductSelectionRow:
@@ -985,6 +1089,16 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertEqual(row.quantity_input.key, "Tab")
         self.assertEqual(row.quantity_input.waited, ("visible", 5000))
 
+    def test_waits_for_unbarcoded_quantity_to_commit_before_continuing(self):
+        row = _CommittedQuantityRow()
+        page = _QuantityCommitPage(row)
+        adapter = GYJPlaywrightPage(page)
+
+        adapter._fill_quantity(row, 10)
+
+        self.assertTrue(row.quantity_input.committed)
+        self.assertEqual(row.quantity_input.evaluate("element => element.value"), "10")
+
     def test_waits_for_serial_entry_icon_after_product_selection(self):
         row = _SerialInputRow()
         adapter = GYJPlaywrightPage(_SerialRenderPage(row))
@@ -994,6 +1108,19 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter._fill_serials(row, ["8432604240024"])
 
         self.assertTrue(row.button.clicked)
+
+    def test_waits_for_all_serials_and_the_matching_row_quantity_before_confirming(self):
+        row = _SerialQuantityRow(expected=3)
+        row.button.ready = True
+        modal = _DelayedSerialEntryModal(serial_count=3)
+        adapter = GYJPlaywrightPage(_SerialCommitPage(row, modal))
+        adapter._visible_modal = lambda: modal
+        adapter._click_exact = lambda *args: None
+
+        adapter._fill_serials(row, ["SN001", "SN002", "SN003"])
+
+        self.assertTrue(modal.rows.ready)
+        self.assertEqual(row.quantity_input.value, "3")
 
     def test_reports_product_search_result_count_when_item_is_missing(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())

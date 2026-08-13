@@ -49,7 +49,7 @@ def build_gyj_purchase_lines(result):
 
     if not lines:
         raise GYJInboundError("没有可创建 GYJ 入库单的明细")
-    return lines
+    return sorted(lines, key=lambda line: 0 if line["serials"] else 1)
 
 
 class GYJPurchaseInboundWriter:
@@ -308,7 +308,28 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 多个序列号输入框")
         serial_input.fill(",".join(serials))
         self._click_exact(modal, "批量添加")
+        serial_rows = modal.locator(".ant-table-tbody > tr")
+        for _ in range(100):
+            if serial_rows.count() >= len(serials):
+                break
+            self.page.wait_for_timeout(100)
+        if serial_rows.count() < len(serials):
+            raise GYJInboundError(
+                f"GYJ 序列号批量添加未完成（已录入 {serial_rows.count()} / {len(serials)}）"
+            )
         self._click_exact(modal, "确 定")
+        quantity_input = row.locator('input[id^="operNumber_"]')
+        for _ in range(100):
+            if quantity_input.count() == 1:
+                try:
+                    if str(quantity_input.evaluate("element => element.value") or "").strip() == str(len(serials)):
+                        return
+                except Exception:
+                    pass
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError(
+            f"GYJ 序列号数量未回写（应为 {len(serials)}）"
+        )
 
     def _fill_quantity(self, row, quantity):
         quantity_input = row.locator('input[id^="operNumber_"]')
@@ -320,6 +341,15 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 无条码数量输入框")
         quantity_input.fill(str(quantity))
         quantity_input.press("Tab")
+        self.page.wait_for_timeout(200)
+        for _ in range(50):
+            try:
+                if str(quantity_input.evaluate("element => element.value") or "").strip() == str(quantity):
+                    return
+            except Exception:
+                pass
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError(f"GYJ 无条码配件数量未回写（应为 {quantity}）")
 
     def add_product_line(self, line):
         if self._entered_lines:
