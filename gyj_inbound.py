@@ -362,13 +362,17 @@ class GYJPlaywrightPage:
             self.page.wait_for_timeout(100)
         try:
             state = quantity_input.evaluate(
-                "element => ({value: element.value || '', id: element.id || '', type: element.type || ''})"
+                "element => ({value: element.value || '', id: element.id || '', type: element.type || '', "
+                "readOnly: !!element.readOnly, disabled: !!element.disabled, className: element.className || ''})"
             ) or {}
         except Exception:
             state = {}
         details = f"当前值={state.get('value', current_value) or '空'}"
         if state.get("id"):
             details += f"，输入框={state['id']}"
+        details += f"，只读={bool(state.get('readOnly'))}，禁用={bool(state.get('disabled'))}"
+        if state.get("className"):
+            details += f"，类={state['className']}"
         try:
             row_text = " ".join(str(row.inner_text() or "").split())[:240]
         except Exception:

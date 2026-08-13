@@ -447,7 +447,14 @@ class _RejectedQuantityInput(_QuantityInput):
 
     def evaluate(self, script, value=None):
         if "=> ({" in script:
-            return {"value": self.value, "id": "operNumber_jet-test", "type": "text"}
+            return {
+                "value": self.value,
+                "id": "operNumber_jet-test",
+                "type": "text",
+                "readOnly": False,
+                "disabled": False,
+                "className": "ant-input-number-input",
+            }
         return self.value
 
 
