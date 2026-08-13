@@ -150,14 +150,16 @@ class _PurchaseInboundListPage:
         self.new_button = _DelayedNewButton()
         self.modal = _VisibleForm()
         self.goto_url = ""
+        self.selectors = []
 
     def goto(self, url, **kwargs):
         self.goto_url = url
 
     def locator(self, selector):
+        self.selectors.append(selector)
         if selector == ".table-operator button.ant-btn-primary":
             return self.new_button
-        if selector == ".ant-modal:visible":
+        if selector in (".ant-modal:visible", ".ant-modal.j-modal-box.fullscreen:visible"):
             return self.modal
         raise AssertionError(f"unexpected selector: {selector}")
 
@@ -787,6 +789,14 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         self.assertTrue(page.new_button.clicked)
         self.assertIs(adapter.form, page.modal)
+
+    def test_uses_fullscreen_purchase_form_instead_of_the_last_child_dialog(self):
+        page = _PurchaseInboundListPage()
+        adapter = GYJPlaywrightPage(page)
+
+        adapter.open_new_form()
+
+        self.assertIn(".ant-modal.j-modal-box.fullscreen:visible", page.selectors)
 
     def test_uses_actual_plain_save_button_label(self):
         form = _ActualGYJSaveForm()

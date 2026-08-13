@@ -99,6 +99,12 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 入库表单")
         return modal.last
 
+    def _visible_purchase_form(self):
+        form = self.page.locator(".ant-modal.j-modal-box.fullscreen:visible")
+        if form.count() != 1:
+            raise GYJInboundError("未找到 GYJ 采购入库主表单")
+        return form
+
     def _dismiss_intro_tour(self):
         try:
             skip = self.page.locator(".introjs-skipbutton:visible")
@@ -155,7 +161,7 @@ class GYJPlaywrightPage:
         if new_button.count() != 1:
             raise GYJInboundError("未找到 GYJ 采购入库的新增按钮")
         new_button.click()
-        self.form = self._visible_modal()
+        self.form = self._visible_purchase_form()
 
     def select_header(self, label, value):
         if not self.form:
