@@ -639,8 +639,8 @@ class FrontendContractTest(unittest.TestCase):
     def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
         self.assertIn("'/transfer': ['⇄', '移库']", aurora)
-        self.assertIn("'/inbound': ['↕', '入库']", aurora)
-        self.assertNotIn("'/inbound': ['⇅', '入库']", aurora)
+        self.assertIn("'/inbound': ['⇅', '入库']", aurora)
+        self.assertNotIn("'/inbound': ['↕', '入库']", aurora)
         self.assertNotIn("'/inbound': ['⇩', '入库']", aurora)
 
     def test_login_and_access_pages_use_approved_compositions(self):

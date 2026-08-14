@@ -4,6 +4,7 @@ class GYJInboundError(RuntimeError):
 
 MAX_SERIALS_PER_LINE = 100
 MAX_SERIAL_TEXT_LENGTH = 2000
+MAX_PRODUCT_CREATION_ATTEMPTS = 2
 GYJ_SUPPLIER = "昆山怡口净水"
 GYJ_SETTLEMENT_ACCOUNT = "江西天麓"
 GYJ_WAREHOUSE = "沈桥仓"
@@ -62,6 +63,46 @@ class GYJPurchaseInboundWriter:
         if self.log:
             self.log(message)
 
+    @staticmethod
+    def _is_missing_product_error(error):
+        message = str(error or "")
+        return (
+            "未找到物料编码" in message
+            or "未找到唯一的 GYJ 物料编码" in message
+        )
+
+    def _add_product_line(self, line):
+        product_code = str(line.get("product_code") or "").strip()
+        description = str(line.get("description") or "").strip()
+        for attempt in range(MAX_PRODUCT_CREATION_ATTEMPTS + 1):
+            try:
+                self.page.add_product_line(line)
+                return
+            except GYJInboundError as error:
+                if not self._is_missing_product_error(error):
+                    raise
+                if attempt >= MAX_PRODUCT_CREATION_ATTEMPTS:
+                    raise GYJInboundError(
+                        f"GYJ 物料 {product_code} 新增后仍无法选择，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次"
+                    ) from error
+                attempt_number = attempt + 1
+                self._emit(
+                    f"正在新增 GYJ 物料（{attempt_number}/{MAX_PRODUCT_CREATION_ATTEMPTS}）：{product_code}"
+                )
+                try:
+                    self.page.create_product(product_code, description, bool(line.get("serials")))
+                except Exception as create_error:
+                    if attempt_number >= MAX_PRODUCT_CREATION_ATTEMPTS:
+                        raise GYJInboundError(
+                            f"GYJ 物料 {product_code} 新增失败，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次：{create_error}"
+                        ) from create_error
+                    self._emit(
+                        f"GYJ 物料新增失败，将重试（{attempt_number + 1}/{MAX_PRODUCT_CREATION_ATTEMPTS}）：{product_code}"
+                    )
+                    continue
+                serial_mode = "有" if line.get("serials") else "无"
+                self._emit(f"已新增 GYJ 物料：{product_code} {description}（序列号：{serial_mode}）")
+
     def save_packing_slip(self, packing_slip_no, lines):
         if not lines:
             raise GYJInboundError("没有可保存的 GYJ 入库明细")
@@ -71,7 +112,7 @@ class GYJPurchaseInboundWriter:
         self.page.fill_remark(f"装箱单号：{packing_slip_no}")
         for index, line in enumerate(lines, start=1):
             self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
-            self.page.add_product_line(line)
+            self._add_product_line(line)
             if self.progress:
                 self.progress({"current_line": index, "total_lines": len(lines)})
         self._emit("正在核对 GYJ 采购入库单")
@@ -92,6 +133,7 @@ class GYJPlaywrightPage:
         self.form = None
         self._headers = {}
         self._entered_lines = []
+        self._product_picker = None
 
     def _visible_modal(self):
         modal = self.page.locator(".ant-modal:visible")
@@ -263,11 +305,14 @@ class GYJPlaywrightPage:
         return rows.nth(rows.count() - 2)
 
     def _choose_product(self, row, product_code):
-        product_button = row.locator("button.ant-btn.ant-btn-icon-only")
-        if product_button.count() < 1:
-            raise GYJInboundError("未找到 GYJ 物料选择按钮")
-        product_button.first.click()
-        modal = self._visible_modal()
+        modal = self._product_picker
+        if modal is None:
+            product_button = row.locator("button.ant-btn.ant-btn-icon-only")
+            if product_button.count() < 1:
+                raise GYJInboundError("未找到 GYJ 物料选择按钮")
+            product_button.first.click()
+            modal = self._visible_modal()
+            self._product_picker = modal
         search = modal.locator("input").filter(has_not=self.page.locator("[disabled]"))
         if search.count() < 1:
             raise GYJInboundError("未找到 GYJ 物料搜索框")
@@ -289,6 +334,78 @@ class GYJPlaywrightPage:
             raise GYJInboundError(f"GYJ 物料 {product_code} 没有可选项")
         checkbox.check()
         self._click_exact(modal, "确 定")
+        self._product_picker = None
+
+    def create_product(self, product_code, description, has_serials):
+        product_code = str(product_code or "").strip()
+        description = str(description or "").strip()
+        if not product_code:
+            raise GYJInboundError("GYJ 新增物料缺少编码")
+        if not description:
+            raise GYJInboundError(f"GYJ 新增物料 {product_code} 缺少名称")
+        picker = self._product_picker
+        if picker is None:
+            raise GYJInboundError(f"GYJ 物料 {product_code} 未打开选择窗口，不能新增")
+
+        new_button = picker.get_by_role("button", name="新 增", exact=True)
+        if new_button.count() != 1:
+            new_button = picker.get_by_role("button", name="新增", exact=True)
+        if new_button.count() != 1:
+            raise GYJInboundError(f"未找到 GYJ 物料新增按钮：{product_code}")
+        new_button.click()
+
+        product_form = None
+        name_input = None
+        for _ in range(50):
+            candidate = self._visible_modal()
+            candidate_name = candidate.locator("input#name:visible")
+            if candidate_name.count() == 1:
+                product_form = candidate
+                name_input = candidate_name
+                break
+            self.page.wait_for_timeout(100)
+        if product_form is None:
+            raise GYJInboundError(f"未打开 GYJ 新增物料表单：{product_code}")
+
+        unit_input = product_form.locator("input#unit:visible")
+        barcode_input = product_form.locator('[id^="barCode_jet-"]:visible')
+        for input_control, field_name in (
+            (name_input, "名称"), (unit_input, "单位"), (barcode_input, "条码"),
+        ):
+            try:
+                input_control.wait_for(state="visible", timeout=5000)
+            except Exception as error:
+                raise GYJInboundError(
+                    f"未找到 GYJ 新增物料{field_name}输入框：{product_code}"
+                ) from error
+            if input_control.count() != 1:
+                raise GYJInboundError(f"未找到唯一的 GYJ 新增物料{field_name}输入框：{product_code}")
+        name_input.fill(description)
+        unit_input.fill("个")
+        barcode_input.fill(product_code)
+
+        serial_trigger = product_form.locator(
+            "#enableSerialNumber .ant-select-selection, #enableSerialNumber .ant-select-selector"
+        ).first
+        if serial_trigger.count() != 1:
+            raise GYJInboundError(f"未找到 GYJ 新增物料序列号选项：{product_code}")
+        serial_trigger.click()
+        serial_option = "有" if has_serials else "无"
+        dropdown = self.page.locator(".ant-select-dropdown:visible")
+        choice = dropdown.last.get_by_text(serial_option, exact=True)
+        if choice.count() != 1:
+            raise GYJInboundError(f"未找到 GYJ 新增物料序列号选项：{serial_option}")
+        choice.click()
+
+        save = product_form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
+        if save.count() != 1:
+            raise GYJInboundError(f"未找到 GYJ 新增物料普通保存按钮：{product_code}")
+        save.click()
+        for _ in range(50):
+            if product_form.count() == 0:
+                return
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError(f"GYJ 新增物料保存未完成：{product_code}")
 
     def _fill_serials(self, row, serials):
         serial_button = row.locator(".ant-input-search-icon")
