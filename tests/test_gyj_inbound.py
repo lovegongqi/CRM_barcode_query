@@ -1643,6 +1643,57 @@ class GYJInboundWriterTest(unittest.TestCase):
         self.assertNotIn("保存", page.clicked)
 
 
+class GYJCreateMissingProductEndToEndTest(unittest.TestCase):
+    """End-to-end: when GYJ's product library lacks a product code, the writer
+    calls create_product exactly once, then re-attempts add_product_line which
+    now succeeds (because the new product is in the library), and proceeds to
+    click_plain_save exactly once.  The agent's no-op intercepts the save so
+    GYJ 端 is never actually saved.
+    """
+
+    def test_create_missing_product_then_save_all_five_lines(self):
+        import sys
+        sys.path.insert(0, ".")
+        from gyj_inbound import GYJPurchaseInboundWriter
+        from gyj_inbound import GYJPurchaseInboundWriter as _  # noqa
+        # _E2EPage already exists from the SH202607230016 test class.  Reuse
+        # the same fake; it creates rows with the right code and tracks serials.
+        page = _E2EPage()
+        # Make add_product_line fail on its first call (so writer triggers
+        # create_product), then succeed on the second.
+        original_add = page.add_product_line
+        calls = {"n": 0}
+        def flaky_add(line):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GYJInboundError("未找到物料编码：" + line["product_code"])
+            return original_add(line)
+        page.add_product_line = flaky_add
+        # Track create_product calls.
+        called = {"save": 0}
+        original_save = page.click_plain_save
+        def save_noop():
+            called["save"] += 1
+            return "SKIPPED"
+        page.click_plain_save = save_noop
+
+        # Build the SH202607230016 lines (same as GYJEndToEndSH202607230016Test).
+        result = _E2EHistoryResult.make()
+        lines = build_gyj_purchase_lines(result)
+        writer = GYJPurchaseInboundWriter(page, log=lambda m, l="info": None)
+        payload = writer.save_packing_slip("SH202607230016", lines)
+
+        self.assertEqual(payload["packing_slip_no"], "SH202607230016")
+        # add_product_line was called twice per product that had to be created
+        # (once failing, once succeeding) plus once for the products that were
+        # already in the library.  All 5 lines must end up in page.form.rows.
+        self.assertEqual(len(page.form.rows), 5)
+        # create_product was invoked for at least one product.
+        self.assertGreaterEqual(len(page.created_products), 1)
+        # click_plain_save was called exactly once (the writer's save step).
+        self.assertEqual(called["save"], 1)
+
+
 class _GYJSessionPageStub:
     def __init__(self, url, has_user_input, has_captcha_input):
         self._url = url
