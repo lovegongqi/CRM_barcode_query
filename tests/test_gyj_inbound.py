@@ -119,8 +119,12 @@ class GYJInboundLineTest(unittest.TestCase):
 
 
 class FakeGYJPage:
-    def __init__(self, product_found=True):
+    def __init__(self, product_found=True, product_outcomes=None, create_failures=0, create_exception=None):
         self.product_found = product_found
+        self.product_outcomes = list(product_outcomes or [])
+        self.create_failures = create_failures
+        self.create_exception = create_exception
+        self.created_products = []
         self.clicked = []
         self.headers = {}
         self.remark = ""
@@ -136,9 +140,21 @@ class FakeGYJPage:
         self.remark = value
 
     def add_product_line(self, line):
-        if not self.product_found:
+        product_found = (
+            self.product_outcomes.pop(0)
+            if self.product_outcomes
+            else self.product_found
+        )
+        if not product_found:
             raise GYJInboundError(f"未找到物料编码：{line['product_code']}")
         self.lines.append(dict(line))
+
+    def create_product(self, product_code, description, has_serials):
+        self.created_products.append((product_code, description, has_serials))
+        if len(self.created_products) <= self.create_failures:
+            if self.create_exception:
+                raise self.create_exception
+            raise GYJInboundError(f"GYJ 新增物料失败：{product_code}")
 
     def verify_form(self, packing_slip_no, lines):
         self.checked = (packing_slip_no, list(lines))
@@ -604,6 +620,105 @@ class _ProductSearchModal:
         if text in ("查 询", "查询") and exact:
             return self.query
         return _MissingButton()
+
+
+class _ProductCreateInput:
+    def __init__(self):
+        self.value = ""
+        self.first = self
+        self.waited = None
+
+    def count(self):
+        return 1
+
+    def wait_for(self, state, timeout):
+        self.waited = (state, timeout)
+
+    def fill(self, value):
+        self.value = value
+
+
+class _ProductCreateChoice(_ActionButton):
+    pass
+
+
+class _ProductCreateDropdown:
+    def __init__(self):
+        self.yes = _ProductCreateChoice()
+        self.no = _ProductCreateChoice()
+        self.last = self
+
+    def get_by_text(self, text, exact):
+        if exact and text == "有":
+            return self.yes
+        if exact and text == "无":
+            return self.no
+        return _MissingButton()
+
+
+class _ProductCreateSaveButton(_ActionButton):
+    def __init__(self, form):
+        super().__init__()
+        self.form = form
+
+    def click(self):
+        super().click()
+        self.form.visible = False
+
+
+class _ProductCreateForm:
+    def __init__(self):
+        self.visible = True
+        self.name = _ProductCreateInput()
+        self.unit = _ProductCreateInput()
+        self.barcode = _ProductCreateInput()
+        self.serial_trigger = _ActionButton()
+        self.save = _ProductCreateSaveButton(self)
+        self.last = self
+
+    def count(self):
+        return 1 if self.visible else 0
+
+    def locator(self, selector):
+        if selector == "input#name:visible":
+            return self.name
+        if selector == "input#unit:visible":
+            return self.unit
+        if selector == '[id^="barCode_jet-"]:visible':
+            return self.barcode
+        if selector == "#enableSerialNumber .ant-select-selection, #enableSerialNumber .ant-select-selector":
+            return self.serial_trigger
+        raise AssertionError(f"unexpected selector: {selector}")
+
+    def get_by_role(self, role, name, exact):
+        if role == "button" and name == "保存（Ctrl+S）" and exact:
+            return self.save
+        return _MissingButton()
+
+
+class _ProductCreateNewButton(_ActionButton):
+    pass
+
+
+class _ProductCreatePicker:
+    def __init__(self):
+        self.new = _ProductCreateNewButton()
+
+    def get_by_role(self, role, name, exact=False):
+        if role == "button":
+            return self.new
+        return _MissingButton()
+
+
+class _ProductCreatePage(_ActualGYJSavePage):
+    def __init__(self):
+        self.form = _ProductCreateForm()
+        self.dropdown = _ProductCreateDropdown()
+
+    def locator(self, selector):
+        if selector == ".ant-select-dropdown:visible":
+            return self.dropdown
+        return super().locator(selector)
 
 
 class _SerialEntryModal:
@@ -1074,9 +1189,48 @@ class GYJInboundWriterTest(unittest.TestCase):
     def test_writer_stops_before_save_when_product_lookup_fails(self):
         page = FakeGYJPage(product_found=False)
 
-        with self.assertRaisesRegex(GYJInboundError, "未找到物料编码"):
+        with self.assertRaisesRegex(GYJInboundError, "新增后仍无法选择"):
             GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
 
+        self.assertNotIn("保存", page.clicked)
+
+    def test_writer_creates_missing_product_then_retries_selection(self):
+        page = FakeGYJPage(product_outcomes=[False, True])
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(page.created_products, [("926019528", "滤芯", True)])
+        self.assertEqual(page.lines, self.lines)
+        self.assertIn("保存", page.clicked)
+
+    def test_writer_marks_unbarcoded_accessory_as_no_serial_product(self):
+        line = dict(self.lines[0], serials=[], quantity=4, record_type="无条码配件")
+        page = FakeGYJPage(product_outcomes=[False, True])
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", [line])
+
+        self.assertEqual(page.created_products, [("926019528", "滤芯", False)])
+
+    def test_writer_retries_missing_product_creation_twice_then_stops_before_save(self):
+        page = FakeGYJPage(product_found=False, create_failures=2)
+
+        with self.assertRaisesRegex(GYJInboundError, "926019528"):
+            GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(len(page.created_products), 2)
+        self.assertNotIn("保存", page.clicked)
+
+    def test_writer_retries_a_browser_create_error_before_stopping(self):
+        page = FakeGYJPage(
+            product_found=False,
+            create_failures=2,
+            create_exception=TimeoutError("GYJ 新增表单加载超时"),
+        )
+
+        with self.assertRaisesRegex(GYJInboundError, "新增失败"):
+            GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(len(page.created_products), 2)
         self.assertNotIn("保存", page.clicked)
 
 
@@ -1227,6 +1381,35 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
 
         with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
             adapter._choose_product(_ProductSelectionRow(), "406005116")
+
+    def test_creates_missing_product_with_visible_required_fields(self):
+        page = _ProductCreatePage()
+        adapter = GYJPlaywrightPage(page)
+        adapter._product_picker = _ProductCreatePicker()
+        adapter._visible_modal = lambda: page.form
+
+        adapter.create_product("926023628", "测试滤芯", True)
+
+        self.assertTrue(adapter._product_picker.new.clicked)
+        self.assertEqual(page.form.name.value, "测试滤芯")
+        self.assertEqual(page.form.unit.value, "个")
+        self.assertEqual(page.form.barcode.value, "926023628")
+        self.assertTrue(page.form.serial_trigger.clicked)
+        self.assertTrue(page.dropdown.yes.clicked)
+        self.assertFalse(page.dropdown.no.clicked)
+        self.assertTrue(page.form.save.clicked)
+        self.assertFalse(page.form.visible)
+
+    def test_creates_unbarcoded_accessory_with_no_serial_setting(self):
+        page = _ProductCreatePage()
+        adapter = GYJPlaywrightPage(page)
+        adapter._product_picker = _ProductCreatePicker()
+        adapter._visible_modal = lambda: page.form
+
+        adapter.create_product("406005117", "电源", False)
+
+        self.assertTrue(page.dropdown.no.clicked)
+        self.assertFalse(page.dropdown.yes.clicked)
 
     def test_inserts_another_row_after_the_first_prepared_line(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
