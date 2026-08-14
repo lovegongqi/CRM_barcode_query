@@ -569,12 +569,14 @@ class _ActionButton:
     def __init__(self):
         self.clicked = False
         self.first = self
+        self.force = False
 
     def count(self):
         return 1
 
-    def click(self):
+    def click(self, force=False):
         self.clicked = True
+        self.force = force
 
 
 class _ProductSearchInput:
@@ -621,6 +623,11 @@ class _ProductSearchModal:
             return self.query
         return _MissingButton()
 
+    def get_by_role(self, role, name, exact=False):
+        if role == "button" and name == "查 询" and exact:
+            return self.query
+        return _MissingButton()
+
 
 class _DelayedProductPickerCollection:
     def __init__(self, modal):
@@ -652,6 +659,38 @@ class _DelayedProductPickerPage(_ActualGYJSavePage):
     def wait_for_timeout(self, timeout):
         self.waits += 1
         self.picker.ready = True
+
+
+class _TourOverlay:
+    def __init__(self):
+        self.visible = True
+
+    def count(self):
+        return 1 if self.visible else 0
+
+
+class _TourKeyboard:
+    def __init__(self, overlay):
+        self.overlay = overlay
+        self.keys = []
+
+    def press(self, key):
+        self.keys.append(key)
+        if key == "Escape":
+            self.overlay.visible = False
+
+
+class _OverlayProductPickerPage(_DelayedProductPickerPage):
+    def __init__(self):
+        super().__init__()
+        self.skip = _MissingButton()
+        self.overlay = _TourOverlay()
+        self.keyboard = _TourKeyboard(self.overlay)
+
+    def locator(self, selector):
+        if selector == ".introjs-overlay:visible":
+            return self.overlay
+        return super().locator(selector)
 
 
 class _ProductCreateInput:
@@ -1443,6 +1482,17 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
             adapter._choose_product(_ProductSelectionRow(), "406005116")
 
         self.assertTrue(page.skip.clicked)
+
+    def test_escapes_a_tour_overlay_and_forces_the_real_product_query_button(self):
+        page = _OverlayProductPickerPage()
+        adapter = GYJPlaywrightPage(page)
+
+        with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
+            adapter._choose_product(_ProductSelectionRow(), "406005116")
+
+        self.assertEqual(page.keyboard.keys, ["Escape"])
+        self.assertFalse(page.overlay.visible)
+        self.assertTrue(page.modal.query.force)
 
     def test_creates_missing_product_with_visible_required_fields(self):
         page = _ProductCreatePage()

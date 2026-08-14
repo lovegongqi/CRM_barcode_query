@@ -149,6 +149,18 @@ class GYJPlaywrightPage:
 
     def _dismiss_intro_tour(self):
         try:
+            overlay = self.page.locator(".introjs-overlay:visible")
+            if overlay.count():
+                keyboard = getattr(self.page, "keyboard", None)
+                if keyboard:
+                    keyboard.press("Escape")
+                for _ in range(10):
+                    if not overlay.count():
+                        return
+                    self.page.wait_for_timeout(100)
+        except Exception:
+            pass
+        try:
             skip = self.page.locator(".introjs-skipbutton:visible")
             if skip.count():
                 skip.last.click()
@@ -328,12 +340,14 @@ class GYJPlaywrightPage:
         if search.count() < 1:
             raise GYJInboundError("未找到 GYJ 物料搜索框")
         search.first.fill(product_code)
-        query = modal.get_by_text("查 询", exact=True)
+        query = modal.get_by_role("button", name="查 询", exact=True)
+        if query.count() != 1:
+            query = modal.get_by_text("查 询", exact=True)
         if query.count() != 1:
             query = modal.get_by_text("查询", exact=True)
         if query.count() != 1:
             raise GYJInboundError("未找到 GYJ 物料查询按钮")
-        query.click()
+        query.click(force=True)
         self.page.wait_for_timeout(800)
         result_rows = modal.locator("tr").filter(has_text=product_code)
         if result_rows.count() != 1:
