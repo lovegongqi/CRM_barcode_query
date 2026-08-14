@@ -622,6 +622,35 @@ class _ProductSearchModal:
         return _MissingButton()
 
 
+class _DelayedProductPickerCollection:
+    def __init__(self, modal):
+        self.modal = modal
+        self.ready = False
+
+    def count(self):
+        return 1 if self.ready else 0
+
+    @property
+    def last(self):
+        return self.modal
+
+
+class _DelayedProductPickerPage(_ActualGYJSavePage):
+    def __init__(self):
+        self.modal = _ProductSearchModal()
+        self.picker = _DelayedProductPickerCollection(self.modal)
+        self.waits = 0
+
+    def locator(self, selector):
+        if selector == ".ant-modal:visible:not(.j-modal-box.fullscreen)":
+            return self.picker
+        return super().locator(selector)
+
+    def wait_for_timeout(self, timeout):
+        self.waits += 1
+        self.picker.ready = True
+
+
 class _ProductCreateInput:
     def __init__(self):
         self.value = ""
@@ -1377,10 +1406,21 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
     def test_reports_product_search_result_count_when_item_is_missing(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
         modal = _ProductSearchModal()
-        adapter._visible_modal = lambda: modal
+        adapter._wait_for_product_picker = lambda: modal
 
         with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
             adapter._choose_product(_ProductSelectionRow(), "406005116")
+
+    def test_waits_for_the_product_picker_instead_of_reusing_purchase_form(self):
+        page = _DelayedProductPickerPage()
+        adapter = GYJPlaywrightPage(page)
+
+        with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
+            adapter._choose_product(_ProductSelectionRow(), "406005116")
+
+        self.assertGreaterEqual(page.waits, 1)
+        self.assertEqual(page.modal.search.value, "406005116")
+        self.assertTrue(page.modal.query.clicked)
 
     def test_creates_missing_product_with_visible_required_fields(self):
         page = _ProductCreatePage()

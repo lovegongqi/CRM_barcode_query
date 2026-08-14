@@ -304,6 +304,16 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 入库明细行")
         return rows.nth(rows.count() - 2)
 
+    def _wait_for_product_picker(self):
+        for _ in range(50):
+            picker = self.page.locator(
+                ".ant-modal:visible:not(.j-modal-box.fullscreen)"
+            )
+            if picker.count() == 1:
+                return picker.last
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError("未打开 GYJ 物料选择窗口")
+
     def _choose_product(self, row, product_code):
         modal = self._product_picker
         if modal is None:
@@ -311,7 +321,7 @@ class GYJPlaywrightPage:
             if product_button.count() < 1:
                 raise GYJInboundError("未找到 GYJ 物料选择按钮")
             product_button.first.click()
-            modal = self._visible_modal()
+            modal = self._wait_for_product_picker()
             self._product_picker = modal
         search = modal.locator("input").filter(has_not=self.page.locator("[disabled]"))
         if search.count() < 1:
