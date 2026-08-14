@@ -805,6 +805,8 @@ class _ProductCreatePage(_ActualGYJSavePage):
 class _SerialEntryModal:
     def __init__(self, serial_count=1):
         self.serial_input = _SelectSearchInput()
+        self.serial_input.active = True
+        self.serial_input.visible = True
         self.rows = _RowCollection([object()] * serial_count)
 
     def locator(self, selector):
@@ -898,6 +900,66 @@ class _InsertLineForm:
         return _MissingButton()
 
 
+class _SpacedInsertLineButtons:
+    def __init__(self, button):
+        self.button = button
+
+    def count(self):
+        return 1
+
+    def all_inner_texts(self):
+        return ["插 入 行"]
+
+    def nth(self, index):
+        assert index == 0
+        return self.button
+
+
+class _MultiInsertLineButtons:
+    """Two buttons with different visible text but same normalised text.
+
+    Models the bug where both "插入行" and "插 入 行" exist on the page.  The
+    click helper must reject the ambiguous match and surface a clear error.
+    """
+
+    def __init__(self, primary, secondary):
+        self.primary = primary
+        self.secondary = secondary
+
+    def count(self):
+        return 2
+
+    def all_inner_texts(self):
+        return ["插入行", "插 入 行"]
+
+    def nth(self, index):
+        return (self.primary, self.secondary)[index]
+
+
+class _MultiInsertLineForm(_InsertLineForm):
+    def __init__(self):
+        super().__init__()
+        self.multi = _MultiInsertLineButtons(self.button, _InsertLineButton())
+
+    def get_by_role(self, role, name, exact=False):
+        return _MissingButton()
+
+    def locator(self, selector):
+        if selector == "button:visible":
+            return self.multi
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
+class _SpacedInsertLineForm(_InsertLineForm):
+    def get_by_role(self, role, name, exact=False):
+        return _MissingButton()
+
+    def locator(self, selector):
+        if selector == "button:visible":
+            return _SpacedInsertLineButtons(self.button)
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 class _WarehouseValue:
     def count(self):
         return 1
@@ -962,6 +1024,7 @@ class _SelectSearchInput:
         self.force = False
         self.focused = False
         self.visible = False
+        self.active = True
 
     def count(self):
         return 1
@@ -979,6 +1042,13 @@ class _SelectSearchInput:
 
     def get_attribute(self, name):
         return "" if name == "style" else None
+
+    def evaluate(self, expression):
+        if expression == "el => !!el.closest('.ant-tabs-tabpane-active')":
+            return self.active
+        if "offsetWidth" in expression or "visibility" in expression or "display" in expression:
+            return self.visible
+        raise AssertionError(f"unexpected evaluate snippet: {expression}")
 
 
 class _SearchableLegacySelectTrigger(_LegacySelectTrigger):
@@ -1325,6 +1395,53 @@ class GYJInboundWriterTest(unittest.TestCase):
         self.assertNotIn("保存", page.clicked)
 
 
+class _GYJSessionPageStub:
+    def __init__(self, url, has_user_input, has_captcha_input):
+        self._url = url
+        self._has_user_input = has_user_input
+        self._has_captcha_input = has_captcha_input
+
+    @property
+    def url(self):
+        return self._url
+
+    def evaluate(self, js):
+        if "input[name='username']" in js or "placeholder" in js:
+            return self._has_user_input
+        if "验证码" in js or "captcha" in js or "inputCode" in js:
+            return self._has_captcha_input
+        raise AssertionError("unexpected evaluate snippet")
+
+
+class GYJSessionLoginDetectionTest(unittest.TestCase):
+    def test_reports_not_logged_in_when_dom_is_login_page_even_if_url_is_purchase_in(self):
+        import sys
+        sys.path.insert(0, ".")
+        import app
+        sess = app.GYJSession(app._gyj_session_dir("admin"))
+        sess.page = _GYJSessionPageStub(
+            "https://cloud.gyjerp.com/bill/purchase_in",
+            has_user_input=True, has_captcha_input=True,
+        )
+        ok, message = sess.check_login_status()
+        self.assertFalse(ok)
+        self.assertFalse(sess.logged_in)
+        self.assertIn("登录", message)
+
+    def test_reports_logged_in_only_when_url_and_dom_match(self):
+        import sys
+        sys.path.insert(0, ".")
+        import app
+        sess = app.GYJSession(app._gyj_session_dir("admin"))
+        sess.page = _GYJSessionPageStub(
+            "https://cloud.gyjerp.com/bill/purchase_in",
+            has_user_input=False, has_captcha_input=False,
+        )
+        ok, message = sess.check_login_status()
+        self.assertTrue(ok)
+        self.assertTrue(sess.logged_in)
+        self.assertEqual(message, "GYJ 已登录")
+
 class GYJPurchaseInboundPageTest(unittest.TestCase):
     def test_waits_for_purchase_inbound_new_button_before_clicking(self):
         page = _PurchaseInboundListPage()
@@ -1544,6 +1661,22 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter.add_product_line({"product_code": "906018301", "serials": [], "quantity": 60})
 
         self.assertTrue(adapter.form.button.clicked)
+
+    def test_reports_ambiguity_when_multiple_buttons_normalise_to_same_text(self):
+        form = _MultiInsertLineForm()
+
+        with self.assertRaisesRegex(GYJInboundError, r"未找到唯一的 GYJ 按钮：插入行"):
+            GYJPlaywrightPage._click_exact(form, "插入行")
+
+        self.assertFalse(form.button.clicked)
+        self.assertFalse(form.multi.secondary.clicked)
+
+    def test_clicks_insert_line_when_gyj_spaces_the_visible_button_text(self):
+        form = _SpacedInsertLineForm()
+
+        GYJPlaywrightPage._click_exact(form, "插入行")
+
+        self.assertTrue(form.button.clicked)
 
     def test_reacquires_current_row_after_product_selection_for_serials(self):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())

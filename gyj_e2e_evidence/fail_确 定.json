@@ -1,0 +1,157 @@
+{
+  "url": "https://cloud.gyjerp.com/bill/purchase_in",
+  "buttons": [
+    {
+      "text": "",
+      "className": "close-all-btn ant-btn ant-btn-sm ant-dropdown-trigger"
+    },
+    {
+      "text": "查 询",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "重 置",
+      "className": "ant-btn"
+    },
+    {
+      "text": "新增",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "删除",
+      "className": "ant-btn"
+    },
+    {
+      "text": "审核",
+      "className": "ant-btn"
+    },
+    {
+      "text": "反审核",
+      "className": "ant-btn"
+    },
+    {
+      "text": "转采购退货",
+      "className": "ant-btn"
+    },
+    {
+      "text": "修正欠款",
+      "className": "ant-btn"
+    },
+    {
+      "text": "导出",
+      "className": "ant-btn"
+    },
+    {
+      "text": "列设置",
+      "className": "ant-btn"
+    },
+    {
+      "text": "",
+      "className": "ant-modal-close"
+    },
+    {
+      "text": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "插入行",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "扫码录入",
+      "className": "ant-btn"
+    },
+    {
+      "text": "历史单据",
+      "className": "ant-btn"
+    },
+    {
+      "text": "导入明细",
+      "className": "ant-btn"
+    },
+    {
+      "text": "",
+      "className": "ant-btn ant-btn-icon-only"
+    },
+    {
+      "text": "点击上传",
+      "className": "ant-btn"
+    },
+    {
+      "text": "取 消",
+      "className": "ant-btn"
+    },
+    {
+      "text": "三联打印-新版",
+      "className": "ant-btn"
+    },
+    {
+      "text": "三联打印",
+      "className": "ant-btn"
+    },
+    {
+      "text": "保存并审核",
+      "className": "ant-btn"
+    },
+    {
+      "text": "保存（Ctrl+S）",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "",
+      "className": "ant-switch ant-switch-checked ant-switch-small"
+    },
+    {
+      "text": "",
+      "className": "ant-switch ant-switch-small"
+    },
+    {
+      "text": "",
+      "className": "ant-switch ant-switch-checked ant-switch-small"
+    },
+    {
+      "text": "",
+      "className": "ant-switch ant-switch-small"
+    },
+    {
+      "text": "",
+      "className": "ant-modal-close"
+    },
+    {
+      "text": "查 询",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "重 置",
+      "className": "ant-btn"
+    },
+    {
+      "text": "新 增",
+      "className": "ant-btn"
+    },
+    {
+      "text": "关闭(ESC)",
+      "className": "ant-btn"
+    },
+    {
+      "text": "确 定",
+      "className": "ant-btn ant-btn-primary"
+    }
+  ],
+  "modals": [
+    {
+      "visible": true,
+      "header": "新增",
+      "buttonCount": 14
+    },
+    {
+      "visible": true,
+      "header": "选择商品",
+      "buttonCount": 6
+    }
+  ]
+}

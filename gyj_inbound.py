@@ -168,6 +168,37 @@ class GYJPlaywrightPage:
             pass
 
     @staticmethod
+    def _close_visible_modals(self):
+        """Best-effort dismissal of any non-fullscreen modals stuck on screen.
+
+        Used after a failed GYJ product creation so the next add_product_line
+        starts from a clean form rather than a stale product picker.
+        """
+        for _ in range(5):
+            try:
+                if self.page is None:
+                    return
+                modal = self.page.locator(
+                    ".ant-modal:visible:not(.j-modal-box.fullscreen)"
+                )
+                if modal.count() < 1:
+                    return
+                target = modal.last
+                close_icon = target.locator("button.ant-modal-close")
+                if close_icon.count() == 1:
+                    close_icon.click()
+                else:
+                    cancel = target.get_by_role("button", name="取 消", exact=True)
+                    if cancel.count() == 1:
+                        cancel.click()
+                    else:
+                        self.page.keyboard.press("Escape")
+                self.page.wait_for_timeout(150)
+            except Exception:
+                return
+
+
+    @staticmethod
     def _supplier_control_state(trigger):
         try:
             state = trigger.evaluate(
@@ -203,15 +234,36 @@ class GYJPlaywrightPage:
 
     @staticmethod
     def _click_exact(scope, text):
+        for role in ("button", "tab"):
+            try:
+                candidate = scope.get_by_role(role, name=text, exact=True)
+            except AttributeError:
+                candidate = None
+            if candidate is not None and candidate.count() == 1:
+                candidate.click()
+                return
         try:
-            button = scope.get_by_role("button", name=text, exact=True)
-        except AttributeError:
-            button = None
-        if button is None or button.count() != 1:
-            button = scope.get_by_text(text, exact=True)
-        if button.count() != 1:
-            raise GYJInboundError(f"未找到唯一的 GYJ 按钮：{text}")
-        button.click()
+            visible_buttons = scope.locator("button:visible")
+            normalized_text = "".join(str(text).split())
+            matching_indexes = [
+                index
+                for index, label in enumerate(visible_buttons.all_inner_texts())
+                if "".join(str(label).split()) == normalized_text
+            ]
+            if len(matching_indexes) == 1:
+                visible_buttons.nth(matching_indexes[0]).click()
+                return
+        except Exception:
+            pass
+        # Tabs are sometimes rendered as divs/spans rather than role=tab.
+        try:
+            for tab in scope.locator("div[role='tab']:visible").all():
+                if "".join((tab.inner_text() or "").split()) == "".join(str(text).split()):
+                    tab.click()
+                    return
+        except Exception:
+            pass
+        raise GYJInboundError(f"未找到唯一的 GYJ 按钮：{text}")
 
     def open_new_form(self):
         self.page.goto(GYJ_PURCHASE_IN_URL, wait_until="domcontentloaded", timeout=60000)
@@ -448,11 +500,25 @@ class GYJPlaywrightPage:
         serial_button.click()
         modal = self._visible_modal()
         self._click_exact(modal, "多个序列号")
-        serial_input = modal.locator(
-            'textarea[placeholder="多个序列号用逗号隔开，请少于2000个字符"]'
-        )
-        if serial_input.count() != 1:
-            raise GYJInboundError("未找到 GYJ 多个序列号输入框")
+        # Wait for the textarea inside an active tab panel.
+        serial_input = None
+        for _ in range(60):
+            candidates = modal.locator(
+                'textarea[placeholder="多个序列号用逗号隔开，请少于2000个字符"]'
+            )
+            if candidates.count() == 1:
+                active = candidates.first.evaluate(
+                    "el => !!el.closest('.ant-tabs-tabpane-active')"
+                )
+                visible = candidates.first.evaluate(
+                    "el => !!(el.offsetWidth || el.offsetHeight) && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'"
+                )
+                if active and visible:
+                    serial_input = candidates.first
+                    break
+            self.page.wait_for_timeout(100)
+        if serial_input is None:
+            raise GYJInboundError("未找到 GYJ 多个序列号输入框（多个序列号 tab 未激活）")
         serial_input.fill(",".join(serials))
         self._click_exact(modal, "批量添加")
         serial_rows = modal.locator(".ant-table-tbody > tr")

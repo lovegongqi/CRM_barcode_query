@@ -3731,6 +3731,18 @@ class GYJSession:
     def _is_login_page(self):
         return "/user/login" in (self.page.url or "").lower()
 
+    def _rendered_login_page(self):
+        try:
+            page = self.page
+            if page is None:
+                return False
+            has_username = page.evaluate(
+                "() => !!document.querySelector(\"input[name='username'], input[name='userName'], input[placeholder*='账号'], input[placeholder*='用户名']\")"
+            )
+        except Exception:
+            return False
+        return bool(has_username)
+
     def _first_visible(self, selectors):
         for selector in selectors:
             try:
@@ -3859,7 +3871,7 @@ class GYJSession:
                     return False, f"GYJ 会话恢复失败：{error}"
             try:
                 url = (self.page.url or "").lower()
-                if "login" in url:
+                if "login" in url or self._rendered_login_page():
                     self.logged_in = False
                     self.waiting_captcha = bool(self._captcha_input())
                     return False, "GYJ 等待验证码" if self.waiting_captcha else "仍在 GYJ 登录页，未登录"
