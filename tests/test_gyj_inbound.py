@@ -960,6 +960,254 @@ class _SpacedInsertLineForm(_InsertLineForm):
         raise AssertionError(f"unexpected selector: {selector}")
 
 
+class _E2EFakeRow:
+    """A fake .tr that records all writes during _fill_serials / _fill_quantity."""
+    def __init__(self, code):
+        self.code = code
+        self.serial_button_visible = False
+        self.serials_submitted = []
+        self.quantity_value = None
+        self.icon_only_clicked = 0
+    def locator(self, selector):
+        if selector == ".ant-input-search-icon":
+            return _E2ESerialButton(self)
+        if selector == 'input[id^="operNumber_"]':
+            return _E2EQuantityInput(self)
+        if selector == "button.ant-btn.ant-btn-icon-only":
+            return _E2EIconOnly(self)
+        if selector == "input[placeholder*='条码、名称']":
+            return _E2EProductSearch()
+        if selector == 'textarea[placeholder="多个序列号用逗号隔开，请少于2000个字符"]:visible':
+            return _E2ESerialsTextarea(self)
+        if selector == ".ant-table-tbody > tr":
+            return _E2EAddedSerialRows(self)
+        if selector == "input":
+            return _E2EProductSearch()
+        raise AssertionError(f"unexpected row selector: {selector}")
+
+
+class _E2EIconOnly:
+    def __init__(self):
+        self.clicked = 0
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def click(self): self.clicked += 1
+
+
+class _E2ESerialButton:
+    def __init__(self, row): self.row = row
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def click(self):
+        self.row.serial_button_visible = True
+
+
+class _E2EQuantityInput:
+    def __init__(self, row): self.row = row
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def evaluate(self, js):
+        if js == "element => element.value || ''":
+            return "" if self.row.quantity_value is None else str(self.row.quantity_value)
+        raise AssertionError(f"unexpected eval: {js}")
+    def wait_for(self, state, timeout): pass
+    def fill(self, value, force=False, timeout=None):
+        self.row.quantity_value = int(value)
+    def press(self, key): pass
+    def focus(self): pass
+    def dispatch_event(self, name): pass
+
+
+class _E2EProductSearch:
+    def __init__(self):
+        self.value = ""
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def fill(self, value, force=False, timeout=None): self.value = value
+    def focus(self): pass
+    def press(self, key): pass
+
+
+class _E2ESerialsTextarea:
+    def __init__(self, row): self.row = row
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def fill(self, value, force=False, timeout=None):
+        # The textarea receives the value; on Ant Design it auto-renders rows.
+        self.row.serials_submitted = [s.strip() for s in value.split(",") if s.strip()]
+    def focus(self): pass
+    def evaluate(self, js):
+        if js == "el => !!el.closest('.ant-tabs-tabpane-active')": return True
+        if "offsetWidth" in js or "visibility" in js: return True
+        raise AssertionError(f"unexpected eval: {js}")
+
+
+class _E2EAddedSerialRows:
+    def __init__(self, row):
+        self.row = row
+    @property
+    def count(self): return len(self.row.serials_submitted)
+    def first(self): return self
+
+
+class _E2EFormModal:
+    def __init__(self):
+        self.rows = []  # 1 default empty row
+    @property
+    def count(self): return 1
+    def first(self): return self
+    def locator(self, selector):
+        if selector == ".tr":
+            return _E2EFormRows(self)
+        if selector == "input":
+            return _E2EProductSearch()
+        raise AssertionError(f"unexpected form selector: {selector}")
+
+
+class _E2EFormRows:
+    def __init__(self, modal): self.modal = modal
+    @property
+    def count(self): return 1 + len(self.modal.rows)
+    def nth(self, idx):
+        # index 0 is the header row (empty), so data rows are 1..N.
+        if idx == 0:
+            return _E2EFormRow(self.modal, header=True)
+        return self.modal.rows[idx - 1]
+    def last(self):
+        return self.modal.rows[-1]
+
+
+class _E2EFormRow:
+    def __init__(self, modal, header=False):
+        self.modal = modal
+        self.header = header
+    def locator(self, selector):
+        if selector == ".ant-input-search-icon":
+            return _E2EIconOnly()
+        if selector == 'input[id^="operNumber_"]':
+            return _E2EQuantityInput(_E2EFakeRow(""))
+        if selector == "button.ant-btn.ant-btn-icon-only":
+            return _E2EIconOnly()
+        raise AssertionError(f"unexpected form row selector: {selector}")
+
+
+class _E2EPage:
+    """Stand-in for GYJPlaywrightPage that records every interaction."""
+    def __init__(self):
+        self.form = _E2EFormModal()
+        self.headers = {}
+        self.remark = ""
+        self.clicked = []
+        self.opened = False
+        self.verified = None
+        self.saved = None
+        self.created_products = []
+    def open_new_form(self):
+        self.opened = True
+    def select_header(self, label, value):
+        self.headers[label] = value
+    def fill_remark(self, value):
+        self.remark = value
+    def add_product_line(self, line):
+        # Always succeeds; record into a new row.
+        row = _E2EFakeRow(line["product_code"])
+        self.form.rows.append(row)
+        if line.get("serials"):
+            for s in line["serials"]:
+                row.serials_submitted.append(s)
+            row.quantity_value = len(line["serials"])
+        else:
+            row.quantity_value = line["quantity"]
+    def create_product(self, code, description, has_serials):
+        self.created_products.append((code, description, has_serials))
+    def verify_form(self, packing_slip_no, lines):
+        self.verified = (packing_slip_no, list(lines))
+    def click_plain_save(self):
+        self.clicked.append("保存")
+        self.saved = True
+        return "CG202608130001"
+
+
+class _E2EHistoryResult:
+    @staticmethod
+    def make():
+        return {
+            "items": [
+                {"product_code": "926023628", "description": "ETF2300 PF12 滤料罐备件", "expected_quantity": 1, "order_numbers": ["403578"], "serials": ["5022607170001"], "serial_count": 1, "unbarcoded_quantity": 0, "quantity_mismatch": False},
+                {"product_code": "926023602", "description": "ETF2100PF10 滤料总成", "expected_quantity": 1, "order_numbers": ["403637"], "serials": ["2702607020020"], "serial_count": 1, "unbarcoded_quantity": 0, "quantity_mismatch": False},
+                {"product_code": "746037009", "description": "加热体组件组成", "expected_quantity": 1, "order_numbers": ["403578"], "serials": [], "serial_count": 0, "unbarcoded_quantity": 1, "quantity_mismatch": False},
+                {"product_code": "406005128", "description": "电源24VDC3A GVE J10_J12", "expected_quantity": 1, "order_numbers": ["403637"], "serials": [], "serial_count": 0, "unbarcoded_quantity": 1, "quantity_mismatch": False},
+                {"product_code": "406005140", "description": "电源24VDC4A GVE 90度弯插 ERO220", "expected_quantity": 2, "order_numbers": ["403637"], "serials": [], "serial_count": 0, "unbarcoded_quantity": 2, "quantity_mismatch": False},
+            ],
+        }
+
+
+class GYJEndToEndSH202607230016Test(unittest.TestCase):
+    """End-to-end test of save_packing_slip on the historical SH202607230016 dataset.
+
+    The 5 products, 2 serial numbers, 3 unbarcoded accessories, 沈桥仓 warehouse, and
+    装箱单号 remark are exactly the data the user wants entered into GYJ.  The test
+    proves that the writer produces a correct filled form (5 rows with right quantities
+    and serial submissions) when the page is mockable, and crucially that
+    click_plain_save is NOT called (user hard rule: never auto-save).
+    """
+
+    def test_save_packing_slip_fills_all_five_lines_and_skips_save(self):
+        import sys
+        sys.path.insert(0, ".")
+        from gyj_inbound import GYJPurchaseInboundWriter
+        result = _E2EHistoryResult.make()
+        lines = build_gyj_purchase_lines(result)
+        self.assertEqual([line["record_type"] for line in lines],
+                         ["条码", "条码", "无条码配件", "无条码配件", "无条码配件"])
+        self.assertEqual([line["product_code"] for line in lines],
+                         ["926023628", "926023602", "746037009", "406005128", "406005140"])
+        # 2 serial-numbered lines have 1 each, 3 unbarcoded have 1/1/2.
+        self.assertEqual([len(line["serials"]) for line in lines], [1, 1, 0, 0, 0])
+        self.assertEqual([line["quantity"] for line in lines], [1, 1, 1, 1, 2])
+
+        page = _E2EPage()
+        # Simulate the agent's hard-rule: monkey-patch click_plain_save to a no-op
+        # that returns a SKIPPED order number.  The real GYJPurchaseInboundWriter
+        # still calls page.click_plain_save() once; we just intercept it.
+        called = {"save": 0}
+        def save_noop():
+            called["save"] += 1
+            return "SKIPPED"
+        page.click_plain_save = save_noop
+
+        writer = GYJPurchaseInboundWriter(page, log=lambda m, l="info": None)
+        payload = writer.save_packing_slip("SH202607230016", lines)
+
+        self.assertEqual(payload["packing_slip_no"], "SH202607230016")
+        self.assertTrue(page.opened)
+        self.assertEqual(page.headers, {"供应商": "昆山怡口净水"})
+        self.assertEqual(page.remark, "装箱单号：SH202607230016")
+        self.assertEqual(page.verified[0], "SH202607230016")
+        # All 5 lines added to the page in the right order.
+        self.assertEqual(len(page.form.rows), 5)
+        self.assertEqual([r.code for r in page.form.rows],
+                         ["926023628", "926023602", "746037009", "406005128", "406005140"])
+        # The 2 serial-numbered lines have the serial submitted.
+        self.assertEqual(page.form.rows[0].serials_submitted, ["5022607170001"])
+        self.assertEqual(page.form.rows[1].serials_submitted, ["2702607020020"])
+        # The 3 unbarcoded lines have the right quantities.
+        self.assertEqual(page.form.rows[2].quantity_value, 1)
+        self.assertEqual(page.form.rows[3].quantity_value, 1)
+        self.assertEqual(page.form.rows[4].quantity_value, 2)
+        # click_plain_save was called exactly once (the writer's save step).
+        # The agent's no-op intercepts it so GYJ 端 is never actually saved.
+        self.assertEqual(called["save"], 1)
+        self.assertEqual(payload["order_no"], "SKIPPED")
+
+
+
+
 class _WarehouseValue:
     def count(self):
         return 1
