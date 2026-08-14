@@ -323,6 +323,7 @@ class GYJPlaywrightPage:
             product_button.first.click()
             modal = self._wait_for_product_picker()
             self._product_picker = modal
+        self._dismiss_intro_tour()
         search = modal.locator("input").filter(has_not=self.page.locator("[disabled]"))
         if search.count() < 1:
             raise GYJInboundError("未找到 GYJ 物料搜索框")
@@ -392,7 +393,6 @@ class GYJPlaywrightPage:
                 raise GYJInboundError(f"未找到唯一的 GYJ 新增物料{field_name}输入框：{product_code}")
         name_input.fill(description)
         unit_input.fill("个")
-        barcode_input.fill(product_code)
 
         serial_trigger = product_form.locator(
             "#enableSerialNumber .ant-select-selection, #enableSerialNumber .ant-select-selector"
@@ -406,6 +406,7 @@ class GYJPlaywrightPage:
         if choice.count() != 1:
             raise GYJInboundError(f"未找到 GYJ 新增物料序列号选项：{serial_option}")
         choice.click()
+        barcode_input.fill(product_code)
 
         save = product_form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
         if save.count() != 1:

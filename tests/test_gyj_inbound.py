@@ -640,10 +640,13 @@ class _DelayedProductPickerPage(_ActualGYJSavePage):
         self.modal = _ProductSearchModal()
         self.picker = _DelayedProductPickerCollection(self.modal)
         self.waits = 0
+        self.skip = _TourSkipButton()
 
     def locator(self, selector):
         if selector == ".ant-modal:visible:not(.j-modal-box.fullscreen)":
             return self.picker
+        if selector == ".introjs-skipbutton:visible":
+            return self.skip
         return super().locator(selector)
 
     def wait_for_timeout(self, timeout):
@@ -669,6 +672,16 @@ class _ProductCreateInput:
 
 class _ProductCreateChoice(_ActionButton):
     pass
+
+
+class _ProductCreateSerialTrigger(_ActionButton):
+    def __init__(self, form):
+        super().__init__()
+        self.form = form
+
+    def click(self):
+        super().click()
+        self.form.barcode.value = "6973703533595"
 
 
 class _ProductCreateDropdown:
@@ -701,7 +714,7 @@ class _ProductCreateForm:
         self.name = _ProductCreateInput()
         self.unit = _ProductCreateInput()
         self.barcode = _ProductCreateInput()
-        self.serial_trigger = _ActionButton()
+        self.serial_trigger = _ProductCreateSerialTrigger(self)
         self.save = _ProductCreateSaveButton(self)
         self.last = self
 
@@ -1421,6 +1434,15 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         self.assertGreaterEqual(page.waits, 1)
         self.assertEqual(page.modal.search.value, "406005116")
         self.assertTrue(page.modal.query.clicked)
+
+    def test_closes_a_gyj_tour_overlay_before_searching_for_a_product(self):
+        page = _DelayedProductPickerPage()
+        adapter = GYJPlaywrightPage(page)
+
+        with self.assertRaisesRegex(GYJInboundError, r"406005116（结果行=0）"):
+            adapter._choose_product(_ProductSelectionRow(), "406005116")
+
+        self.assertTrue(page.skip.clicked)
 
     def test_creates_missing_product_with_visible_required_fields(self):
         page = _ProductCreatePage()
