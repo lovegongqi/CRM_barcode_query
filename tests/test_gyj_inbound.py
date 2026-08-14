@@ -878,12 +878,22 @@ class _InsertLineButton:
         self.clicked = True
 
 
+class _AmbiguousInsertLineText:
+    def count(self):
+        return 4
+
+
 class _InsertLineForm:
     def __init__(self):
         self.button = _InsertLineButton()
 
     def get_by_text(self, text, exact):
         if text == "插入行" and exact:
+            return _AmbiguousInsertLineText()
+        return _MissingButton()
+
+    def get_by_role(self, role, name, exact=False):
+        if role == "button" and name == "插入行" and exact:
             return self.button
         return _MissingButton()
 

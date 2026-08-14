@@ -203,7 +203,12 @@ class GYJPlaywrightPage:
 
     @staticmethod
     def _click_exact(scope, text):
-        button = scope.get_by_text(text, exact=True)
+        try:
+            button = scope.get_by_role("button", name=text, exact=True)
+        except AttributeError:
+            button = None
+        if button is None or button.count() != 1:
+            button = scope.get_by_text(text, exact=True)
         if button.count() != 1:
             raise GYJInboundError(f"未找到唯一的 GYJ 按钮：{text}")
         button.click()
