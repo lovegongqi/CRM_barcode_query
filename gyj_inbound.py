@@ -10,6 +10,7 @@ GYJ_SUPPLIER = "昆山怡口净水"
 GYJ_SETTLEMENT_ACCOUNT = "江西天麓"
 GYJ_WAREHOUSE = "沈桥仓"
 GYJ_PURCHASE_IN_URL = "https://cloud.gyjerp.com/bill/purchase_in"
+GYJ_PRODUCT_LIBRARY_URL = "https://cloud.gyjerp.com/material/material"
 
 
 def build_gyj_purchase_lines(result):
@@ -154,13 +155,8 @@ class GYJPurchaseInboundWriter:
         if not lines:
             raise GYJInboundError("没有可保存的 GYJ 入库明细")
 
-        # Stage 0: header setup (one-shot — no retry; rebuilding the form on retry is unsafe).
-        self._emit("正在新建 GYJ 采购入库单")
-        self.page.open_new_form()
-        self.page.select_header("供应商", GYJ_SUPPLIER)
-        self.page.fill_remark(f"装箱单号：{packing_slip_no}")
-
-        # Stage 1: pre-check (deduped unique product codes).
+        # Stage 1: pre-check (in 商品管理 → 商品信息, /material/material).
+        # Runs FIRST so we never navigate away from the new-form mid-flow.
         precheck_items = self._collect_unique_precheck_items(lines)
         if precheck_items:
             self._emit(f"开始预检查 GYJ 物料：{len(precheck_items)} 个唯一编码")
@@ -171,7 +167,20 @@ class GYJPurchaseInboundWriter:
             )
             self._emit(f"GYJ 物料预检查完成：{len(precheck_items)} 个编码就绪")
 
-        # Stage 2: fill lines (with retry — re-adds all lines from scratch on retry).
+        # Stage 2: open the new-form + headers + remark.
+        def _creating_stage():
+            self._emit("正在新建 GYJ 采购入库单")
+            self.page.open_new_form()
+            self.page.select_header("供应商", GYJ_SUPPLIER)
+            self.page.fill_remark(f"装箱单号：{packing_slip_no}")
+
+        self._run_with_retries(
+            "creating",
+            _creating_stage,
+            rollback=lambda: self.page._rollback_creating(),
+        )
+
+        # Stage 3: fill lines (with retry — re-adds all lines from scratch on retry).
         def _fill_stage():
             for index, line in enumerate(lines, start=1):
                 self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
@@ -185,7 +194,7 @@ class GYJPurchaseInboundWriter:
             rollback=lambda: self.page._rollback_filling(),
         )
 
-        # Stage 3: verify (with retry).
+        # Stage 4: verify (with retry).
         def _verify_stage():
             self._emit("正在核对 GYJ 采购入库单")
             self.page.verify_form(packing_slip_no, lines)
@@ -196,7 +205,7 @@ class GYJPurchaseInboundWriter:
             rollback=lambda: self.page._rollback_verifying(),
         )
 
-        # Stage 4: save (with retry).
+        # Stage 5: save (with retry).
         def _save_stage():
             self._emit("核对通过，正在保存 GYJ 采购入库单")
             order_no = self.page.click_plain_save()
@@ -216,12 +225,17 @@ class GYJPlaywrightPage:
 
     该类只操作当前可见的采购入库表单，不读取或持久化浏览器的登录资料。
     """
-    def __init__(self, page):
+    def __init__(self, page, log=None):
         self.page = page
         self.form = None
         self._headers = {}
         self._entered_lines = []
         self._product_picker = None
+        self._log = log
+
+    def _emit(self, message):
+        if self._log:
+            self._log(message)
 
     def _visible_modal(self):
         modal = self.page.locator(".ant-modal:visible")
@@ -600,94 +614,238 @@ class GYJPlaywrightPage:
         self.page.wait_for_timeout(800)
         return picker.locator("tr").filter(has_text=product_code)
 
-    def _ensure_products_exist(self, items):
-        """Pre-flight: ensure every product_code in items exists in GYJ.
+    def _clear_library_search_filter(self):
+        """Empty the library search box so a fresh query fires (not stuck on the previous keyword)."""
+        try:
+            search = self._library_search_input()
+            search.click()
+            search.press("End")
+            for _ in range(40):
+                search.press("Backspace")
+            self.page.wait_for_timeout(150)
+        except Exception:
+            pass
 
-        Opens the picker via the form's default first row, searches each unique
-        code, and creates missing ones inline using the existing create_product
-        path. The picker is dismissed before returning so the line fill loop
-        starts from a clean default row.
+    def _library_search_input(self):
+        return self.page.locator(
+            "input[placeholder*='条码']"
+        ).first
+
+    def _library_query_button(self):
+        for candidate in (
+            self.page.get_by_role("button", name="查 询", exact=True),
+            self.page.get_by_text("查 询", exact=True),
+            self.page.get_by_role("button", name="查询", exact=True),
+            self.page.get_by_text("查询", exact=True),
+        ):
+            try:
+                if candidate.count() == 1:
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    def _library_new_button(self):
+        # On the 商品信息 page, the toolbar 新增 button is the only ant-btn-primary
+        # with the visible text “新增”. Filter by text rather than aria-role
+        # because the Ant button can render its accessible name in a way that
+        # name="...新增" exact=False strings match.
+        btn = self.page.locator("button.ant-btn.ant-btn-primary:visible").filter(has_text="新增").first
+        try:
+            if btn.count() >= 1:
+                return btn
+        except Exception:
+            pass
+        return None
+
+    def _wait_for_product_library_loaded(self):
+        """Block until the 商品信息 search input is visible."""
+        search = self._library_search_input()
+        search.wait_for(state="visible", timeout=15000)
+        # Wait for the table to also be present (table tr count >= 1).
+        for _ in range(40):
+            if self.page.locator(".ant-table-row").count() >= 0 and self._library_query_button() is not None:
+                return
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError("未找到商品库页面")
+
+    def _library_has_code(self, code):
+        """Search the 商品信息 table for `code`. Returns True if at least one row matches.
+
+        The 商品库 search input is the same controlled component the create form uses —
+        a programmatic .fill() leaves the previous keyword buffered. Always clear
+        via cursor-End + Backspace before typing the new code.
+        """
+        search = self._library_search_input()
+        try:
+            search.click()
+        except Exception:
+            pass
+        try:
+            search.press("End")
+            for _ in range(40):
+                search.press("Backspace")
+        except Exception:
+            pass
+        search.type(code, delay=20)
+        button = self._library_query_button()
+        if button is not None:
+            try:
+                button.click(force=True)
+            except Exception:
+                pass
+        self.page.wait_for_timeout(1500)
+        matches = self.page.locator(".ant-table-row").filter(has_text=code)
+        return matches.count() >= 1
+
+    def _create_product_in_library(self, product_code, description, has_serials):
+        """Open 商品信息 → 新增 form, fill required fields, save."""
+        new_btn = self._library_new_button()
+        if new_btn is None:
+            raise GYJInboundError(f"未找到商品库的【新增】按钮：{product_code}")
+        new_btn.click()
+
+        # The new-product modal opens over the library page.
+        product_form = None
+        for _ in range(50):
+            candidates = self.page.locator(".ant-modal:visible")
+            for i in range(candidates.count()):
+                cand = candidates.nth(i)
+                if cand.locator("input#name:visible").count() == 1:
+                    product_form = cand
+                    break
+            if product_form is not None:
+                break
+            self.page.wait_for_timeout(100)
+        if product_form is None:
+            raise GYJInboundError(f"未打开 GYJ 新增物料表单：{product_code}")
+
+        name_input = product_form.locator("input#name:visible").first
+        unit_input = product_form.locator("input#unit:visible").first
+        # The product library create form generates `id="barCode_jet-<id>"` for the
+        # barcode field. Use the prefix to grab it without depending on a specific id.
+        barcode_input = product_form.locator('[id^="barCode_jet-"]:visible').first
+
+        for input_control, field_name in (
+            (name_input, "名称"),
+            (unit_input, "单位"),
+            (barcode_input, "条码"),
+        ):
+            try:
+                input_control.wait_for(state="visible", timeout=5000)
+            except Exception as error:
+                raise GYJInboundError(
+                    f"未找到 GYJ 新增物料{field_name}输入框：{product_code}"
+                ) from error
+
+        name_input.fill(description or product_code)
+        unit_input.fill("个")
+        # Library form auto-generates a 13-digit EAN in the barcode field; 底层
+        # controlled-component semantics re-issue the auto-gen whenever the
+        # field is empty or set programmatically without going through the
+        # native input event sequence. The reliable trigger is to click into
+        # the field, jump to the END of the existing value, hit Backspace
+        # enough times to empty it, then type the desired code.
+        barcode_input.click()
+        barcode_input.press("End")
+        for _ in range(20):
+            barcode_input.press("Backspace")
+        barcode_input.type(product_code, delay=20)
+
+        # Library’s full product form does not have the picker’s #enableSerialNumber
+        # toggle. The serial-number behaviour is wired through 商品代码类型 (category)
+        # or implicit, so we don’t try to set it here — the purchase-inbound line will
+        # bind serials via the serial magnifier regardless. If a future GYJ release
+        # does expose the toggle here, gating on `#enableSerialNumber` existence
+        # still works.
+
+        save = product_form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
+        if save.count() != 1:
+            raise GYJInboundError(f"未找到 GYJ 新增物料普通保存按钮：{product_code}")
+        save.click()
+        for _ in range(50):
+            if product_form.count() == 0:
+                return
+            self.page.wait_for_timeout(100)
+        raise GYJInboundError(f"GYJ 新增物料保存未完成：{product_code}")
+
+    def _ensure_products_exist(self, items):
+        """Pre-flight: ensure every unique product_code in `items` exists in GYJ.
+
+        Both the existence check AND the create-on-miss live on GYJ's canonical
+        product-information page (商品管理 → 商品信息, /material/material).
+        The page’s table search is more authoritative than the picker’s search,
+        so this avoids the previously-observed picker-search miss for codes that
+        the product library already contains.
+
+        The next stage (open_new_form) is responsible for navigating back to
+        /bill/purchase_in and reopening the new-form modal.
         """
         if not items:
             return
         items = list(items)
-        if not self.form:
-            raise GYJInboundError("GYJ 入库表单尚未打开")
+        self.page.goto(GYJ_PRODUCT_LIBRARY_URL, wait_until="domcontentloaded", timeout=60000)
+        self._wait_for_product_library_loaded()
 
-        rows = self.form.locator(".tr")
-        for _ in range(50):
-            if rows.count() >= 3:
-                break
-            self.page.wait_for_timeout(100)
-        if rows.count() < 3:
-            raise GYJInboundError("未找到 GYJ 入库明细行")
-        first_row = rows.nth(0)
+        for index, item in enumerate(items, start=1):
+            code = str(item.get("product_code") or "").strip()
+            description = str(item.get("description") or "").strip()
+            has_serials = bool(item.get("has_serials"))
+            if not code:
+                continue
 
-        product_button = first_row.locator("button.ant-btn.ant-btn-icon-only")
-        if product_button.count() < 1:
-            raise GYJInboundError("未找到 GYJ 物料选择按钮（预检查）")
-        product_button.first.click()
-        picker = self._wait_for_product_picker()
-        previous_picker = self._product_picker
-        self._product_picker = picker
+            if self._library_has_code(code):
+                self._emit(f"GYJ 物料已就绪：{code}")
+                continue
 
-        try:
-            for index, item in enumerate(items, start=1):
-                code = str(item.get("product_code") or "").strip()
-                description = str(item.get("description") or "").strip()
-                has_serials = bool(item.get("has_serials"))
-                if not code:
-                    continue
-
-                result_rows = self._search_picker(picker, code)
-                if result_rows.count() != 0:
-                    continue  # already exists in GYJ
-
-                self._emit(
-                    f"正在预建 GYJ 物料（{index}/{len(items)}）：{code}"
+            self._emit(f"正在预建 GYJ 物料（{index}/{len(items)}）：{code}")
+            self._create_product_in_library(code, description, has_serials)
+            # After save the library table may still be filtered by the previous
+            # search; clear the search keyword before re-checking existence.
+            self._clear_library_search_filter()
+            if not self._library_has_code(code):
+                raise GYJInboundError(
+                    f"GYJ 物料 {code} 新增后仍无法在商品库检索到"
                 )
-
-                last_create_error = None
-                created_once = False
-                for attempt in range(MAX_PRODUCT_CREATION_ATTEMPTS):
-                    try:
-                        self.create_product(code, description, has_serials)
-                        created_once = True
-                        break
-                    except Exception as error:
-                        last_create_error = error
-                if not created_once:
-                    raise GYJInboundError(
-                        f"GYJ 物料 {code} 新增失败，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次：{last_create_error}"
-                    ) from last_create_error
-
-                # Verify the new product is now findable.
-                result_rows = self._search_picker(picker, code)
-                if result_rows.count() == 0:
-                    raise GYJInboundError(
-                        f"GYJ 物料 {code} 新增后仍无法选择，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次"
-                    )
-                description_text = description or "无物料描述"
-                serial_mode = "有" if has_serials else "无"
-                self._emit(
-                    f"已预建 GYJ 物料：{code} {description_text}（序列号：{serial_mode}）"
-                )
-        finally:
-            # Restore any previously-held picker reference and dismiss the picker we opened.
-            self._product_picker = previous_picker
-            try:
-                self._close_visible_modals(self)
-            except Exception:
-                pass
+            description_text = description or "无物料描述"
+            serial_mode = "有" if has_serials else "无"
+            self._emit(f"已预建 GYJ 物料：{code} {description_text}（序列号：{serial_mode}）")
 
     def _rollback_precheck(self):
-        """Close any open picker / stale modal so the next pre-check retry is clean."""
+        """Close any stuck picker / create-form modal so the next pre-check retry is clean.
+
+        The pre-check navigates to /material/material and back; any leftover
+        modal (e.g., a stale 新增 dialog from a half-completed create) is best
+        dismissed via the standard close-visible-modals helper. We reset the
+        internal product_picker reference and the entered-lines tracker so a
+        retry starts from a clean slate.
+        """
         try:
             self._close_visible_modals(self)
         except Exception:
             pass
         self._product_picker = None
-        # Reset internal state that fills refer to later.
+        self._entered_lines = []
+
+    def _rollback_creating(self):
+        """Best-effort cleanup after a header-setup failure.
+
+        Closes the fullscreen new-form so a retry can re-open it cleanly, and
+        clears the captured header values so verify_form does not pass against
+        the discarded draft.
+        """
+        try:
+            if self.page is not None:
+                close = self.page.locator(
+                    ".ant-modal.j-modal-box.fullscreen .ant-modal-close:visible"
+                )
+                if close.count():
+                    close.first.click()
+                    self.page.wait_for_timeout(300)
+        except Exception:
+            pass
+        self.form = None
+        self._headers = {}
         self._entered_lines = []
 
     def _rollback_filling(self):
