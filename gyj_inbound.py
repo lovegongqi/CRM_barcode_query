@@ -5,6 +5,7 @@ class GYJInboundError(RuntimeError):
 MAX_SERIALS_PER_LINE = 100
 MAX_SERIAL_TEXT_LENGTH = 2000
 MAX_PRODUCT_CREATION_ATTEMPTS = 2
+STAGE_MAX_RETRIES = 2
 GYJ_SUPPLIER = "昆山怡口净水"
 GYJ_SETTLEMENT_ACCOUNT = "江西天麓"
 GYJ_WAREHOUSE = "沈桥仓"
@@ -103,23 +104,110 @@ class GYJPurchaseInboundWriter:
                 serial_mode = "有" if line.get("serials") else "无"
                 self._emit(f"已新增 GYJ 物料：{product_code} {description}（序列号：{serial_mode}）")
 
+    @staticmethod
+    def _collect_unique_precheck_items(lines):
+        """Build the deduped pre-check list from prepared lines (insertion order)."""
+        seen = set()
+        items = []
+        for line in lines or []:
+            code = str(line.get("product_code") or "").strip()
+            if not code or code in seen:
+                continue
+            items.append({
+                "product_code": code,
+                "description": str(line.get("description") or "").strip(),
+                "has_serials": bool(line.get("serials")),
+            })
+            seen.add(code)
+        return items
+
+    def _run_with_retries(self, stage_name, action, rollback=None):
+        """Run action() with up to STAGE_MAX_RETRIES rollback-and-retry cycles.
+
+        Each retry invokes rollback() to clean up stage-local state (close stuck
+        modals, reset internal trackers) before re-attempting the stage action.
+        After STAGE_MAX_RETRIES retries the original error is re-raised wrapped in
+        a GYJInboundError that includes the stage name and retry count.
+        """
+        last_error = None
+        total_attempts = STAGE_MAX_RETRIES + 1
+        for attempt in range(total_attempts):
+            try:
+                return action()
+            except Exception as error:
+                last_error = error
+                if attempt >= STAGE_MAX_RETRIES:
+                    break
+                self._emit(
+                    f"阶段 {stage_name} 失败，正在退回重试（{attempt + 1}/{STAGE_MAX_RETRIES}）：{error}"
+                )
+                if rollback is not None:
+                    try:
+                        rollback()
+                    except Exception as rollback_error:
+                        self._emit(f"阶段 {stage_name} 退回失败：{rollback_error}")
+        raise GYJInboundError(
+            f"阶段 {stage_name} 失败，已重试 {STAGE_MAX_RETRIES} 次：{last_error}"
+        ) from last_error
+
     def save_packing_slip(self, packing_slip_no, lines):
         if not lines:
             raise GYJInboundError("没有可保存的 GYJ 入库明细")
+
+        # Stage 0: header setup (one-shot — no retry; rebuilding the form on retry is unsafe).
         self._emit("正在新建 GYJ 采购入库单")
         self.page.open_new_form()
         self.page.select_header("供应商", GYJ_SUPPLIER)
         self.page.fill_remark(f"装箱单号：{packing_slip_no}")
-        for index, line in enumerate(lines, start=1):
-            self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
-            self._add_product_line(line)
-            if self.progress:
-                self.progress({"current_line": index, "total_lines": len(lines)})
-        self._emit("正在核对 GYJ 采购入库单")
-        self.page.verify_form(packing_slip_no, lines)
-        self._emit("核对通过，正在保存 GYJ 采购入库单")
-        order_no = self.page.click_plain_save()
-        self._emit("GYJ 采购入库单已保存")
+
+        # Stage 1: pre-check (deduped unique product codes).
+        precheck_items = self._collect_unique_precheck_items(lines)
+        if precheck_items:
+            self._emit(f"开始预检查 GYJ 物料：{len(precheck_items)} 个唯一编码")
+            self._run_with_retries(
+                "pre_check",
+                lambda: self.page._ensure_products_exist(precheck_items),
+                rollback=lambda: self.page._rollback_precheck(),
+            )
+            self._emit(f"GYJ 物料预检查完成：{len(precheck_items)} 个编码就绪")
+
+        # Stage 2: fill lines (with retry — re-adds all lines from scratch on retry).
+        def _fill_stage():
+            for index, line in enumerate(lines, start=1):
+                self._emit(f"正在录入 {index}/{len(lines)}：{line['product_code']}")
+                self._add_product_line(line)
+                if self.progress:
+                    self.progress({"current_line": index, "total_lines": len(lines)})
+
+        self._run_with_retries(
+            "filling",
+            _fill_stage,
+            rollback=lambda: self.page._rollback_filling(),
+        )
+
+        # Stage 3: verify (with retry).
+        def _verify_stage():
+            self._emit("正在核对 GYJ 采购入库单")
+            self.page.verify_form(packing_slip_no, lines)
+
+        self._run_with_retries(
+            "verifying",
+            _verify_stage,
+            rollback=lambda: self.page._rollback_verifying(),
+        )
+
+        # Stage 4: save (with retry).
+        def _save_stage():
+            self._emit("核对通过，正在保存 GYJ 采购入库单")
+            order_no = self.page.click_plain_save()
+            self._emit("GYJ 采购入库单已保存")
+            return order_no
+
+        order_no = self._run_with_retries(
+            "saving",
+            _save_stage,
+            rollback=lambda: self.page._rollback_saving(),
+        )
         return {"packing_slip_no": packing_slip_no, "order_no": order_no or ""}
 
 
@@ -488,6 +576,144 @@ class GYJPlaywrightPage:
                 return
             self.page.wait_for_timeout(100)
         raise GYJInboundError(f"GYJ 新增物料保存未完成：{product_code}")
+
+    def _click_query_button(self, scope):
+        """Click the picker 查询 button, tolerating the visible half-space variant."""
+        for candidate in (
+            scope.get_by_role("button", name="查 询", exact=True),
+            scope.get_by_text("查 询", exact=True),
+            scope.get_by_text("查询", exact=True),
+        ):
+            if candidate is not None and candidate.count() == 1:
+                candidate.click(force=True)
+                return
+        raise GYJInboundError("未找到 GYJ 物料查询按钮")
+
+    def _search_picker(self, picker, product_code):
+        """Fill the picker's search box and click 查询. Returns the matching rows."""
+        self._dismiss_intro_tour()
+        search = picker.locator("input").filter(has_not=self.page.locator("[disabled]"))
+        if search.count() < 1:
+            raise GYJInboundError("未找到 GYJ 物料搜索框")
+        search.first.fill(product_code)
+        self._click_query_button(picker)
+        self.page.wait_for_timeout(800)
+        return picker.locator("tr").filter(has_text=product_code)
+
+    def _ensure_products_exist(self, items):
+        """Pre-flight: ensure every product_code in items exists in GYJ.
+
+        Opens the picker via the form's default first row, searches each unique
+        code, and creates missing ones inline using the existing create_product
+        path. The picker is dismissed before returning so the line fill loop
+        starts from a clean default row.
+        """
+        if not items:
+            return
+        items = list(items)
+        if not self.form:
+            raise GYJInboundError("GYJ 入库表单尚未打开")
+
+        rows = self.form.locator(".tr")
+        for _ in range(50):
+            if rows.count() >= 3:
+                break
+            self.page.wait_for_timeout(100)
+        if rows.count() < 3:
+            raise GYJInboundError("未找到 GYJ 入库明细行")
+        first_row = rows.nth(0)
+
+        product_button = first_row.locator("button.ant-btn.ant-btn-icon-only")
+        if product_button.count() < 1:
+            raise GYJInboundError("未找到 GYJ 物料选择按钮（预检查）")
+        product_button.first.click()
+        picker = self._wait_for_product_picker()
+        previous_picker = self._product_picker
+        self._product_picker = picker
+
+        try:
+            for index, item in enumerate(items, start=1):
+                code = str(item.get("product_code") or "").strip()
+                description = str(item.get("description") or "").strip()
+                has_serials = bool(item.get("has_serials"))
+                if not code:
+                    continue
+
+                result_rows = self._search_picker(picker, code)
+                if result_rows.count() != 0:
+                    continue  # already exists in GYJ
+
+                self._emit(
+                    f"正在预建 GYJ 物料（{index}/{len(items)}）：{code}"
+                )
+
+                last_create_error = None
+                created_once = False
+                for attempt in range(MAX_PRODUCT_CREATION_ATTEMPTS):
+                    try:
+                        self.create_product(code, description, has_serials)
+                        created_once = True
+                        break
+                    except Exception as error:
+                        last_create_error = error
+                if not created_once:
+                    raise GYJInboundError(
+                        f"GYJ 物料 {code} 新增失败，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次：{last_create_error}"
+                    ) from last_create_error
+
+                # Verify the new product is now findable.
+                result_rows = self._search_picker(picker, code)
+                if result_rows.count() == 0:
+                    raise GYJInboundError(
+                        f"GYJ 物料 {code} 新增后仍无法选择，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次"
+                    )
+                description_text = description or "无物料描述"
+                serial_mode = "有" if has_serials else "无"
+                self._emit(
+                    f"已预建 GYJ 物料：{code} {description_text}（序列号：{serial_mode}）"
+                )
+        finally:
+            # Restore any previously-held picker reference and dismiss the picker we opened.
+            self._product_picker = previous_picker
+            try:
+                self._close_visible_modals(self)
+            except Exception:
+                pass
+
+    def _rollback_precheck(self):
+        """Close any open picker / stale modal so the next pre-check retry is clean."""
+        try:
+            self._close_visible_modals(self)
+        except Exception:
+            pass
+        self._product_picker = None
+        # Reset internal state that fills refer to later.
+        self._entered_lines = []
+
+    def _rollback_filling(self):
+        """Best-effort cleanup after a filling failure.
+
+        The form keeps the rows we already added; on retry, add_product_line will
+        append new rows beneath them. This is accepted as the trade-off for not
+        driving per-row delete buttons, which would risk corrupting the form on
+        partial deletes. We at least clear any modal that's stuck (e.g., a serial
+        number dialog that was open when the failure occurred) and reset the
+        internal "entered lines" tracker so verify_form doesn't fail spuriously.
+        """
+        try:
+            self._close_visible_modals(self)
+        except Exception:
+            pass
+        self._entered_lines = []
+
+    def _rollback_verifying(self):
+        """Verify is read-only; nothing to clean up."""
+        return None
+
+    def _rollback_saving(self):
+        """Save click is idempotent on the GYJ side; nothing to clean up."""
+        return None
+
 
     def _fill_serials(self, row, serials):
         serial_button = row.locator(".ant-input-search-icon")

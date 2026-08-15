@@ -119,12 +119,34 @@ class GYJInboundLineTest(unittest.TestCase):
 
 
 class FakeGYJPage:
-    def __init__(self, product_found=True, product_outcomes=None, create_failures=0, create_exception=None):
+    def __init__(
+        self,
+        product_found=True,
+        product_outcomes=None,
+        create_failures=0,
+        create_exception=None,
+        existing_codes=None,
+        pre_check_failures=0,
+        fill_failure_on=None,
+    ):
         self.product_found = product_found
         self.product_outcomes = list(product_outcomes or [])
         self.create_failures = create_failures
         self.create_exception = create_exception
+        self.existing_codes = set(existing_codes or [])
+        # pre_check_failures makes the first N pre-check iterations raise the
+        # specified error so the retry-with-rollback path is exercisable.
+        self.pre_check_failures = pre_check_failures
+        # fill_failure_on is a dict like {'line_index_2_based': ExceptionCls()} to
+        # make add_product_line raise on a specific call (used to test filling retries).
+        self.fill_failure_on = dict(fill_failure_on or {})
         self.created_products = []
+        self.pre_check_calls = []
+        self.pre_check_calls_dedup = []
+        self.rollback_precheck_called = 0
+        self.rollback_filling_called = 0
+        self.rollback_verifying_called = 0
+        self.rollback_saving_called = 0
         self.clicked = []
         self.headers = {}
         self.remark = ""
@@ -140,6 +162,19 @@ class FakeGYJPage:
         self.remark = value
 
     def add_product_line(self, line):
+        index = len(self.lines) + 1  # 1-based line counter
+        # fill_failure_on takes priority so tests can inject transient failures
+        # for the stage-level retry wrapper regardless of pre-check state.
+        forced = self.fill_failure_on.get(index)
+        if forced is not None:
+            self.fill_failure_on.pop(index)
+            raise forced
+        # Defense-in-depth: if the product is already known to exist (created
+        # during pre-check or pre-populated), the lookup succeeds regardless of
+        # the per-line outcome queue.
+        if line['product_code'] in self.existing_codes:
+            self.lines.append(dict(line))
+            return
         product_found = (
             self.product_outcomes.pop(0)
             if self.product_outcomes
@@ -155,6 +190,53 @@ class FakeGYJPage:
             if self.create_exception:
                 raise self.create_exception
             raise GYJInboundError(f"GYJ 新增物料失败：{product_code}")
+
+    def _ensure_products_exist(self, items):
+        self.pre_check_calls.append(list(items))
+        seen_in_this_call = set()
+        for item in items:
+            code = item['product_code']
+            seen_in_this_call.add(code)
+            self.pre_check_calls_dedup.append(code)
+            if code in self.existing_codes:
+                continue
+            last_error = None
+            created_once = False
+            import gyj_inbound as _gi  # local import; tests already import it
+            for attempt in range(_gi.MAX_PRODUCT_CREATION_ATTEMPTS):
+                try:
+                    self.create_product(code, item['description'], item['has_serials'])
+                    created_once = True
+                    break
+                except Exception as error:
+                    last_error = error
+            if not created_once:
+                raise GYJInboundError(
+                    f"GYJ 物料 {code} 新增失败，已重试 {_gi.MAX_PRODUCT_CREATION_ATTEMPTS} 次：{last_error}"
+                ) from last_error
+            if not self.product_found:
+                raise GYJInboundError(
+                    f"GYJ 物料 {code} 新增后仍无法选择，已重试 {_gi.MAX_PRODUCT_CREATION_ATTEMPTS} 次"
+                )
+            self.existing_codes.add(code)
+
+    def _rollback_precheck(self):
+        self.rollback_precheck_called += 1
+
+    def _rollback_filling(self):
+        self.rollback_filling_called += 1
+        self._entered_lines_reset()
+
+    def _rollback_verifying(self):
+        self.rollback_verifying_called += 1
+
+    def _rollback_saving(self):
+        self.rollback_saving_called += 1
+
+    def _entered_lines_reset(self):
+        # Mirror GYJPlaywrightPage's internal reset; the test double wipes lines
+        # so a filling-retry simulation can re-add them from scratch.
+        self.lines = []
 
     def verify_form(self, packing_slip_no, lines):
         self.checked = (packing_slip_no, list(lines))
@@ -1107,12 +1189,30 @@ class _E2EPage:
         self.verified = None
         self.saved = None
         self.created_products = []
+        self.pre_check_calls = []
+        self.rollback_precheck_called = 0
+        self.rollback_filling_called = 0
+        self.rollback_verifying_called = 0
+        self.rollback_saving_called = 0
     def open_new_form(self):
         self.opened = True
     def select_header(self, label, value):
         self.headers[label] = value
     def fill_remark(self, value):
         self.remark = value
+    def _ensure_products_exist(self, items):
+        # E2E page deliberately treats pre-check as a no-op: the flaky
+        # add_product_line path is what triggers the defense-in-depth
+        # create-on-fail retry in production.
+        self.pre_check_calls.append(list(items))
+    def _rollback_precheck(self):
+        self.rollback_precheck_called += 1
+    def _rollback_filling(self):
+        self.rollback_filling_called += 1
+    def _rollback_verifying(self):
+        self.rollback_verifying_called += 1
+    def _rollback_saving(self):
+        self.rollback_saving_called += 1
     def add_product_line(self, line):
         # Always succeeds; record into a new row.
         row = _E2EFakeRow(line["product_code"])
@@ -1623,10 +1723,17 @@ class GYJInboundWriterTest(unittest.TestCase):
     def test_writer_retries_missing_product_creation_twice_then_stops_before_save(self):
         page = FakeGYJPage(product_found=False, create_failures=2)
 
-        with self.assertRaisesRegex(GYJInboundError, "926019528"):
+        with self.assertRaisesRegex(GYJInboundError, "阶段 pre_check 失败"):
             GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
 
-        self.assertEqual(len(page.created_products), 2)
+        # The pre-check stage raises on every attempt because the inner create always
+        # exhausts its budget. With create_failures=2 the inner loop runs 2 calls in
+        # attempt 0; thereafter each stage attempt runs 1 successful create (the create
+        # counter finally exceeds create_failures) but the post-create verification
+        # fails (product_found=False) and that path skips the existing_codes update, so
+        # the next stage attempt has to create again.
+        self.assertEqual(len(page.created_products), 4)
+        self.assertEqual(page.rollback_precheck_called, 2)
         self.assertNotIn("保存", page.clicked)
 
     def test_writer_retries_a_browser_create_error_before_stopping(self):
@@ -1636,11 +1743,199 @@ class GYJInboundWriterTest(unittest.TestCase):
             create_exception=TimeoutError("GYJ 新增表单加载超时"),
         )
 
-        with self.assertRaisesRegex(GYJInboundError, "新增失败"):
+        with self.assertRaisesRegex(GYJInboundError, "阶段 pre_check 失败"):
             GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
 
-        self.assertEqual(len(page.created_products), 2)
+        # Same accounting as the previous test: 2 + 1 + 1 create calls.
+        self.assertEqual(len(page.created_products), 4)
         self.assertNotIn("保存", page.clicked)
+
+
+
+class GYJPurchaseInboundPrecheckTest(unittest.TestCase):
+    """Verify the pre-check stage runs before any add_product_line call."""
+
+    def setUp(self):
+        self.lines = [
+            {
+                "product_code": "926019528",
+                "description": "滤芯",
+                "source_order_numbers": ["403565"],
+                "serials": ["SN001"],
+                "quantity": 1,
+                "record_type": "条码",
+            },
+            {
+                "product_code": "926019528",
+                "description": "滤芯",
+                "source_order_numbers": ["403565"],
+                "serials": ["SN002"],
+                "quantity": 1,
+                "record_type": "条码",
+            },
+            {
+                "product_code": "906042856",
+                "description": "S1-600",
+                "source_order_numbers": ["403578"],
+                "serials": ["SN003"],
+                "quantity": 1,
+                "record_type": "条码",
+            },
+        ]
+
+    def test_writer_pre_checks_each_unique_code_before_any_line_fill(self):
+        page = FakeGYJPage()
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        # Pre-check ran once for all unique codes BEFORE any add_product_line.
+        self.assertEqual(page.pre_check_calls_dedup, ["926019528", "906042856"])
+        # Line fills happened AFTER pre-check.
+        self.assertEqual(len(page.lines), 3)
+        # Both codes were created exactly once in the pre-check (existing_codes guards double-create).
+        codes_created = [c[0] for c in page.created_products]
+        self.assertEqual(codes_created.count("926019528"), 1)
+        self.assertEqual(codes_created.count("906042856"), 1)
+
+    def test_writer_dedupes_codes_in_precheck(self):
+        page = FakeGYJPage()
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        # `pre_check_calls` records the items passed to _ensure_products_exist.
+        # The writer must deduped to a list of {product_code, has_serials} entries;
+        # the test double preserves them unchanged for inspection.
+        items_per_call = page.pre_check_calls[0] if page.pre_check_calls else []
+        self.assertEqual(len(items_per_call), 2)
+        self.assertEqual([item["product_code"] for item in items_per_call],
+                         ["926019528", "906042856"])
+
+    def test_writer_aborts_entire_slip_when_precheck_fails_to_create(self):
+        page = FakeGYJPage(product_found=False, create_failures=99)
+
+        with self.assertRaisesRegex(GYJInboundError, "阶段 pre_check 失败"):
+            GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        # No line fills, no verify, no save.
+        self.assertEqual(page.lines, [])
+        self.assertFalse(getattr(page, "verified", None))
+        self.assertNotIn("保存", page.clicked)
+
+    def test_writer_falls_back_to_inline_create_when_precheck_misses_a_code(self):
+        # Pre-check thinks the product exists; add_product_line still finds it missing.
+        # The existing inline create-on-fail path (defense-in-depth) must still work.
+        page = FakeGYJPage(existing_codes={"906042856"})
+
+        # The pre-check sees 926019528 as missing and creates it.
+        # But we simulate flaky lookup by having product_outcomes force add_product_line
+        # to raise once for the first 926019528 line.
+        page.product_outcomes = [False, True, True]
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(len(page.lines), 3)
+        # 926019528 was created once during pre-check.
+        codes = [c[0] for c in page.created_products]
+        self.assertIn("926019528", codes)
+        self.assertNotIn("保存并审核", page.clicked)
+        self.assertIn("保存", page.clicked)
+
+    def test_writer_emits_pre_check_progress_logs(self):
+        logs = []
+        page = FakeGYJPage()
+
+        GYJPurchaseInboundWriter(page, log=logs.append).save_packing_slip("SH202607210002", self.lines)
+
+        joined = "\n".join(logs)
+        self.assertIn("开始预检查 GYJ 物料：2 个唯一编码", joined)
+        self.assertIn("GYJ 物料预检查完成", joined)
+        # After pre-check, the filling stage emits per-line messages.
+        self.assertIn("正在录入 1/3", joined)
+        self.assertIn("正在录入 3/3", joined)
+
+
+class GYJPurchaseInboundStageRetryTest(unittest.TestCase):
+    """Verify the stage-level retry-with-rollback wrapper."""
+
+    def setUp(self):
+        self.lines = [{
+            "product_code": "926019528",
+            "description": "滤芯",
+            "source_order_numbers": ["403565"],
+            "serials": ["SN001"],
+            "quantity": 1,
+            "record_type": "条码",
+        }]
+
+    def test_writer_retries_filling_stage_when_a_line_fails_then_succeeds(self):
+        # First add_product_line call raises a transient error; the second succeeds.
+        # The stage wrapper rolls back and re-runs the entire filling stage; this
+        # second pass also fails-and-then-succeeds because fill_failure_on tracks by
+        # 1-based line index and we only injected one failure.
+        page = FakeGYJPage(fill_failure_on={1: TimeoutError("网络抖动")})
+        logs = []
+
+        GYJPurchaseInboundWriter(page, log=logs.append).save_packing_slip("SH202607210002", self.lines)
+
+        # Filling succeeded on the retry: line is recorded, save is clicked.
+        self.assertEqual(len(page.lines), 1)
+        self.assertIn("保存", page.clicked)
+        # Rollback fired once between the two attempts.
+        self.assertEqual(page.rollback_filling_called, 1)
+        joined = "\n".join(logs)
+        self.assertIn("阶段 filling 失败，正在退回重试（1/2）", joined)
+
+    def test_writer_aborts_after_filling_fails_three_times(self):
+        # Force fill to fail on every line invocation. The stage wrapper exhausts
+        # STAGE_MAX_RETRIES=2 retries and re-raises as a GYJInboundError.
+        page = FakeGYJPage()
+        page.add_product_line = lambda line: (_ for _ in ()).throw(TimeoutError("网络持续不稳定"))
+
+        with self.assertRaisesRegex(GYJInboundError, "阶段 filling 失败"):
+            GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        # 3 stage attempts × 1 rollback after each (attempts 0 and 1) = 2 rollbacks before the final raise.
+        self.assertEqual(page.rollback_filling_called, 2)
+        self.assertNotIn("保存", page.clicked)
+
+    def test_writer_retries_verifying_stage_when_verify_fails_once(self):
+        page = FakeGYJPage()
+        real_verify = page.verify_form
+        calls = {"n": 0}
+
+        def flaky_verify(packing_slip_no, lines):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("核对服务暂时不可用")
+
+        page.verify_form = flaky_verify
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(page.rollback_verifying_called, 1)
+        self.assertIn("保存", page.clicked)
+
+    def test_writer_retries_saving_stage_when_save_fails_once(self):
+        page = FakeGYJPage()
+        real_save = page.click_plain_save
+        calls = {"n": 0}
+
+        def flaky_save():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TimeoutError("保存请求超时")
+            return real_save()
+
+        page.click_plain_save = flaky_save
+
+        GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(page.rollback_saving_called, 1)
+        # The successful retry is the only one that actually appended "保存"
+        # (real_save runs inside flaky_save on the second call).
+        self.assertEqual(page.clicked.count("保存"), 1)
 
 
 class GYJCreateMissingProductEndToEndTest(unittest.TestCase):

@@ -5388,7 +5388,9 @@ def _run_inbound_gyj_job(job_id, worker, lines):
 
     def log(message, level='dim'):
         text = str(message or '')
-        if '新建' in text:
+        if '预检查' in text or '预建' in text:
+            set_stage('pre_checking')
+        elif '新建' in text:
             set_stage('creating')
         elif '录入' in text:
             set_stage('filling')

@@ -483,8 +483,9 @@ function downloadInboundXlsx() {
 }
 
 const GYJ_STAGE_LABELS = {
-    waiting: '等待开始', creating: '新建采购入库单', filling: '录入物料和条码',
-    verifying: '核对入库单', saving: '正在保存', success: '已保存', failed: '保存失败'
+    waiting: '等待开始', creating: '新建采购入库单', pre_checking: '补建缺失物料',
+    filling: '录入物料和条码', verifying: '核对入库单',
+    saving: '正在保存', success: '已保存', failed: '保存失败'
 };
 let gyjJobId = '';
 let gyjPollTimer = null;
