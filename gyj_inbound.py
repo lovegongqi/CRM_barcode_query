@@ -796,29 +796,32 @@ class GYJPlaywrightPage:
         barcode_input.type(product_code, delay=20)
 
         # Library form HAS a per-product 序列号 dropdown (next to 批号 / 多属性).
-        # Unlike the picker mini-create it does NOT use id="enableSerialNumber"; we
-        # walk every .ant-form-item, match the label text (after stripping * and :)
-        # to '序列号', and confirm it carries an .ant-select-selector — that is the toggle.
-        serial_item = None
-        all_items = product_form.locator(".ant-form-item")
-        for i in range(all_items.count()):
-            candidate = all_items.nth(i)
-            label_locator = candidate.locator(".ant-form-item-label").first
-            if label_locator.count() != 1:
-                continue
-            raw_label = label_locator.inner_text().strip()
-            cleaned = raw_label.replace("*", "").rstrip(":").strip()
-            if cleaned != "序列号":
-                continue
-            if candidate.locator(".ant-select-selector").count() != 1:
-                continue
-            serial_item = candidate
-            break
-        if serial_item is None:
+        # Unlike the picker mini-create it does NOT use id="enableSerialNumber".
+        # The trigger displays placeholder/value '有无序列号' which is unique to
+        # this select on the library page — find it directly by text filter instead
+        # of guessing the label structure. Falls back to walking every
+        # .ant-form-item if for some reason the placeholder text isn't there.
+        serial_triggers = product_form.locator(".ant-select-selector").filter(has_text="\u6709\u65e0\u5e8f\u5217\u53f7")
+        serial_trigger = serial_triggers.first if serial_triggers.count() >= 1 else None
+        if serial_trigger is None:
+            # Fallback: walk form-items looking for a label that contains 序列号
+            # and a .ant-select-selector child.
+            serial_trigger = None
+            for i in range(product_form.locator(".ant-form-item").count()):
+                candidate = product_form.locator(".ant-form-item").nth(i)
+                label_text = candidate.locator(".ant-form-item-label").first
+                if label_text.count() != 1:
+                    continue
+                if "\u5e8f\u5217\u53f7" not in label_text.inner_text():
+                    continue
+                inner = candidate.locator(".ant-select-selector").first
+                if inner.count() == 1:
+                    serial_trigger = inner
+                    break
+        if serial_trigger is None:
             raise GYJInboundError(
-                f"未找到 GYJ 序列号下拉控件：{product_code}"
+                f"\u672a\u627e\u5230 GYJ \u5e8f\u5217\u53f7\u4e0b\u62c9\u63a7\u4ef6\uff1a{product_code}"
             )
-        serial_trigger = serial_item.locator(".ant-select-selector").first
         serial_trigger.click()
         self.page.wait_for_timeout(150)
         serial_option_label = "有" if has_serials else "无"
