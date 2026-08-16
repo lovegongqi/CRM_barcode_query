@@ -795,12 +795,35 @@ class GYJPlaywrightPage:
             barcode_input.press("Backspace")
         barcode_input.type(product_code, delay=20)
 
-        # Library’s full product form does not have the picker’s #enableSerialNumber
-        # toggle. The serial-number behaviour is wired through 商品代码类型 (category)
-        # or implicit, so we don’t try to set it here — the purchase-inbound line will
-        # bind serials via the serial magnifier regardless. If a future GYJ release
-        # does expose the toggle here, gating on `#enableSerialNumber` existence
-        # still works.
+        # Library form HAS a per-product 序列号 dropdown (visible next to 批号 / 多属性)
+        # — unlike the picker mini-create, it does NOT use id="enableSerialNumber", so we
+        # find the form-item by label text. has_serials→有 / not → 无; this is what
+        # makes the 序列号录入按钮 appear in the inbound form later.
+        serial_label_xpath = (
+            ".//div[contains(@class,'ant-form-item') "
+            "and .//label[normalize-space(text())='序列号']]"
+        )
+        serial_item = product_form.locator(f"xpath={serial_label_xpath}").first
+        if serial_item.count() != 1:
+            raise GYJInboundError(
+                f"未找到 GYJ 序列号下择框：{product_code}"
+            )
+        serial_trigger = serial_item.locator(".ant-select-selector").first
+        if serial_trigger.count() != 1:
+            raise GYJInboundError(
+                f"未找到 GYJ 序列号下择控件：{product_code}"
+            )
+        serial_trigger.click()
+        self.page.wait_for_timeout(150)
+        serial_option_label = "有" if has_serials else "无"
+        dropdown = self.page.locator(".ant-select-dropdown:visible").last
+        choice = dropdown.get_by_text(serial_option_label, exact=True)
+        if choice.count() != 1:
+            raise GYJInboundError(
+                f"未找到 GYJ 序列号选项：{serial_option_label}"
+            )
+        choice.click()
+        self.page.wait_for_timeout(150)
 
         save = product_form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
         if save.count() != 1:
