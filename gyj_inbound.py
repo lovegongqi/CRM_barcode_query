@@ -797,30 +797,16 @@ class GYJPlaywrightPage:
 
         # Library form HAS a per-product 序列号 dropdown (next to 批号 / 多属性).
         # Unlike the picker mini-create it does NOT use id="enableSerialNumber".
-        # The trigger displays placeholder/value '有无序列号' which is unique to
-        # this select on the library page — find it directly by text filter instead
-        # of guessing the label structure. Falls back to walking every
-        # .ant-form-item if for some reason the placeholder text isn't there.
-        serial_triggers = product_form.locator(".ant-select-selector").filter(has_text="\u6709\u65e0\u5e8f\u5217\u53f7")
-        serial_trigger = serial_triggers.first if serial_triggers.count() >= 1 else None
-        if serial_trigger is None:
-            # Fallback: walk form-items looking for a label that contains 序列号
-            # and a .ant-select-selector child.
-            serial_trigger = None
-            for i in range(product_form.locator(".ant-form-item").count()):
-                candidate = product_form.locator(".ant-form-item").nth(i)
-                label_text = candidate.locator(".ant-form-item-label").first
-                if label_text.count() != 1:
-                    continue
-                if "\u5e8f\u5217\u53f7" not in label_text.inner_text():
-                    continue
-                inner = candidate.locator(".ant-select-selector").first
-                if inner.count() == 1:
-                    serial_trigger = inner
-                    break
-        if serial_trigger is None:
+        # GYJ's antd version here uses .ant-select-selection--single (NOT the
+        # .ant-select-selector used in older antd releases). The trigger shows
+        # the placeholder text ···「有无序列号」 which is unique on the
+        # library page — locate it directly by text filter on .ant-select-selection--single.
+        serial_trigger = product_form.locator(".ant-select-selection--single").filter(
+            has_text="\u6709\u65e0\u5e8f\u5217\u53f7"
+        ).first
+        if serial_trigger.count() != 1:
             raise GYJInboundError(
-                f"\u672a\u627e\u5230 GYJ \u5e8f\u5217\u53f7\u4e0b\u62c9\u63a7\u4ef6\uff1a{product_code}"
+                f"\u672a\u627e\u5230 GYJ \u5e8f列号\u4e0b\u62c9控\u4ef6\uff1a{product_code}"
             )
         serial_trigger.click()
         self.page.wait_for_timeout(150)
