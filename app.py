@@ -3892,7 +3892,7 @@ class GYJSession:
                 return False, message
             try:
                 result = GYJPurchaseInboundWriter(
-                    GYJPlaywrightPage(self.page), log=log, progress=progress
+                    GYJPlaywrightPage(self.page, log=log), log=log, progress=progress
                 ).save_packing_slip(packing_slip_no, lines)
                 return True, result
             except GYJInboundError as error:
