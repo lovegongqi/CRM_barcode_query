@@ -263,23 +263,44 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 采购入库主表单")
         return form
 
-    def _dismiss_intro_tour(self):
+    def _dismiss_intro_tour(self, scope=None):
+        """Best-effort dismissal of GYJ's intro.js product tour overlay.
+
+        The tour shows up the first time a fresh session visits
+        /material/material and blocks every subsequent pointer event. We Escape
+        a few times, click the skip button if present, and as a last resort
+        strip the overlay DOM via JS so subsequent clicks land on the page.
+        Uses .last / .click() rather than .first so the existing test mocks
+        (_TourSkipButton, _TourKeyboard) still respond correctly.
+        """
+        page = scope or self.page
         try:
-            overlay = self.page.locator(".introjs-overlay:visible")
-            if overlay.count():
-                keyboard = getattr(self.page, "keyboard", None)
+            overlay = page.locator(".introjs-overlay:visible")
+            for _ in range(3):
+                if overlay.count() == 0:
+                    break
+                keyboard = getattr(page, "keyboard", None)
                 if keyboard:
                     keyboard.press("Escape")
-                for _ in range(10):
-                    if not overlay.count():
-                        return
-                    self.page.wait_for_timeout(100)
+                page.wait_for_timeout(120)
         except Exception:
             pass
         try:
-            skip = self.page.locator(".introjs-skipbutton:visible")
+            skip = page.locator(".introjs-skipbutton:visible")
             if skip.count():
-                skip.last.click()
+                # Mock _TourSkipButton exposes .last = self; on real Playwright
+                # `.last` is also a valid chaining method on a Locator.
+                try:
+                    skip.last.click()
+                except Exception:
+                    skip.click()
+                page.wait_for_timeout(120)
+        except Exception:
+            pass
+        # Final safety net: if the overlay still intercepts events, remove the
+        # intro.js DOM directly so subsequent clicks land on the real controls.
+        try:
+            page.evaluate("() => document.querySelectorAll('.introjs-overlay, .introjs-fixWrapper, .introjs-helperLayer, .introjs-tooltip').forEach(e => e.remove())")
         except Exception:
             pass
 
@@ -699,7 +720,11 @@ class GYJPlaywrightPage:
         return None
 
     def _wait_for_product_library_loaded(self):
-        """Block until the 商品信息 search input is visible."""
+        """Block until the 商品信息 search input is visible — and the
+        intro.js product tour is gone so subsequent clicks aren’t blocked."""
+        # Dismiss any intro overlay that may have come up on a fresh session
+        # visiting /material/material for the first time.
+        self._dismiss_intro_tour()
         search = self._library_search_input()
         search.wait_for(state="visible", timeout=15000)
         # Wait for the table to also be present (table tr count >= 1).
@@ -747,6 +772,11 @@ class GYJPlaywrightPage:
         if new_btn is None:
             raise GYJInboundError(f"未找到商品库的【新增】按钮：{product_code}")
         new_btn.click()
+
+        # The new-product modal opens over the library page. If a fresh session
+        # triggered the intro.js product tour, the overlay intercepts every
+        # pointer event; dismiss it before touching any input.
+        self._dismiss_intro_tour()
 
         # The new-product modal opens over the library page.
         product_form = None
