@@ -8681,6 +8681,28 @@ DESKTOP_PAGE_LINKS = [
     for link in PAGE_LINKS
 ]
 
+@app.context_processor
+def _aurora_asset_versions():
+    """Cache-bust CSS/JS by appending the file mtime as ?v= so deploys
+    bypass the browser's 12-hour static cache. Reads the timestamp lazily
+    and only once per process."""
+    cache = {}
+    def _stamp(path):
+        try:
+            if path not in cache:
+                cache[path] = int(os.path.getmtime(os.path.join(app.static_folder, path)))
+        except OSError:
+            return ""
+        return f"?v={cache[path]}"
+    return {
+        "aurora_css_v": _stamp("aurora.css"),
+        "aurora_js_v": _stamp("aurora.js"),
+        "app_css_v": _stamp("app_layout.css"),
+        "log_modal_css_v": _stamp("log_modal.css") if os.path.exists(os.path.join(app.static_folder, "log_modal.css")) else "",
+        "log_modal_js_v": _stamp("log_modal.js") if os.path.exists(os.path.join(app.static_folder, "log_modal.js")) else "",
+    }
+
+
 def visible_page_links():
     row = current_account()
     if not row:

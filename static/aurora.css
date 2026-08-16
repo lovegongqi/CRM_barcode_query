@@ -1150,3 +1150,92 @@ body[data-aurora-page="results"] .date-clear-btn {
     grid-column: 1 / -1;
 }
 }
+
+/* ============================================================================
+ * Mobile (<= 720px): 修复标题竖排、form/工作区按钮栈式、logo 缩放
+ * ========================================================================== */
+@media (max-width: 720px) {
+    .aurora-logo {
+        width: 36px;
+        top: 12px;
+        left: 12px;
+    }
+
+    body[data-aurora-page="inbound"] .container,
+    body[data-aurora-page="crm"] .container,
+    body[data-aurora-page="index"] .container {
+        padding: 12px 12px 32px;
+    }
+
+    /* Title strip: stack, drop the 76px logo reservation */
+    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child {
+        padding-left: 0;
+        margin-top: 36px;       /* reserve space for shrunk logo above */
+        min-height: 0;
+    }
+
+    /* The "BARCODE OPERATIONS CENTER" eyebrow is unreadable at 10px on phones — hide it */
+    body[data-aurora-page] .header > div:first-child::before,
+    body[data-aurora-page="results"] .app-header > .app-title::before {
+        display: none;
+    }
+
+    /* Let h1 wrap onto one or two normal lines instead of stacking char-by-char */
+    body[data-aurora-page] h1 {
+        font-size: 22px !important;
+        line-height: 1.25;
+        word-break: keep-all;
+        overflow-wrap: normal;
+        hyphens: none;
+        white-space: normal;
+    }
+
+    /* Single-column for every grid the inbound page uses */
+    body[data-aurora-page="inbound"] .inbound-form,
+    body[data-aurora-page="inbound"] .inbound-progress,
+    body[data-aurora-page="inbound"] .inbound-history {
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    /* Tab strip with the workspace tabs + account name all on one row, wrap if needed */
+    body[data-aurora-page="inbound"] .status-bar {
+        flex-wrap: wrap;
+        align-items: flex-start;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tabs {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tab {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 13px;
+        padding: 8px 10px;
+    }
+
+    /* "补建缺失物料" log row is wordy — keep the log box readable */
+    body[data-aurora-page="inbound"] .inbound-box {
+        padding: 12px;
+        font-size: 12px;
+        line-height: 1.45;
+    }
+
+    /* p .muted subtitle: shrink so it doesn't shove h1 off-screen */
+    body[data-aurora-page="inbound"] .header p.muted {
+        font-size: 12px;
+        line-height: 1.4;
+    }
+}
+
+@media (max-width: 420px) {
+    body[data-aurora-page="inbound"] .status-bar {
+        padding: 10px;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tab {
+        font-size: 12px;
+        padding: 7px 8px;
+    }
+    body[data-aurora-page="inbound"] h1 {
+        font-size: 19px !important;
+    }
+}
