@@ -795,24 +795,30 @@ class GYJPlaywrightPage:
             barcode_input.press("Backspace")
         barcode_input.type(product_code, delay=20)
 
-        # Library form HAS a per-product 序列号 dropdown (visible next to 批号 / 多属性)
-        # — unlike the picker mini-create, it does NOT use id="enableSerialNumber", so we
-        # find the form-item by label text. has_serials→有 / not → 无; this is what
-        # makes the 序列号录入按钮 appear in the inbound form later.
-        serial_label_xpath = (
-            ".//div[contains(@class,'ant-form-item') "
-            "and .//label[normalize-space(text())='序列号']]"
-        )
-        serial_item = product_form.locator(f"xpath={serial_label_xpath}").first
-        if serial_item.count() != 1:
+        # Library form HAS a per-product 序列号 dropdown (next to 批号 / 多属性).
+        # Unlike the picker mini-create it does NOT use id="enableSerialNumber"; we
+        # walk every .ant-form-item, match the label text (after stripping * and :)
+        # to '序列号', and confirm it carries an .ant-select-selector — that is the toggle.
+        serial_item = None
+        all_items = product_form.locator(".ant-form-item")
+        for i in range(all_items.count()):
+            candidate = all_items.nth(i)
+            label_locator = candidate.locator(".ant-form-item-label").first
+            if label_locator.count() != 1:
+                continue
+            raw_label = label_locator.inner_text().strip()
+            cleaned = raw_label.replace("*", "").rstrip(":").strip()
+            if cleaned != "序列号":
+                continue
+            if candidate.locator(".ant-select-selector").count() != 1:
+                continue
+            serial_item = candidate
+            break
+        if serial_item is None:
             raise GYJInboundError(
-                f"未找到 GYJ 序列号下择框：{product_code}"
+                f"未找到 GYJ 序列号下拉控件：{product_code}"
             )
         serial_trigger = serial_item.locator(".ant-select-selector").first
-        if serial_trigger.count() != 1:
-            raise GYJInboundError(
-                f"未找到 GYJ 序列号下择控件：{product_code}"
-            )
         serial_trigger.click()
         self.page.wait_for_timeout(150)
         serial_option_label = "有" if has_serials else "无"
