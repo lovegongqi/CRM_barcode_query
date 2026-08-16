@@ -83,6 +83,15 @@ class GYJPurchaseInboundWriter:
             except GYJInboundError as error:
                 if not self._is_missing_product_error(error):
                     raise
+                # If the pre-check stage already confirmed this code exists in
+                # 商品信息, do NOT try to recreate it — the inline defense-in-depth
+                # path is only meaningful for codes pre-check genuinely missed
+                # (or ones added since). Failing fast here also gives a clearer
+                # signal when the form’s picker search itself is buggy.
+                if product_code in getattr(self.page, "_prechecked_existing", set()):
+                    raise GYJInboundError(
+                        f"GYJ 物料 {product_code} 预检查已确认存在，但表单选择器无法定位（{error}）"
+                    ) from error
                 if attempt >= MAX_PRODUCT_CREATION_ATTEMPTS:
                     raise GYJInboundError(
                         f"GYJ 物料 {product_code} 新增后仍无法选择，已重试 {MAX_PRODUCT_CREATION_ATTEMPTS} 次"
@@ -232,6 +241,11 @@ class GYJPlaywrightPage:
         self._entered_lines = []
         self._product_picker = None
         self._log = log
+        # Set of unique product_codes confirmed to exist by the 商品信息 search
+        # during the pre-check stage. _add_product_line consults this so the
+        # inline defense-in-depth retry does NOT try to recreate products we
+        # already know are present (which would be slow and confusing).
+        self._prechecked_existing = set()
 
     def _emit(self, message):
         if self._log:
@@ -498,7 +512,7 @@ class GYJPlaywrightPage:
         search = modal.locator("input").filter(has_not=self.page.locator("[disabled]"))
         if search.count() < 1:
             raise GYJInboundError("未找到 GYJ 物料搜索框")
-        search.first.fill(product_code)
+        self._clear_and_type_search(search.first, product_code)
         query = modal.get_by_role("button", name="查 询", exact=True)
         if query.count() != 1:
             query = modal.get_by_text("查 询", exact=True)
@@ -591,6 +605,32 @@ class GYJPlaywrightPage:
             self.page.wait_for_timeout(100)
         raise GYJInboundError(f"GYJ 新增物料保存未完成：{product_code}")
 
+    def _clear_and_type_search(self, search, value):
+        """Replace a GYJ search input's value via cursor-End + Backspace + type.
+
+        The picker (and 商品库) use a controlled input that doesn't honour
+        plain .fill(...) when the field already has a value — it just appends
+        or silently ignores the change. To reliably replace the value, jump
+        the caret to the END of the existing text, hit Backspace enough times
+        to empty the field (manual deletion triggers GYJ's React onChange),
+        then type the new value via real keystrokes.
+        """
+        try:
+            search.click()
+        except Exception:
+            pass
+        try:
+            search.press("End")
+        except Exception:
+            pass
+        for _ in range(40):
+            try:
+                search.press("Backspace")
+            except Exception:
+                break
+        self.page.wait_for_timeout(80)
+        search.type(value, delay=20)
+
     def _click_query_button(self, scope):
         """Click the picker 查询 button, tolerating the visible half-space variant."""
         for candidate in (
@@ -609,7 +649,7 @@ class GYJPlaywrightPage:
         search = picker.locator("input").filter(has_not=self.page.locator("[disabled]"))
         if search.count() < 1:
             raise GYJInboundError("未找到 GYJ 物料搜索框")
-        search.first.fill(product_code)
+        self._clear_and_type_search(search.first, product_code)
         self._click_query_button(picker)
         self.page.wait_for_timeout(800)
         return picker.locator("tr").filter(has_text=product_code)
@@ -696,7 +736,10 @@ class GYJPlaywrightPage:
                 pass
         self.page.wait_for_timeout(1500)
         matches = self.page.locator(".ant-table-row").filter(has_text=code)
-        return matches.count() >= 1
+        present = matches.count() >= 1
+        if present:
+            self._prechecked_existing.add(code)
+        return present
 
     def _create_product_in_library(self, product_code, description, has_serials):
         """Open 商品信息 → 新增 form, fill required fields, save."""
