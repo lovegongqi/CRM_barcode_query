@@ -80,9 +80,13 @@ body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no
     position: static !important;
     z-index: auto;
     width: 100% !important;
-    height: var(--aurora-nav-height);
+    height: auto;
+    min-height: var(--aurora-nav-height);
     display: grid !important;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    /* auto-fit so accounts with limited permissions (fewer than 6 visible tabs)
+       get a row that hugs the visible count instead of leaving empty cells. */
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    justify-content: stretch;
     gap: 6px !important;
     padding: 5px !important;
     border-radius: 16px;
@@ -934,9 +938,12 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
         width: auto !important;
         height: 62px;
         display: grid !important;
-        grid-template-columns: repeat(6, minmax(0, 1fr));
-        gap: 3px !important;
-        padding: 6px 7px !important;
+        /* auto-fit so accounts with limited permissions (e.g. 1–2 tabs visible) get
+           a centered row instead of empty grid columns on the right. */
+        grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
+        justify-content: center;
+        gap: 4px !important;
+        padding: 6px 14px !important;
         border-radius: 18px;
     }
 

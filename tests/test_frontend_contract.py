@@ -630,10 +630,22 @@ class FrontendContractTest(unittest.TestCase):
         aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(settings, r'<input type="checkbox" value="inbound">\s*入库')
         self.assertIn("'/inbound':", aurora)
-        self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)")
-        self.assertEqual(
-            len(re.findall(r"grid-template-columns:\s*repeat\(6,\s*minmax\(0,\s*1fr\)\)", aurora_css)),
+        self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)")
+        # aurora.css declares .page-nav twice (desktop + mobile media query).
+        # Both must use auto-fit so limited-permission accounts don’t end up
+        # with a row of empty cells on the right.
+        self.assertNotIn(
+            "grid-template-columns: repeat(6, minmax(0, 1fr))",
+            aurora_css,
+            "the legacy 6-column .page-nav rule must not be present once we switched to auto-fit",
+        )
+        self.assertGreaterEqual(
+            len(re.findall(
+                r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)",
+                aurora_css,
+            )),
             2,
+            "expected at least 2 auto-fit .page-nav rules in aurora.css (desktop + mobile)",
         )
 
     def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
