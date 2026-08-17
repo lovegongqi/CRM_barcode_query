@@ -15,6 +15,7 @@ import time
 import builtins
 import html as html_mod
 import threading
+import concurrent.futures
 import queue
 import uuid
 import shutil
@@ -4871,48 +4872,91 @@ def _submit_bulk_login_pending(job_id):
             _submit_bulk_login_slot(job_id, slot, captcha)
         _finalize_bulk_login_job_if_ready(job_id)
 
+def _run_bulk_login_one_slot(job_id, slot, username, password):
+    """Per-slot login worker. Each slot has its own Playwright Chromium instance
+    so it’s safe to run these in parallel — in fact, that’s exactly what each
+    query/transfer worker was designed to do for batch barcode queries."""
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        if not job or job.get('stop_requested'):
+            return
+    _update_bulk_login_slot(job_id, slot['id'], 'opening', '正在打开登录页')
+    _bulk_login_job_log(job_id, f"打开 {slot['label']} 登录页", 'info')
+    success, message = False, ""
+    for attempt in range(2):
+        try:
+            worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
+            success, message = worker.login_step1(username, password)
+        except Exception as e:
+            success, message = False, str(e)
+        if success:
+            break
+        if attempt == 0:
+            _bulk_login_job_log(
+                job_id,
+                f"{slot['label']} 登录页未准备好，准备重试一次：{message or '未知错误'}",
+                'warn',
+            )
+            time.sleep(2)
+
+    if not success:
+        _update_bulk_login_slot(job_id, slot['id'], 'failed', message or '登录失败')
+        _bulk_login_job_log(job_id, f"{slot['label']} 登录失败：{message or '未知错误'}", 'error')
+        return
+
+    if _slot_logged_in_message(message):
+        _update_bulk_login_slot(job_id, slot['id'], 'logged_in', message or '已登录')
+        _bulk_login_job_log(job_id, f"{slot['label']} 已登录", 'success')
+        return
+
+    _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha', message or '等待验证码')
+    _bulk_login_job_log(job_id, f"{slot['label']} 已进入验证码步骤", 'success')
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        captcha = (job or {}).get('captcha') or ''
+    if captcha:
+        _submit_bulk_login_slot(job_id, slot, captcha)
+
+
 def _run_bulk_login_job(job_id, username, password):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         slots = [dict(slot) for slot in (job or {}).get('slots') or []]
     _bulk_login_job_log(job_id, f"开始批量登录 {len(slots)} 个 CRM 通道", 'info')
-    for slot in slots:
+    if not slots:
         with bulk_login_job_lock:
             job = bulk_login_jobs.get(job_id)
-            if not job or job.get('stop_requested'):
-                break
-        _update_bulk_login_slot(job_id, slot['id'], 'opening', '正在打开登录页')
-        _bulk_login_job_log(job_id, f"打开 {slot['label']} 登录页", 'info')
-        success, message = False, ""
-        for attempt in range(2):
+            if job:
+                job['step1_done'] = True
+        _submit_bulk_login_pending(job_id)
+        _finalize_bulk_login_job_if_ready(job_id)
+        return
+    # Each slot owns its own Playwright Chromium worker (see crm_pool). Run
+    # them all in parallel so the user’s batch-login finishes in roughly the
+    # time of the slowest single slot rather than the sum of every slot.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(slots))) as ex:
+        futures = [
+            ex.submit(_run_bulk_login_one_slot, job_id, slot, username, password)
+            for slot in slots
+        ]
+        # Wait for everyone. as_completed lets the UI update live as each
+        # slot finishes (each helper already updates state under the lock).
+        for f in concurrent.futures.as_completed(futures):
             try:
-                worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
-                success, message = worker.login_step1(username, password)
+                f.result()
             except Exception as e:
-                success, message = False, str(e)
-            if success:
-                break
-            if attempt == 0:
-                _bulk_login_job_log(job_id, f"{slot['label']} 登录页未准备好，准备重试一次：{message or '未知错误'}", 'warn')
-                time.sleep(2)
+                # Shouldn’t happen — the helpers swallow their own errors.
+                _bulk_login_job_log(job_id, f"通道登录出现异常：{e}", 'error')
 
-        if not success:
-            _update_bulk_login_slot(job_id, slot['id'], 'failed', message or '登录失败')
-            _bulk_login_job_log(job_id, f"{slot['label']} 登录失败：{message or '未知错误'}", 'error')
-            continue
-
-        if _slot_logged_in_message(message):
-            _update_bulk_login_slot(job_id, slot['id'], 'logged_in', message or '已登录')
-            _bulk_login_job_log(job_id, f"{slot['label']} 已登录", 'success')
-            continue
-
-        _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha', message or '等待验证码')
-        _bulk_login_job_log(job_id, f"{slot['label']} 已进入验证码步骤", 'success')
-        with bulk_login_job_lock:
-            job = bulk_login_jobs.get(job_id)
-            captcha = (job or {}).get('captcha') or ''
-        if captcha:
-            _submit_bulk_login_slot(job_id, slot, captcha)
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        if job:
+            job['step1_done'] = True
+            if job.get('stop_requested'):
+                job['running'] = False
+                job['done'] = True
+                job['error'] = '批量登录已取消'
+                job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
