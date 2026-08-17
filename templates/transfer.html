@@ -711,14 +711,46 @@ function parseBarcodes() {
         .filter(Boolean)));
 }
 
-function loadDistributorHistory() {
-    try {
-        return JSON.parse(localStorage.getItem('transferDistributorHistory') || '[]')
-            .map(x => String(x || '').trim())
-            .filter(Boolean);
-    } catch (e) {
-        return [];
+// Cached server-side list — refreshed on every page load.
+let _serverDistributorHistory = null;
+let _serverDistributorHistoryPromise = null;
+function _loadServerDistributorHistory() {
+    if (!_serverDistributorHistoryPromise) {
+        _serverDistributorHistoryPromise = fetch('/api/distributor-history')
+            .then(r => r.json())
+            .then(data => {
+                if (data && data.success) {
+                    canDeleteDistributorHistory = !!data.can_delete;
+                    _serverDistributorHistory = (data.dealers || []).map(x => String(x || '').trim()).filter(Boolean);
+                }
+                return _serverDistributorHistory || [];
+            })
+            .catch(() => [])
+            .finally(() => {
+                // Clear the cached promise after it settles so a future reload re-fetches.
+                setTimeout(() => { _serverDistributorHistoryPromise = null; }, 0);
+            });
     }
+    return _serverDistributorHistoryPromise;
+}
+
+// Authoritative source is the server-side file; localStorage is only a fast
+// fallback for the first paint so the dropdown isn’t visibly empty before the
+// server fetch resolves.
+async function loadDistributorHistory() {
+    const cached = (() => {
+        try {
+            return JSON.parse(localStorage.getItem('transferDistributorHistory') || '[]')
+                .map(x => String(x || '').trim())
+                .filter(Boolean);
+        } catch (e) { return []; }
+    })();
+    const server = await _loadServerDistributorHistory();
+    const serverList = server || [];
+    if (serverList.length && JSON.stringify(cached) !== JSON.stringify(serverList)) {
+        localStorage.setItem('transferDistributorHistory', JSON.stringify(serverList));
+    }
+    return serverList.length ? serverList : cached;
 }
 
 function saveDistributorHistory(value) {
@@ -744,19 +776,19 @@ function mergeDistributorHistory(values) {
     renderDistributorHistory();
 }
 
-function filteredDistributorHistory() {
+async function filteredDistributorHistory() {
     const input = document.getElementById('transferDistributor');
     const keyword = (input ? input.value : '').trim().toLowerCase();
-    const rows = loadDistributorHistory();
+    const rows = await loadDistributorHistory();
     if (!keyword) return rows;
     return rows.filter(name => name.toLowerCase().includes(keyword));
 }
 
-function renderDistributorHistory(open = false) {
+async function renderDistributorHistory(open = false) {
     const input = document.getElementById('transferDistributor');
     const dropdown = document.getElementById('distributorHistoryDropdown');
     if (!dropdown) return;
-    const rows = filteredDistributorHistory();
+    const rows = await filteredDistributorHistory();
     if (highlightedDistributorIndex >= rows.length) highlightedDistributorIndex = rows.length ? rows.length - 1 : -1;
     dropdown.innerHTML = rows.length
         ? rows.map((name, index) => `
@@ -769,9 +801,9 @@ function renderDistributorHistory(open = false) {
     dropdown.classList.toggle('open', Boolean(open || document.activeElement === input));
 }
 
-function showDistributorDropdown() {
+async function showDistributorDropdown() {
     highlightedDistributorIndex = -1;
-    renderDistributorHistory(true);
+    await renderDistributorHistory(true);
 }
 
 function hideDistributorDropdownSoon() {
@@ -1619,6 +1651,10 @@ async function refreshCrmStatus() {
 }
 
 async function loadQueriedDealerHistory() {
+    // Pre-fetch so canDeleteDistributorHistory is set before the user mousedowns
+    // the dropdown. mergeDistributorHistory keeps localStorage in sync as a
+    // fast first-paint fallback, while loadDistributorHistory will re-read the
+    // authoritative server list on its own anyway.
     const data = await fetch('/api/distributor-history').then(r => r.json()).catch(() => null);
     if (data && data.success) {
         canDeleteDistributorHistory = !!data.can_delete;
