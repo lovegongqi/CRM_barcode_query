@@ -1348,6 +1348,16 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
     previewBtn.disabled = false;
     previewBtn.textContent = '汇总预览';
 
+    // Query is done. Hide both live log boxes — the form-area previewLog
+    // (the user no longer needs the running indicator next to the buttons)
+    // and the in-card transferSummaryLog (already-superseded by the
+    // product-detail list that just rendered). The bottom
+    // 移库实时记录 card still keeps the full history.
+    const previewLog = document.getElementById('previewLog');
+    if (previewLog) previewLog.style.display = 'none';
+    const summaryLog = document.getElementById('transferSummaryLog');
+    if (summaryLog) summaryLog.style.display = 'none';
+
     lastSummary = data.summary_success ? data.summary : null;
     document.getElementById('submitBtn').disabled = !data.summary_success;
     if (!data.summary_success && data.error) {
@@ -1423,6 +1433,7 @@ function appendLog(message, level='dim', recordId='') {
 
 function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='') {
     const box = document.getElementById('transferLog');
+    const previewLog = document.getElementById('previewLog');
     const summaryLog = document.getElementById('transferSummaryLog');
     if ((!logs || !logs.length) && !jobData) return;
     const durationLine = jobDurationLine(jobData, runningLabel, doneLabel);
@@ -1432,13 +1443,18 @@ function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总
     const lines = (logs || []).map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') + durationLine;
     box.innerHTML = lines;
     box.scrollTop = box.scrollHeight;
+    if (previewLog) {
+        // The form-area log mirrors the same lines but stays visible the
+        // whole time. Show it the moment a query starts so the user sees
+        // progress next to the 汇总预览 button they just clicked.
+        previewLog.style.display = 'block';
+        previewLog.innerHTML = lines;
+        previewLog.scrollTop = previewLog.scrollHeight;
+    }
     if (summaryLog) {
         summaryLog.style.display = 'block';
         summaryLog.innerHTML = lines;
         summaryLog.scrollTop = summaryLog.scrollHeight;
-        // When the summary is collapsed (收起), keep the log visible so
-        // the user still sees progress in the live status row at the top.
-        // When expanded, the log appears right above the product list.
     }
     if (recordId) updateTransferRealtimeRecord(recordId, jobData || {}, logs || []);
     if (logs && logs.length && window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
