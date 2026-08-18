@@ -977,7 +977,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     .aurora-nav-label { display: block; max-width: 100%; overflow: hidden; color: inherit; font-size: 8px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
 
     body[data-aurora-page] .header,
-    body[data-aurora-page] .app-header { min-height: auto; margin-bottom: 12px !important; align-items: flex-start !important; }
+    body[data-aurora-page] .app-header { min-height: auto; margin-bottom: 14px !important; align-items: flex-start !important; }
     body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child,
     body[data-aurora-page="results"] .app-header > .app-title {
         min-height: 50px;
