@@ -1185,8 +1185,10 @@ body[data-aurora-page="results"] .date-clear-btn {
 
     /* Title strip: stack, drop the 76px logo reservation */
     body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child {
-        padding-left: 0;
-        margin-top: 36px;       /* reserve space for shrunk logo above */
+        /* Sit the title NEXT TO the 36px logo on phones, the same way
+           /crm does on desktop. 48px = 36px logo + 12px gap. */
+        padding-left: 48px;
+        margin-top: 0;
         min-height: 0;
     }
 
