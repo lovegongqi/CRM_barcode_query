@@ -919,7 +919,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     html,
     body[data-aurora-page] { max-width: 100%; overflow-x: hidden; }
     body[data-aurora-page] { background-attachment: fixed; }
-    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(116px + env(safe-area-inset-bottom)); }
+    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(84px + env(safe-area-inset-bottom)); }
     .aurora-logo {
         position: absolute;
         top: 18px;
@@ -1184,11 +1184,10 @@ body[data-aurora-page="results"] .date-clear-btn {
     body[data-aurora-page="inbound"] .container,
     body[data-aurora-page="crm"] .container,
     body[data-aurora-page="index"] .container {
-        /* Keep the 116px bottom padding so the floating .page-nav never
-           hides the last card on a tall phone viewport. The 32px was the
-           bug — it cleared only ~20px of nav bar and the user still saw
-           the bottom card get clipped. */
-        padding: 12px 12px calc(116px + env(safe-area-inset-bottom));
+        /* 84px bottom padding: 62px nav + 12px bottom offset + 10px breathing
+           room. The previous 116px was too generous and left an awkward gap
+           above the floating tab bar. */
+        padding: 12px 12px calc(84px + env(safe-area-inset-bottom));
     }
 
     /* Title strip: stack, drop the 76px logo reservation */
