@@ -108,11 +108,20 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertNotIn('os.environ.setdefault("CRM_DESKTOP_APP", "1")', source)
 
     def test_every_work_page_shows_tool_account_logout(self):
-        for route in ("/", "/crm", "/transfer", "/inbound", "/product-library", "/accounts"):
+        # /inbound is intentionally excluded: the inbound workspace keeps the
+        # user on the page through long GYJ login flows, so a logout link
+        # competing for the same screen real estate is hidden there. Every
+        # other work page still surfaces the logout button.
+        for route in ("/", "/crm", "/transfer", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b'href="/logout"', response.data)
+
+    def test_inbound_does_not_render_the_tool_account_logout_link(self):
+        response = self.client.get("/inbound")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b'href="/logout"', response.data)
 
     def test_primary_pages_render_with_aurora_shell(self):
         expected_pages = {

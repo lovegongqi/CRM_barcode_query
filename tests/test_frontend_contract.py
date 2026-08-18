@@ -387,14 +387,25 @@ class FrontendContractTest(unittest.TestCase):
         )
 
     def test_every_work_page_uses_the_shared_tool_account_logout_button(self):
-        for filename in ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html"):
+        # /inbound is intentionally excluded: the inbound workspace keeps the
+        # user on the page through long GYJ login flows, so the logout link
+        # is suppressed there to avoid competing for screen real estate.
+        for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
             with self.subTest(filename=filename):
-                self.assertIn("aurora-account-logout", self.source(filename))
+                self.assertIn('class="aurora-account-logout"', self.source(filename))
+        # inbound.html MUST omit the logout link. We assert the actual link
+        # element is gone rather than the bare class name (the CSS rule
+        # and the container <div> are still present, but neither contains a
+        # <a href="/logout">).
+        self.assertNotIn('class="aurora-account-logout" href="/logout"', self.source("inbound.html"))
+        self.assertNotIn('href="/logout"', self.source("inbound.html"))
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn(".aurora-account-logout", css)
 
     def test_every_work_page_places_plain_username_before_logout(self):
-        filenames = ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html")
+        # /inbound is excluded because the logout link is intentionally hidden
+        # there (see test_inbound_does_not_render_the_tool_account_logout_link).
+        filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
         for filename in filenames:
             with self.subTest(filename=filename):
                 source = self.source(filename)
@@ -404,6 +415,11 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertNotIn("当前工具账号", source)
                 self.assertNotIn("工具账号：", source)
                 self.assertNotIn("（管理员）", source)
+        # /inbound still has the username but no logout button.
+        inbound = self.source("inbound.html")
+        self.assertIn('class="aurora-account-session"', inbound)
+        self.assertIn('class="aurora-account-name"', inbound)
+        self.assertNotIn('class="aurora-account-logout"', inbound)
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(css, r"\.aurora-account-session\s*\{[^}]*display:\s*inline-flex")
         self.assertRegex(css, r"\.aurora-account-name\s*\{[^}]*text-overflow:\s*ellipsis")
