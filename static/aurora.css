@@ -1222,7 +1222,7 @@ body[data-aurora-page="results"] .date-clear-btn {
     /* Tab strip with the workspace tabs + account name all on one row, wrap if needed */
     body[data-aurora-page="inbound"] .status-bar {
         flex-wrap: wrap;
-        align-items: flex-start;
+        align-items: center;
     }
     body[data-aurora-page="inbound"] .inbound-workspace-tabs {
         width: 100%;
@@ -1257,7 +1257,5 @@ body[data-aurora-page="results"] .date-clear-btn {
         font-size: 12px;
         padding: 7px 8px;
     }
-    body[data-aurora-page="inbound"] h1 {
-        font-size: 19px !important;
-    }
+
 }
