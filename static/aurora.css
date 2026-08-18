@@ -220,11 +220,15 @@ body[data-aurora-page] .aurora-account-logout:focus-visible {
 }
 
 body[data-aurora-page] .aurora-account-status {
+    height: 50px;
     min-height: 50px;
+    max-height: 50px;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: flex-start;
     gap: 12px;
+    flex: 0 0 auto;
 }
 
 body[data-aurora-page] .aurora-account-session {
