@@ -183,6 +183,7 @@
                         <button type="button" class="aurora-live-action" id="transferSummaryToggle" onclick="toggleTransferSummary()" aria-expanded="true" aria-controls="summaryBox" title="收起汇总明细">收起</button>
                     </div>
                 </div>
+                <div class="summary-log" id="transferSummaryLog" style="display:none"><div class="dim">点击「汇总预览」后此处实时显示查询进度</div></div>
                 <div class="summary" id="summaryBox"></div>
             </div>
 
@@ -1282,6 +1283,11 @@ async function previewTransfer() {
     submitBtn.disabled = true;
     lastSummary = null;
     if (previewTimer) clearInterval(previewTimer);
+    const summaryLog = document.getElementById('transferSummaryLog');
+    if (summaryLog) {
+        summaryLog.hidden = false;
+        summaryLog.innerHTML = '<div class="info">[预览中] 启动汇总查询…</div>';
+    }
     appendLog('开始汇总预览，缺少条码匹配前缀时会自动查询代表条码...', 'info');
     let data = null;
     try {
@@ -1417,13 +1423,23 @@ function appendLog(message, level='dim', recordId='') {
 
 function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='') {
     const box = document.getElementById('transferLog');
+    const summaryLog = document.getElementById('transferSummaryLog');
     if ((!logs || !logs.length) && !jobData) return;
     const durationLine = jobDurationLine(jobData, runningLabel, doneLabel);
     const key = JSON.stringify({logs: logs || [], durationLine});
     if (key === lastRenderedLogKey) return;
     lastRenderedLogKey = key;
-    box.innerHTML = (logs || []).map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') + durationLine;
+    const lines = (logs || []).map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') + durationLine;
+    box.innerHTML = lines;
     box.scrollTop = box.scrollHeight;
+    if (summaryLog) {
+        summaryLog.style.display = 'block';
+        summaryLog.innerHTML = lines;
+        summaryLog.scrollTop = summaryLog.scrollHeight;
+        // When the summary is collapsed (收起), keep the log visible so
+        // the user still sees progress in the live status row at the top.
+        // When expanded, the log appears right above the product list.
+    }
     if (recordId) updateTransferRealtimeRecord(recordId, jobData || {}, logs || []);
     if (logs && logs.length && window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
 }

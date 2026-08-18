@@ -645,6 +645,28 @@ body[data-aurora-page] #detailFrame {
 .aurora-live-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--aurora-cyan); box-shadow: 0 0 9px rgba(95, 229, 255, .7); animation: aurora-pulse 1.5s ease-in-out infinite; }
 @keyframes aurora-pulse { 50% { opacity: .35; transform: scale(.78); } }
 .aurora-raw-log { display: none !important; }
+
+/* Live log embedded in the transfer-summary card. Mirrors the styling of
+   .aurora-raw-log but with explicit display (NOT .aurora-raw-log which is
+   always hidden via !important). */
+.summary-log {
+    margin-top: 8px;
+    padding: 10px 14px;
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid rgba(139, 190, 220, .16);
+    border-radius: 10px;
+    background: rgba(8, 18, 32, .55);
+    color: #b8c9d4;
+    font: 12px/1.45 "SFMono-Regular", Consolas, monospace;
+}
+.summary-log > div { margin-bottom: 2px; }
+.summary-log > div:last-child { margin-bottom: 0; }
+.summary-log > div.info { color: #b9ceda; }
+.summary-log > div.warn { color: #ffd58a; }
+.summary-log > div.error { color: #ff9aa8; }
+.summary-log > div.success { color: #8eefff; }
+.summary-log > div.dim { color: #7890a3; }
 .aurora-query-table-wrap { flex: 1; min-height: 0; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .aurora-query-table { width: 100%; min-width: 1000px; table-layout: fixed; }
 .aurora-query-table thead th { position: sticky; top: 0; z-index: 2; background: #091829; box-shadow: 0 1px 0 rgba(139, 190, 220, .14); }
