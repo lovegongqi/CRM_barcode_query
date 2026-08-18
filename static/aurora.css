@@ -919,7 +919,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     html,
     body[data-aurora-page] { max-width: 100%; overflow-x: hidden; }
     body[data-aurora-page] { background-attachment: fixed; }
-    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(92px + env(safe-area-inset-bottom)); }
+    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(116px + env(safe-area-inset-bottom)); }
     .aurora-logo {
         position: absolute;
         top: 18px;
