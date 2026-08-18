@@ -1184,7 +1184,11 @@ body[data-aurora-page="results"] .date-clear-btn {
     body[data-aurora-page="inbound"] .container,
     body[data-aurora-page="crm"] .container,
     body[data-aurora-page="index"] .container {
-        padding: 12px 12px 32px;
+        /* Keep the 116px bottom padding so the floating .page-nav never
+           hides the last card on a tall phone viewport. The 32px was the
+           bug — it cleared only ~20px of nav bar and the user still saw
+           the bottom card get clipped. */
+        padding: 12px 12px calc(116px + env(safe-area-inset-bottom));
     }
 
     /* Title strip: stack, drop the 76px logo reservation */
