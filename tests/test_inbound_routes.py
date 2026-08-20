@@ -469,6 +469,179 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
         self.assertIn(f"使用装箱单号：{PACKING_SLIP_NO}", status["logs"][0]["message"])
 
+    def test_gyj_start_uses_only_selected_products_serials_and_quantity(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [
+                {
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001", "SN00000002"],
+                    "expected_quantity": 2, "serial_count": 2,
+                    "unbarcoded_quantity": 0, "quantity_mismatch": False,
+                },
+                {
+                    "product_code": "917000001", "description": "无条码配件",
+                    "order_numbers": [], "serials": [],
+                    "expected_quantity": 3, "serial_count": 0,
+                    "unbarcoded_quantity": 3, "quantity_mismatch": False,
+                },
+            ],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [
+                    {"product_code": "916000024", "serials": ["SN00000002"], "unbarcoded_quantity": 0},
+                    {"product_code": "917000001", "serials": [], "unbarcoded_quantity": 2},
+                ],
+            })
+
+        self.assertEqual(started.status_code, 200)
+        self._wait_for_gyj_job(client, started.get_json()["job_id"])
+        self.assertEqual(worker.saved[0][1], [
+            {
+                "product_code": "916000024", "description": "中央净水机",
+                "source_order_numbers": [], "serials": ["SN00000002"],
+                "quantity": 1, "record_type": "条码",
+            },
+            {
+                "product_code": "917000001", "description": "无条码配件",
+                "source_order_numbers": [], "serials": [],
+                "quantity": 2, "record_type": "无条码配件",
+            },
+        ])
+
+    def test_gyj_start_rejects_a_selected_serial_not_in_the_source_result(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "916000024", "serials": ["FORGED-SERIAL"],
+                    "unbarcoded_quantity": 0,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("不属于", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_quantity_above_the_source_result(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "917000001", "description": "无条码配件",
+                "order_numbers": [], "serials": [],
+                "expected_quantity": 3, "serial_count": 0,
+                "unbarcoded_quantity": 3, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "917000001", "serials": [],
+                    "unbarcoded_quantity": 4,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("超过装箱单数量", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_a_fractional_unbarcoded_quantity(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "917000001", "description": "无条码配件",
+                "order_numbers": [], "serials": [],
+                "expected_quantity": 3, "serial_count": 0,
+                "unbarcoded_quantity": 3, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "917000001", "serials": [],
+                    "unbarcoded_quantity": 1.5,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("必须是整数", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_preserves_the_source_duplicate_serial_guard(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "duplicate_serials": ["DUPLICATE-SERIAL"],
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "916000024", "serials": ["SN00000001"],
+                    "unbarcoded_quantity": 0,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("重复条码", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_an_empty_product_selection(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("至少选择", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
     def test_gyj_start_requires_visible_gyj_login(self):
         client = self._login("admin", "88293529")
         source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")

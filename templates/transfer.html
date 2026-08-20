@@ -173,6 +173,7 @@
                     <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
                     <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
                 </div>
+                <div class="preview-log summary-log" id="previewLog" style="display:none"><div class="dim">点击「汇总预览」后此处实时显示查询进度</div></div>
             </div>
 
             <div class="card transfer-summary-card" id="transferSummaryCard" hidden>
@@ -926,6 +927,11 @@ function handleDistributorKeydown(event) {
     renderDistributorHistory(true);
 }
 
+function hidePreviewLog() {
+    const previewLog = document.getElementById('previewLog');
+    if (previewLog) previewLog.style.display = 'none';
+}
+
 function clearForm() {
     if (previewTimer) {
         clearInterval(previewTimer);
@@ -935,6 +941,7 @@ function clearForm() {
     document.getElementById('transferDistributor').value = '';
     document.getElementById('transferType').value = '移出';
     document.getElementById('transferRemark').value = '';
+    hidePreviewLog();
     sessionStorage.removeItem(`transfer_page_input_${currentTransferSlot}`);
     sessionStorage.removeItem(`transfer_page_distributor_${currentTransferSlot}`);
     sessionStorage.removeItem(`transfer_page_type_${currentTransferSlot}`);
@@ -1456,8 +1463,39 @@ function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总
         summaryLog.innerHTML = lines;
         summaryLog.scrollTop = summaryLog.scrollHeight;
     }
+    // Per-barcode live table — populates from jobData.barcode_states when
+    // the polling response carries it. One row per barcode, with channel
+    // and the running state (pending / querying / ok / failed).
+    renderPreviewQueries(jobData && jobData.barcode_states ? jobData.barcode_states : null);
     if (recordId) updateTransferRealtimeRecord(recordId, jobData || {}, logs || []);
     if (logs && logs.length && window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
+}
+
+function renderPreviewQueries(barcodeStates) {
+    const wrap = document.getElementById('previewQueries');
+    const tbody = document.getElementById('previewQueriesRows');
+    const badge = document.getElementById('previewQueriesBadge');
+    if (!wrap || !tbody) return;
+    const entries = barcodeStates ? Object.entries(barcodeStates) : [];
+    if (!entries.length) {
+        wrap.hidden = true;
+        if (badge) badge.textContent = '0 / 0';
+        return;
+    }
+    wrap.hidden = false;
+    const total = entries.length;
+    const done = entries.filter(([_, s]) => s && (s.state === 'ok' || s.state === 'failed')).length;
+    if (badge) badge.textContent = `${done} / ${total}`;
+    const stateClass = {ok: 'success', failed: 'error', querying: 'warn', pending: 'dim'};
+    const stateLabel = {ok: '成功', failed: '失败', querying: '查询中…', pending: '等待中'};
+    const channelFor = (s) => (s && (s.channel_label || s.channel)) || '-';
+    const sorted = entries.map(([barcode, s]) => ({barcode, ...(s || {})}))
+        .sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
+    tbody.innerHTML = sorted.map((row, i) => {
+        const cls = stateClass[row.state] || 'dim';
+        const label = stateLabel[row.state] || row.state || '?';
+        return `<tr class="${cls}"><td>${i + 1}</td><td><code>${escapeHtml(row.barcode)}</code></td><td>${escapeHtml(channelFor(row))}</td><td>${escapeHtml(label)}</td></tr>`;
+    }).join('');
 }
 
 function startTransferPolling(slotId=currentTransferSlot, jobId=currentTransferJobId, recordId='') {

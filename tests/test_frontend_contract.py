@@ -561,20 +561,28 @@ class FrontendContractTest(unittest.TestCase):
         inbound = self.source("inbound.html")
         for element_id in (
             "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
-            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjLoginModal", "gyjStartBtn",
+            "gyjSelection", "gyjSelectionPackingSlip",
             "gyjLogs", "gyjResult",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', inbound)
         for function_name in (
-            "selectInboundWorkspace", "startGYJBackgroundLogin", "startGYJPurchaseInbound",
-            "pollGYJInboundStatus",
+            "selectInboundWorkspace", "openGYJLoginModal", "closeGYJLoginModal",
+            "startGYJBackgroundLogin", "renderGYJSelection", "hasGYJSelection",
+            "collectGYJSelection",
+            "startGYJPurchaseInbound", "pollGYJInboundStatus",
         ):
             self.assertIn(f"function {function_name}", inbound)
         self.assertIn("fetch('/api/inbound/gyj/login'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/login-status'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/start'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/status?'", inbound)
+        self.assertIn("selected_items", inbound)
+        self.assertIn('onchange="updateGYJStartButton()"', inbound)
+        self.assertIn("const hasSelection = hasGYJSelection()", inbound)
+        self.assertNotIn('id="openAccountLoginBtn"', inbound)
+        self.assertNotIn('id="accountLoginModal"', inbound)
         self.assertIn("昆山怡口净水系统有限公司", inbound)
         self.assertIn("江西天麓", inbound)
         self.assertIn("沈桥仓", inbound)

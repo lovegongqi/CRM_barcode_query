@@ -5231,7 +5231,19 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
                 log(ready_message, 'error')
                 finish(False, ready_message)
                 return
-            auto_library = ensure_product_library_for_barcodes(barcodes, log, worker)
+            def _summary_state_cb(barcode, state, channel):
+                if state in ('querying', 'ok', 'failed'):
+                    with summary_job_lock:
+                        job = summary_jobs.get(job_id)
+                        if job is not None:
+                            job.setdefault('barcode_states', {})[barcode] = {
+                                'state': state,
+                                'channel': channel,
+                                'channel_label': channel,
+                            }
+                emit(f"代表条码 {barcode} → {channel} → {state}", 'info' if state == 'ok' else 'warn')
+
+            auto_library = ensure_product_library_for_barcodes(barcodes, log, worker, state_tracker=_summary_state_cb)
             if auto_library.get('failed'):
                 failed_items = "，".join([
                     f"{row.get('prefix')}←{row.get('barcode')}"
@@ -7088,7 +7100,19 @@ def _missing_product_library_representatives(selected_barcodes):
             groups[prefix] = barcode
     return groups
 
-def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None):
+def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None, state_tracker=None):
+    """Query each missing-prefix representative barcode through crm_pool.
+
+    A threaded ThreadPoolExecutor fans the queries out across the available
+    CRM query channels so the user sees parallel progress in the frontend
+    barcode table, not a sequential one-at-a-time crawl.
+
+    `state_tracker` is an optional callback invoked for each barcode with
+    (barcode, state, channel) where state ∈ {'querying','ok','failed'}. The
+    transfer / summary callers pass a tracker that updates the in-memory
+    job's barcode_states dict so the polling response can stream a live
+    per-barcode table.
+    """
     representatives = _missing_product_library_representatives(selected_barcodes)
     result = {'queried': [], 'failed': []}
     if not representatives:
@@ -7098,14 +7122,36 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
         if log:
             log(message, level)
 
-    total = len(representatives)
+    with crm_pool.pool_lock:
+        pool_slot_ids = list(crm_pool.query_slots)
+    if not pool_slot_ids:
+        pool_slot_ids = [(worker.slot_id if worker else crm_pool.default_slot('query'))]
+
+    def track(barcode, state, channel):
+        if state_tracker:
+            try:
+                state_tracker(barcode, state, channel)
+            except Exception:
+                pass
+
+    items = list(representatives.items())
+    total = len(items)
     emit(f"发现 {total} 个产品前缀未维护，先各查询 1 个代表条码补充条码匹配")
-    for index, (prefix, barcode) in enumerate(representatives.items(), 1):
-        emit(f"自动补充 {index}/{total}：前缀 {prefix}，代表条码 {barcode}", "info")
-        emit(f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}", "dim")
+
+    # Snapshot the per-slot workers up front so we don't reallocate between
+    # rounds; `worker` argument still wins (single-shot legacy callers) but
+    # the new normal path uses the crm_pool channel pool.
+    slot_workers = {slot: crm_pool.get(slot, 'query') for slot in pool_slot_ids}
+
+    def run_one(index_0, slot_id, prefix, barcode):
+        worker_for_slot = slot_workers.get(slot_id) or worker or crm_pool.get(kind='query')
+        channel_label = _query_slot_label(slot_id)
         existing_paths = existing_barcode_result_paths(barcode)
         had_metadata = barcode_metadata_exists(barcode)
-        success, message = (worker or crm_pool.get(kind="query")).query_barcode(barcode, log, TEMP_QUERY_DIR)
+        emit(f"自动补充 {index_0 + 1}/{total}：前缀 {prefix}，代表条码 {barcode}（{channel_label}）", "info")
+        emit(f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}", "dim")
+        track(barcode, 'querying', channel_label)
+        success, message = worker_for_slot.query_barcode(barcode, log, TEMP_QUERY_DIR)
         if success:
             delete_temporary_query_result(
                 barcode,
@@ -7113,18 +7159,27 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
                 keep_paths=existing_paths,
                 keep_metadata=had_metadata,
             )
-        emit(f"代表条码 {barcode} 查询返回：{'成功' if success else '失败'}", "success" if success else "warn")
+        emit(f"代表条码 {barcode} 查询返回：{'成功' if success else '失败'}（{channel_label}）", "success" if success else "warn")
+        track(barcode, 'ok' if success else 'failed', channel_label)
         if success and match_product_library(barcode):
-            result['queried'].append({'prefix': prefix, 'barcode': barcode})
+            result['queried'].append({'prefix': prefix, 'barcode': barcode, 'channel': channel_label})
             matched = match_product_library(barcode) or {}
             emit(
-                f"前缀 {prefix} 已写入条码匹配：{matched.get('product_code', '')} / {matched.get('product_name', '')}",
+                f"前缀 {prefix} 已写入条码匹配：{matched.get('product_code', '')} / {matched.get('product_name', '')}（{channel_label}）",
                 'success'
             )
         else:
             error = _brief_batch_error(message, 300)
-            result['failed'].append({'prefix': prefix, 'barcode': barcode, 'error': error})
-            emit(f"前缀 {prefix} 条码匹配补充失败：{error}", 'warn')
+            result['failed'].append({'prefix': prefix, 'barcode': barcode, 'error': error, 'channel': channel_label})
+            emit(f"前缀 {prefix} 条码匹配补充失败：{error}（{channel_label}）", 'warn')
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pool_slot_ids))) as ex:
+        futures = [
+            ex.submit(run_one, i, pool_slot_ids[i % len(pool_slot_ids)], prefix, barcode)
+            for i, (prefix, barcode) in enumerate(items)
+        ]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()  # surface any exception that ran one of the queries
     emit(
         f"自动补充完成：成功 {len(result['queried'])} 个，失败 {len(result['failed'])} 个",
         "success" if not result['failed'] else "warn"
@@ -9465,6 +9520,7 @@ def api_transfer_summary_status():
             'log_seq': job.get('log_seq') or 0,
             'started_at': job['started_at'],
             'finished_at': job['finished_at'],
+            'barcode_states': dict(job.get('barcode_states') or {}),
         })
 
 @app.route("/api/crm/transfer", methods=["POST"])
@@ -10033,11 +10089,87 @@ def api_inbound_gyj_login_status():
     })
 
 
+def _select_gyj_purchase_result(source_result, selected_items):
+    if not isinstance(selected_items, list) or not selected_items:
+        raise GYJInboundError('请至少选择一个入库产品')
+
+    source_by_code = {
+        str(item.get('product_code') or '').strip(): item
+        for item in (source_result.get('items') or [])
+        if str(item.get('product_code') or '').strip()
+    }
+    selected_result_items = []
+    seen_product_codes = set()
+    seen_serials = set()
+
+    for selected in selected_items:
+        if not isinstance(selected, dict):
+            raise GYJInboundError('入库产品选择格式不正确')
+        product_code = str(selected.get('product_code') or '').strip()
+        source_item = source_by_code.get(product_code)
+        if not source_item:
+            raise GYJInboundError(f'物料 {product_code or "（空）"} 不属于当前装箱单')
+        if product_code in seen_product_codes:
+            raise GYJInboundError(f'物料 {product_code} 被重复选择')
+        seen_product_codes.add(product_code)
+
+        source_serials = {
+            str(serial).strip()
+            for serial in (source_item.get('serials') or [])
+            if str(serial).strip()
+        }
+        selected_serials = []
+        for serial in selected.get('serials') or []:
+            serial = str(serial).strip()
+            if not serial:
+                continue
+            if serial not in source_serials:
+                raise GYJInboundError(f'条码 {serial} 不属于物料 {product_code}')
+            if serial in seen_serials:
+                raise GYJInboundError(f'条码 {serial} 被重复选择')
+            seen_serials.add(serial)
+            selected_serials.append(serial)
+
+        raw_quantity = selected.get('unbarcoded_quantity', 0)
+        if isinstance(raw_quantity, bool):
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量必须是整数')
+        if isinstance(raw_quantity, int):
+            selected_quantity = raw_quantity
+        elif isinstance(raw_quantity, float) and raw_quantity.is_integer():
+            selected_quantity = int(raw_quantity)
+        elif isinstance(raw_quantity, str) and re.fullmatch(r'-?\d+', raw_quantity.strip()):
+            selected_quantity = int(raw_quantity)
+        else:
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量必须是整数')
+        if selected_quantity < 0:
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量不能小于 0')
+        available_quantity = max(0, int(source_item.get('unbarcoded_quantity') or 0))
+        if selected_quantity > available_quantity:
+            raise GYJInboundError(f'物料 {product_code} 的填写数量超过装箱单数量')
+        if not selected_serials and not selected_quantity:
+            raise GYJInboundError(f'物料 {product_code} 未选择条码或填写数量')
+
+        selected_item = dict(source_item)
+        selected_item.update({
+            'serials': selected_serials,
+            'serial_count': len(selected_serials),
+            'unbarcoded_quantity': selected_quantity,
+            'expected_quantity': len(selected_serials) + selected_quantity,
+            'quantity_mismatch': False,
+        })
+        selected_result_items.append(selected_item)
+
+    selected_result = dict(source_result)
+    selected_result['items'] = selected_result_items
+    return selected_result
+
+
 @app.route("/api/inbound/gyj/start", methods=["POST"])
 def api_inbound_gyj_start():
     owner = _current_inbound_owner()
+    request_data = request.get_json(silent=True) or {}
     requested_packing_slip_no = str(
-        (request.get_json(silent=True) or {}).get('packing_slip_no') or ''
+        request_data.get('packing_slip_no') or ''
     ).strip()
     if requested_packing_slip_no:
         history = get_inbound_history(requested_packing_slip_no)
@@ -10058,6 +10190,10 @@ def api_inbound_gyj_start():
             source_result = dict(source['result'])
 
     try:
+        if 'selected_items' in request_data:
+            source_result = _select_gyj_purchase_result(
+                source_result, request_data.get('selected_items')
+            )
         lines = build_gyj_purchase_lines(source_result)
     except GYJInboundError as error:
         return jsonify({'success': False, 'error': str(error)}), 409

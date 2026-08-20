@@ -74,6 +74,28 @@
         .gyj-saved-product-quantity { color:#8eeaff; font-size:12px; white-space:nowrap; }
         .gyj-saved-serial-toggle { margin-left:7px; padding:0; border:0; background:transparent; color:#8eeaff; font:inherit; font-size:12px; font-weight:700; cursor:pointer; }
         .gyj-saved-serial-toggle:hover { color:#e3f7ff; text-decoration:underline; }
+        .gyj-card-head, .gyj-selection-head { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; }
+        .gyj-selection-head { align-items:center; margin:18px 0 10px; padding-top:14px; border-top:1px solid rgba(116,191,232,.22); }
+        .gyj-selection-actions { display:flex; gap:7px; flex-wrap:wrap; }
+        .gyj-selection-actions .btn { min-height:30px; padding:5px 10px; font-size:12px; }
+        .gyj-selection { display:grid; gap:9px; }
+        .gyj-select-product { overflow:hidden; border:1px solid rgba(116,191,232,.28); border-radius:8px; background:rgba(7,20,38,.92); }
+        .gyj-select-product-head { display:flex; align-items:center; gap:9px; padding:10px 12px; color:#e6f6ff; background:rgba(13,44,72,.92); }
+        .gyj-select-product-head input, .gyj-serial-option input { width:auto; min-height:0; margin:0; }
+        .gyj-select-product-name { color:#9bb4cb; font-size:12px; }
+        .gyj-select-product-body { display:flex; flex-wrap:wrap; gap:8px; padding:10px 12px; }
+        .gyj-serial-option { display:inline-flex; align-items:center; gap:6px; margin:0; padding:6px 8px; border:1px solid rgba(116,191,232,.22); border-radius:6px; color:#d9f0ff; background:rgba(12,36,62,.95); font-size:12px; font-weight:600; }
+        .gyj-quantity-option { display:flex; align-items:center; gap:8px; color:#d9f0ff; font-size:12px; font-weight:700; }
+        .gyj-quantity-option input { width:110px; min-height:34px; }
+        .gyj-login-overlay { position:fixed; inset:0; z-index:1200; display:flex; align-items:center; justify-content:center; padding:18px; background:rgba(2,8,20,.72); }
+        .gyj-login-overlay[hidden] { display:none !important; }
+        .gyj-login-modal { width:min(520px,100%); overflow:hidden; }
+        .gyj-login-modal .login-modal-head { display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid rgba(139,190,220,.18); }
+        .gyj-login-modal .login-modal-head h3 { font-size:17px; }
+        .gyj-login-modal .login-modal-body { display:grid; gap:12px; padding:18px; }
+        .gyj-login-modal .modal-actions { display:flex; justify-content:flex-end; gap:8px; }
+        .gyj-remember { display:flex; align-items:center; gap:7px; margin:0; }
+        .gyj-remember input { width:auto; min-height:0; }
         .aurora-account-session { display:inline-flex; align-items:center; gap:10px; min-width:0; }
         .aurora-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .aurora-account-logout { white-space:nowrap; }
@@ -82,6 +104,8 @@
             .inbound-form, .inbound-results { grid-template-columns:1fr; }
             .inbound-form .btn { width:100%; }
             .inbound-progress, .inbound-summary-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
+            .gyj-card-head, .gyj-selection-head { align-items:stretch; flex-direction:column; }
+            .gyj-card-head .btn { width:100%; }
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
@@ -161,21 +185,24 @@
 
     <div class="inbound-workspace" id="gyjPurchaseWorkspace" hidden>
         <section class="card">
-            <div class="inbound-form">
+            <div class="gyj-card-head">
                 <div>
                     <label>GYJ 采购入库</label>
                     <div class="muted">使用当前账号最近一次成功读取的 CRM 装箱单。默认供应商：昆山怡口净水系统有限公司；结算账户：江西天麓；仓库：沈桥仓。</div>
                 </div>
+                <button class="btn btn-secondary" id="gyjLoginBtn" type="button" onclick="openGYJLoginModal()">登录 GYJ</button>
             </div>
-            <div class="inbound-form" style="margin-top:14px;grid-template-columns:minmax(150px,1fr) minmax(150px,1fr) auto;">
-                <div><label for="gyjUsername">GYJ 账号</label><input id="gyjUsername" autocomplete="username" placeholder="GYJ 用户名"></div>
-                <div><label for="gyjPassword">GYJ 密码</label><input id="gyjPassword" type="password" autocomplete="current-password" placeholder="GYJ 密码" onkeydown="if(event.key==='Enter')startGYJBackgroundLogin()"></div>
-                <div><label><input id="gyjRememberLogin" type="checkbox" style="width:auto;min-height:0;margin-right:6px;">记住账号密码</label><button class="btn btn-secondary" id="gyjLoginBtn" onclick="startGYJBackgroundLogin()">后台登录 GYJ</button></div>
+            <div class="gyj-selection-head">
+                <div>
+                    <strong id="gyjSelectionPackingSlip">尚未选择装箱单</strong>
+                    <div class="muted">产品和条码默认全选；有条码的勾选条码，无条码的填写数量。</div>
+                </div>
+                <div class="gyj-selection-actions">
+                    <button class="btn btn-secondary" type="button" onclick="setAllGYJProducts(true)">全部选择</button>
+                    <button class="btn btn-secondary" type="button" onclick="setAllGYJProducts(false)">全部取消</button>
+                </div>
             </div>
-            <div class="inbound-form" id="gyjCaptchaRow" style="display:none;margin-top:12px;grid-template-columns:minmax(180px,1fr) auto;">
-                <div><label for="gyjCaptcha">验证码</label><input id="gyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()"></div>
-                <div style="display:flex;gap:8px;align-items:end;"><img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;"><button class="btn btn-secondary" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button><button class="btn btn-secondary" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button></div>
-            </div>
+            <div class="gyj-selection" id="gyjSelection">请先读取或选择一张 CRM 装箱单。</div>
             <div style="margin-top:12px;"><button class="btn btn-primary" id="gyjStartBtn" onclick="startGYJPurchaseInbound()" disabled>创建并保存</button></div>
         </section>
         <div class="inbound-results">
@@ -191,7 +218,49 @@
     </div>
 </div>
 
+    <div class="gyj-login-overlay" id="gyjLoginModal" hidden onclick="if(event.target.id==='gyjLoginModal')closeGYJLoginModal()">
+        <div class="login-modal gyj-login-modal" role="dialog" aria-modal="true" aria-labelledby="gyjLoginModalTitle">
+            <div class="login-modal-head">
+                <h3 id="gyjLoginModalTitle">登录 GYJ</h3>
+                <button class="modal-close" type="button" onclick="closeGYJLoginModal()" aria-label="关闭">×</button>
+            </div>
+            <div class="login-modal-body">
+                <div>
+                    <label for="gyjUsername">GYJ 账号</label>
+                    <input id="gyjUsername" autocomplete="username" placeholder="GYJ 用户名">
+                </div>
+                <div>
+                    <label for="gyjPassword">GYJ 密码</label>
+                    <input id="gyjPassword" type="password" autocomplete="current-password" placeholder="GYJ 密码" onkeydown="if(event.key==='Enter')startGYJBackgroundLogin()">
+                </div>
+                <label class="gyj-remember"><input id="gyjRememberLogin" type="checkbox">记住账号密码</label>
+                <div id="gyjCaptchaRow" style="display:none;">
+                    <label for="gyjCaptcha">验证码</label>
+                    <input id="gyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()">
+                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
+                        <img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;">
+                        <button class="btn btn-secondary" type="button" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button>
+                        <button class="btn btn-secondary" type="button" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" type="button" onclick="closeGYJLoginModal()">取消</button>
+                    <button class="btn btn-primary" type="button" id="gyjLoginSubmitBtn" onclick="startGYJBackgroundLogin()">登录 GYJ</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
 <script>
+function openGYJLoginModal() {
+    document.getElementById('gyjLoginModal').hidden = false;
+    document.getElementById('gyjUsername').focus();
+}
+
+function closeGYJLoginModal() {
+    document.getElementById('gyjLoginModal').hidden = true;
+}
+
 const INBOUND_STAGE_LABELS = {
     waiting: '等待开始', navigation: '打开 CRM 页面', search: '查询装箱单',
     reading: '逐页读取', organizing: '整理入库明细', success: '读取完成', failed: '读取失败'
@@ -275,6 +344,7 @@ async function selectInboundHistory(packingSlipNo, copyNumber=true) {
         document.getElementById('downloadInboundBtn').disabled = true;
         renderInboundPageCounts(data.record.page_counts || (data.record.result || {}).page_counts || []);
         renderInboundResult(data.record.result || {});
+        renderGYJSelection(data.record.result || {});
         if (copyNumber) copyInboundText(selectedInboundHistoryNo);
     } catch (error) {
         document.getElementById('inboundStage').textContent = error.message || '读取装箱单历史失败';
@@ -296,6 +366,7 @@ async function deleteInboundHistory(packingSlipNo) {
             selectedInboundHistoryNo = '';
             sessionStorage.removeItem('inbound_history_packing_slip_no');
             clearInboundResultSurfaces();
+            renderGYJSelection(null);
         }
         await loadInboundHistory();
     } catch (error) {
@@ -335,6 +406,7 @@ function renderInboundStatus(data) {
             selectedInboundHistoryNo = String(data.packing_slip_no || data.result.packing_slip_no || '');
             if (selectedInboundHistoryNo) sessionStorage.setItem('inbound_history_packing_slip_no', selectedInboundHistoryNo);
             renderInboundResult(data.result);
+            renderGYJSelection(data.result);
             loadInboundHistory();
         }
         else clearInboundResultSurfaces();
@@ -488,6 +560,80 @@ const GYJ_STAGE_LABELS = {
 };
 let gyjJobId = '';
 let gyjPollTimer = null;
+let gyjLoggedIn = false;
+let gyjJobRunning = false;
+
+function renderGYJSelection(result) {
+    const items = result && Array.isArray(result.items) ? result.items : [];
+    const packingSlipNo = String((result || {}).packing_slip_no || selectedInboundHistoryNo || '');
+    document.getElementById('gyjSelectionPackingSlip').textContent = packingSlipNo
+        ? `装箱单：${packingSlipNo}`
+        : '尚未选择装箱单';
+    document.getElementById('gyjSelection').innerHTML = items.length ? items.map((item, index) => {
+        const productCode = String(item.product_code || '');
+        const serials = Array.isArray(item.serials) ? item.serials : [];
+        const unbarcoded = Math.max(0, Number(item.unbarcoded_quantity) || 0);
+        const controls = [
+            ...serials.map(serial => `<label class="gyj-serial-option"><input type="checkbox" class="gyj-serial-checkbox" data-product-index="${index}" data-serial="${escapeHtml(serial)}" checked onchange="updateGYJStartButton()">${escapeHtml(serial)}</label>`),
+            ...(unbarcoded ? [`<label class="gyj-quantity-option">无条码数量 <input type="number" class="gyj-quantity-input" data-product-index="${index}" min="0" max="${escapeHtml(unbarcoded)}" step="1" value="${escapeHtml(unbarcoded)}" onchange="updateGYJStartButton()"></label>`] : []),
+        ];
+        return `<section class="gyj-select-product">
+            <label class="gyj-select-product-head"><input type="checkbox" class="gyj-product-checkbox" data-product-index="${index}" data-product-code="${escapeHtml(productCode)}" checked onchange="toggleGYJProduct(${index})"><strong>${escapeHtml(productCode)}</strong><span class="gyj-select-product-name">${escapeHtml(item.description || '无物料描述')}</span></label>
+            <div class="gyj-select-product-body">${controls.length ? controls.join('') : '<span class="muted">没有可入库的条码或数量</span>'}</div>
+        </section>`;
+    }).join('') : '请先读取或选择一张 CRM 装箱单。';
+    updateGYJStartButton();
+}
+
+function toggleGYJProduct(index) {
+    const product = document.querySelector(`.gyj-product-checkbox[data-product-index="${index}"]`);
+    document.querySelectorAll(`[data-product-index="${index}"].gyj-serial-checkbox, [data-product-index="${index}"].gyj-quantity-input`).forEach(control => {
+        control.disabled = !product.checked;
+    });
+    updateGYJStartButton();
+}
+
+function setAllGYJProducts(checked) {
+    document.querySelectorAll('.gyj-product-checkbox').forEach(product => {
+        product.checked = checked;
+        toggleGYJProduct(product.dataset.productIndex);
+    });
+    document.querySelectorAll('.gyj-serial-checkbox').forEach(serial => {
+        serial.checked = checked;
+    });
+    updateGYJStartButton();
+}
+
+function collectGYJSelection() {
+    return Array.from(document.querySelectorAll('.gyj-product-checkbox:checked')).map(product => {
+        const index = product.dataset.productIndex;
+        const serials = Array.from(document.querySelectorAll(`.gyj-serial-checkbox[data-product-index="${index}"]:checked`))
+            .map(input => input.dataset.serial);
+        const quantityInput = document.querySelector(`.gyj-quantity-input[data-product-index="${index}"]`);
+        return {
+            product_code: product.dataset.productCode,
+            serials,
+            unbarcoded_quantity: quantityInput ? Number(quantityInput.value) : 0,
+        };
+    });
+}
+
+function hasGYJSelection() {
+    const selectedProducts = Array.from(document.querySelectorAll('.gyj-product-checkbox:checked'));
+    return selectedProducts.length > 0 && selectedProducts.every(product => {
+        const index = product.dataset.productIndex;
+        if (document.querySelector(`.gyj-serial-checkbox[data-product-index="${index}"]:checked`)) return true;
+        const quantityInput = document.querySelector(`.gyj-quantity-input[data-product-index="${index}"]`);
+        const quantity = quantityInput ? Number(quantityInput.value) : 0;
+        return Number.isInteger(quantity) && quantity > 0;
+    });
+}
+
+function updateGYJStartButton() {
+    const button = document.getElementById('gyjStartBtn');
+    const hasSelection = hasGYJSelection();
+    button.disabled = gyjJobRunning || !gyjLoggedIn || !hasSelection;
+}
 
 function selectInboundWorkspace(workspace) {
     const isGYJ = workspace === 'gyj';
@@ -512,7 +658,8 @@ function renderGYJInboundStatus(data) {
     const totalLines = Number(data.total_lines) || 0;
     setGYJStatus(totalLines ? `${stage} · ${currentLine} / ${totalLines} 行` : stage);
     const startButton = document.getElementById('gyjStartBtn');
-    startButton.disabled = !!data.running;
+    gyjJobRunning = !!data.running;
+    updateGYJStartButton();
     startButton.textContent = data.running ? '保存中...' : '创建并保存';
     const logs = Array.isArray(data.logs) ? data.logs : [];
     document.getElementById('gyjLogs').innerHTML = logs.length ? logs.map(entry => {
@@ -559,11 +706,14 @@ async function checkGYJLoginStatus() {
         const response = await fetch('/api/inbound/gyj/login-status');
         const data = await response.json();
         const button = document.getElementById('gyjLoginBtn');
-        button.textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
-        button.disabled = !!data.logged_in;
-        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
+        gyjLoggedIn = !!data.logged_in;
+        button.textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
+        updateGYJStartButton();
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
-        if (data.waiting_captcha) refreshGYJCaptchaPreview();
+        if (data.waiting_captcha) {
+            openGYJLoginModal();
+            refreshGYJCaptchaPreview();
+        }
         setGYJStatus(data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ'));
         return !!data.logged_in;
     } catch (error) {
@@ -607,7 +757,7 @@ async function startGYJBackgroundLogin() {
         setGYJStatus('请输入 GYJ 账号和密码');
         return;
     }
-    const button = document.getElementById('gyjLoginBtn');
+    const button = document.getElementById('gyjLoginSubmitBtn');
     button.disabled = true;
     button.textContent = '后台登录中...';
     try {
@@ -619,19 +769,18 @@ async function startGYJBackgroundLogin() {
         if (data.logged_in || data.waiting_captcha) {
             document.getElementById('gyjPassword').value = '';
         }
+        gyjLoggedIn = !!data.logged_in;
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
         if (data.waiting_captcha) refreshGYJCaptchaPreview();
-        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
+        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
+        updateGYJStartButton();
         setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败'));
+        if (data.logged_in) closeGYJLoginModal();
     } catch (error) {
         setGYJStatus('GYJ 后台登录失败');
     } finally {
-        if (!document.getElementById('gyjStartBtn').disabled) {
-            button.textContent = 'GYJ 已登录';
-        } else {
-            button.disabled = false;
-            button.textContent = '后台登录 GYJ';
-        }
+        button.disabled = false;
+        button.textContent = '登录 GYJ';
     }
 }
 
@@ -649,12 +798,13 @@ async function submitGYJCaptcha() {
         });
         const data = await response.json();
         document.getElementById('gyjCaptcha').value = '';
+        gyjLoggedIn = !!data.logged_in;
         document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
         if (data.waiting_captcha) refreshGYJCaptchaPreview();
-        document.getElementById('gyjStartBtn').disabled = !data.logged_in;
-        document.getElementById('gyjLoginBtn').disabled = !!data.logged_in;
-        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '后台登录 GYJ';
+        updateGYJStartButton();
+        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
         setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 验证码验证失败'));
+        if (data.logged_in) closeGYJLoginModal();
     } catch (error) {
         setGYJStatus('GYJ 验证码提交失败');
     } finally {
@@ -664,15 +814,25 @@ async function submitGYJCaptcha() {
 
 async function startGYJPurchaseInbound() {
     const button = document.getElementById('gyjStartBtn');
+    const selected_items = collectGYJSelection();
+    if (!selected_items.length) {
+        setGYJStatus('请至少选择一个入库产品');
+        return;
+    }
+    gyjJobRunning = true;
     button.disabled = true;
     button.textContent = '启动中...';
     try {
         const response = await fetch('/api/inbound/gyj/start', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({packing_slip_no: selectedInboundHistoryNo || undefined})
+            body: JSON.stringify({
+                packing_slip_no: selectedInboundHistoryNo || undefined,
+                selected_items,
+            })
         });
         const data = await response.json();
         if (!response.ok || !data.success) {
+            gyjJobRunning = false;
             setGYJStatus(data.error || 'GYJ 采购入库任务启动失败');
             return;
         }
@@ -681,11 +841,12 @@ async function startGYJPurchaseInbound() {
         renderGYJInboundStatus({...data, running: true, stage: 'waiting'});
         startGYJInboundPolling();
     } catch (error) {
+        gyjJobRunning = false;
         setGYJStatus('无法启动 GYJ 采购入库任务');
     } finally {
-        if (!gyjJobId || !gyjPollTimer) {
-            button.disabled = false;
+        if (!gyjJobRunning) {
             button.textContent = '创建并保存';
+            updateGYJStartButton();
         }
     }
 }
