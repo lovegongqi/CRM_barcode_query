@@ -462,10 +462,11 @@ class InboundCRMTest(unittest.TestCase):
             try:
                 page = browser.new_page()
                 page.set_content(
-                    "<table><tbody><tr><td style='width: 400px' "
+                    "<table><thead><tr><th>装箱单号</th><th>经销商</th><th>装箱单类型</th></tr></thead>"
+                    "<tbody><tr><td style='width: 400px' "
                     "onclick=\"document.querySelector('#opened').textContent='cell'\">"
                     "<a href='#detail' onclick=\"document.querySelector('#opened').textContent='link'; event.stopPropagation()\">"
-                    "SH202607210002</a></td><td>江西省天麓工贸有限公司</td></tr></tbody></table>"
+                    "SH202607210002</a></td><td>江西省天麓工贸有限公司</td><td>销售订单</td></tr></tbody></table>"
                     "<span id='opened'></span>"
                 )
 
@@ -479,6 +480,37 @@ class InboundCRMTest(unittest.TestCase):
 
                 self.assertTrue(opened)
                 self.assertEqual(page.locator("#opened").text_content(), "link")
+            finally:
+                browser.close()
+
+    def test_captures_packing_slip_type_from_the_matching_list_row(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content(
+                    "<div class='el-table__header-wrapper'><table class='el-table__header'><thead><tr>"
+                    "<th>装箱单号</th><th>经销商</th><th>创建时间</th><th>单据状态</th><th>装箱单类型</th>"
+                    "</tr></thead></table></div>"
+                    "<div class='el-table__body-wrapper'><table class='el-table__body'><tbody><tr>"
+                    "<td><a href='#detail'>SH202607210002</a></td>"
+                    "<td>江西省天麓工贸有限公司</td><td>2026-07-21</td><td>已签收</td><td>销售订单</td>"
+                    "</tr></tbody></table>"
+                    "</div>"
+                )
+
+                class Session:
+                    context = None
+
+                    def __init__(self):
+                        self.page = page
+
+                reader = PackingSlipCRMReader(Session())
+
+                opened = reader._open_matching_result("SH202607210002")
+
+                self.assertTrue(opened)
+                self.assertEqual(reader.packing_slip_type, "销售订单")
             finally:
                 browser.close()
 

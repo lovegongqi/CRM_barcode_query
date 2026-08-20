@@ -48,6 +48,7 @@ class FakeInboundWorker:
         return True, {
             "rows": [dict(FIXED_ROW)],
             "page_counts": [page_count],
+            "packing_slip_type": "销售订单",
         }
 
 
@@ -78,8 +79,10 @@ class FakeGYJWorker:
     def check_login_status(self):
         return self.logged_in, ""
 
-    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
-        self.saved.append((packing_slip_no, list(lines)))
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
+        self.saved.append((packing_slip_no, list(lines), packing_slip_type))
         if log:
             log("正在新建 GYJ 采购入库单")
         if progress:
@@ -360,6 +363,7 @@ class InboundRouteTest(unittest.TestCase):
             "success": True,
             "result": {
                 "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
                 "duplicate_serials": [],
                 "items": [{
                     "product_code": "916000024",
@@ -403,8 +407,10 @@ class InboundRouteTest(unittest.TestCase):
                 self.first_line_done = threading.Event()
                 self.release = threading.Event()
 
-            def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
-                self.saved.append((packing_slip_no, list(lines)))
+            def save_purchase_inbound(
+                self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+            ):
+                self.saved.append((packing_slip_no, list(lines), packing_slip_type))
                 progress({"current_line": 1, "total_lines": len(lines), "line": lines[0]})
                 self.first_line_done.set()
                 self.release.wait(timeout=2)
@@ -419,6 +425,7 @@ class InboundRouteTest(unittest.TestCase):
             "success": True,
             "result": {
                 "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
                 "duplicate_serials": [],
                 "items": [{
                     "product_code": "916000024", "description": "中央净水机",
@@ -450,6 +457,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [{
                 "product_code": "916000024", "description": "中央净水机",
                 "order_numbers": [], "serials": ["SN00000001"],
@@ -467,12 +475,34 @@ class InboundRouteTest(unittest.TestCase):
         status = self._wait_for_gyj_job(client, started.get_json()["job_id"])
         self.assertTrue(status["success"])
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+        self.assertEqual(worker.saved[0][2], "销售订单")
         self.assertIn(f"使用装箱单号：{PACKING_SLIP_NO}", status["logs"][0]["message"])
+
+    def test_gyj_start_rejects_history_without_packing_slip_type(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+
+        with mock.patch.object(app_module, "gyj_worker", FakeGYJWorker()):
+            response = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("缺少装箱单类型", response.get_json()["error"])
 
     def test_gyj_start_uses_only_selected_products_serials_and_quantity(self):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [
                 {
                     "product_code": "916000024", "description": "中央净水机",
@@ -518,6 +548,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [{
                 "product_code": "916000024", "description": "中央净水机",
                 "order_numbers": [], "serials": ["SN00000001"],
@@ -544,6 +575,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [{
                 "product_code": "917000001", "description": "无条码配件",
                 "order_numbers": [], "serials": [],
@@ -570,6 +602,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [{
                 "product_code": "917000001", "description": "无条码配件",
                 "order_numbers": [], "serials": [],
@@ -596,6 +629,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "duplicate_serials": ["DUPLICATE-SERIAL"],
             "items": [{
                 "product_code": "916000024", "description": "中央净水机",
@@ -623,6 +657,7 @@ class InboundRouteTest(unittest.TestCase):
         client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
             "items": [{
                 "product_code": "916000024", "description": "中央净水机",
                 "order_numbers": [], "serials": ["SN00000001"],
@@ -650,6 +685,7 @@ class InboundRouteTest(unittest.TestCase):
             "success": True,
             "result": {
                 "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
                 "items": [{
                     "product_code": "916000024", "description": "中央净水机",
                     "order_numbers": [], "serials": ["SN00000001"],
@@ -796,6 +832,7 @@ class InboundRouteTest(unittest.TestCase):
         status = self._wait_for_job(client, job_id)
         self.assertTrue(status["success"])
         self.assertEqual(status["stage"], "success")
+        self.assertEqual(status["result"]["packing_slip_type"], "销售订单")
         self.assertEqual(status["result"]["pages_read"], [1])
         self.assertEqual(status["download_url"], f"/api/inbound/export?job_id={job_id}")
         latest = client.get("/api/inbound/status?latest=1")

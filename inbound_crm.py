@@ -2,7 +2,7 @@ import re
 import time
 from math import ceil
 
-from inbound_extraction import normalize_packing_slip_no
+from inbound_extraction import normalize_packing_slip_no, normalize_packing_slip_type
 
 
 class PackingSlipReadError(RuntimeError):
@@ -118,9 +118,11 @@ class PackingSlipCRMReader:
         self.session = session
         self.log = log
         self.progress = progress
+        self.packing_slip_type = ""
 
     def extract(self, packing_slip_no):
         packing_slip_no = normalize_packing_slip_no(packing_slip_no)
+        self.packing_slip_type = ""
         self._emit("正在打开 B2B 装箱单页面")
         self._navigate_to_packing_slips()
         self._emit(f"正在查询装箱单 {packing_slip_no}")
@@ -128,6 +130,7 @@ class PackingSlipCRMReader:
         shipment_rows = self._read_shipment_rows()
         result = self._read_all_pages()
         result["shipment_rows"] = shipment_rows
+        result["packing_slip_type"] = self.packing_slip_type
         return result
 
     def _emit(self, message):
@@ -352,6 +355,17 @@ class PackingSlipCRMReader:
                 tables = scope.query_selector_all("table")
             except Exception:
                 continue
+            type_index = None
+            for header_table in tables:
+                if not self._visible(header_table):
+                    continue
+                headers = [
+                    _header_text(cell.inner_text())
+                    for cell in header_table.query_selector_all("thead th")
+                ]
+                if "装箱单号" in headers and "装箱单类型" in headers:
+                    type_index = headers.index("装箱单类型")
+                    break
             for table in tables:
                 if not self._visible(table):
                     continue
@@ -360,6 +374,15 @@ class PackingSlipCRMReader:
                     exact_cells = [cell for cell in cells if _clean_text(cell.inner_text()) == packing_slip_no]
                     if not exact_cells:
                         continue
+                    data_cells = row.query_selector_all("td")
+                    if type_index is None or type_index >= len(data_cells):
+                        raise PackingSlipReadError("装箱单列表缺少装箱单类型列")
+                    try:
+                        self.packing_slip_type = normalize_packing_slip_type(
+                            data_cells[type_index].inner_text()
+                        )
+                    except ValueError as error:
+                        raise PackingSlipReadError(str(error)) from error
                     for action in row.query_selector_all("a,button,[role='button']"):
                         action_text = _clean_text(action.inner_text())
                         if self._visible(action) and (

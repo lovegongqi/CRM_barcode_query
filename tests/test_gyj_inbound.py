@@ -1722,14 +1722,16 @@ class GYJInboundWriterTest(unittest.TestCase):
     def test_writer_uses_only_plain_save_after_verification(self):
         page = FakeGYJPage()
 
-        result = GYJPurchaseInboundWriter(page).save_packing_slip("SH202607210002", self.lines)
+        result = GYJPurchaseInboundWriter(page).save_packing_slip(
+            "SH202607210002", self.lines, packing_slip_type="销售订单"
+        )
 
         self.assertEqual(page.clicked, ["新增", "保存"])
         self.assertNotIn("保存并审核", page.clicked)
         self.assertEqual(page.headers, {
             "供应商": "昆山怡口净水",
         })
-        self.assertEqual(page.remark, "装箱单号：SH202607210002")
+        self.assertEqual(page.remark, "装箱单号：SH202607210002 销售订单")
         self.assertEqual(result["order_no"], "CG202608130001")
 
     def test_writer_stops_before_save_when_product_lookup_fails(self):

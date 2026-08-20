@@ -160,7 +160,7 @@ class GYJPurchaseInboundWriter:
             f"阶段 {stage_name} 失败，已重试 {STAGE_MAX_RETRIES} 次：{last_error}"
         ) from last_error
 
-    def save_packing_slip(self, packing_slip_no, lines):
+    def save_packing_slip(self, packing_slip_no, lines, packing_slip_type=""):
         if not lines:
             raise GYJInboundError("没有可保存的 GYJ 入库明细")
 
@@ -181,7 +181,10 @@ class GYJPurchaseInboundWriter:
             self._emit("正在新建 GYJ 采购入库单")
             self.page.open_new_form()
             self.page.select_header("供应商", GYJ_SUPPLIER)
-            self.page.fill_remark(f"装箱单号：{packing_slip_no}")
+            remark = f"装箱单号：{packing_slip_no}"
+            if packing_slip_type:
+                remark += f" {packing_slip_type}"
+            self.page.fill_remark(remark)
 
         self._run_with_retries(
             "creating",

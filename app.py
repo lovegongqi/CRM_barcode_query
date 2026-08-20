@@ -29,6 +29,7 @@ from inbound_extraction import (
     build_inbound_result,
     build_inbound_workbook,
     normalize_packing_slip_no,
+    normalize_packing_slip_type,
 )
 from gyj_inbound import (
     GYJInboundError,
@@ -3886,7 +3887,9 @@ class GYJSession:
                 self.logged_in = False
                 return False, str(error)
 
-    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
         with self.lock:
             ok, message = self.check_login_status()
             if not ok:
@@ -3894,7 +3897,9 @@ class GYJSession:
             try:
                 result = GYJPurchaseInboundWriter(
                     GYJPlaywrightPage(self.page, log=log), log=log, progress=progress
-                ).save_packing_slip(packing_slip_no, lines)
+                ).save_packing_slip(
+                    packing_slip_no, lines, packing_slip_type=packing_slip_type
+                )
                 return True, result
             except GYJInboundError as error:
                 return False, str(error)
@@ -3972,8 +3977,12 @@ class GYJWorker:
     def check_login_status(self):
         return self._call("check_login_status")
 
-    def save_purchase_inbound(self, packing_slip_no, lines, log=None, progress=None):
-        return self._call("save_purchase_inbound", packing_slip_no, lines, log, progress)
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
+        return self._call(
+            "save_purchase_inbound", packing_slip_no, lines, packing_slip_type, log, progress
+        )
 
     def shutdown(self):
         return self._call("shutdown")
@@ -4442,11 +4451,14 @@ def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
                 latest_inbound_job_by_slot.pop(slot_id, None)
 
 
-def _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines):
+def _empty_inbound_gyj_job(
+    owner, packing_slip_no, source_job_id, lines, packing_slip_type=""
+):
     return {
         'job_id': uuid.uuid4().hex,
         'owner': str(owner or ''),
         'packing_slip_no': str(packing_slip_no or ''),
+        'packing_slip_type': str(packing_slip_type or ''),
         'source_job_id': str(source_job_id or ''),
         'stage': 'waiting',
         'running': False,
@@ -5397,6 +5409,7 @@ def _run_inbound_job(job_id, worker):
             source.get('rows') or [],
             source.get('page_counts') or [],
             shipment_rows=source.get('shipment_rows') or [],
+            packing_slip_type=source.get('packing_slip_type') or '',
         )
         finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         upsert_inbound_history(result, finished_at)
@@ -5486,10 +5499,12 @@ def _run_inbound_gyj_job(job_id, worker, lines):
             return
         job['stage'] = 'creating'
         packing_slip_no = job['packing_slip_no']
+        packing_slip_type = job.get('packing_slip_type') or ''
 
     try:
         ok, result = worker.save_purchase_inbound(
-            packing_slip_no, lines, log=log, progress=progress,
+            packing_slip_no, lines, packing_slip_type=packing_slip_type,
+            log=log, progress=progress,
         )
         if not ok:
             raise GYJInboundError(_brief_batch_error(result, 800) or 'GYJ 采购入库保存失败')
@@ -10190,6 +10205,13 @@ def api_inbound_gyj_start():
             source_result = dict(source['result'])
 
     try:
+        raw_packing_slip_type = str(source_result.get('packing_slip_type') or '').strip()
+        if not raw_packing_slip_type:
+            raise GYJInboundError('装箱单历史缺少装箱单类型，请重新读取 CRM 装箱单')
+        try:
+            packing_slip_type = normalize_packing_slip_type(raw_packing_slip_type)
+        except ValueError as error:
+            raise GYJInboundError(str(error)) from error
         if 'selected_items' in request_data:
             source_result = _select_gyj_purchase_result(
                 source_result, request_data.get('selected_items')
@@ -10213,7 +10235,9 @@ def api_inbound_gyj_start():
                 'job_id': running_job_id,
             }), 409
         _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner)
-        job = _empty_inbound_gyj_job(owner, packing_slip_no, source_job_id, lines)
+        job = _empty_inbound_gyj_job(
+            owner, packing_slip_no, source_job_id, lines, packing_slip_type
+        )
         job.update({
             'running': True,
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),

@@ -6,6 +6,7 @@ from openpyxl import Workbook
 
 
 PACKING_SLIP_PATTERN = re.compile(r"^SH\d{8,}$")
+PACKING_SLIP_TYPES = {"维保订单", "销售订单"}
 WORKBOOK_HEADERS = [
     "装箱单号",
     "订单号",
@@ -25,8 +26,20 @@ def normalize_packing_slip_no(value):
     return normalized
 
 
-def build_inbound_result(packing_slip_no, rows, page_counts, shipment_rows=None):
+def normalize_packing_slip_type(value):
+    normalized = _clean_text(value)
+    if normalized not in PACKING_SLIP_TYPES:
+        raise ValueError("装箱单类型必须是维保订单或销售订单")
+    return normalized
+
+
+def build_inbound_result(
+    packing_slip_no, rows, page_counts, shipment_rows=None, packing_slip_type=""
+):
     packing_slip_no = normalize_packing_slip_no(packing_slip_no)
+    packing_slip_type = _clean_text(packing_slip_type)
+    if packing_slip_type:
+        packing_slip_type = normalize_packing_slip_type(packing_slip_type)
     items_by_code = OrderedDict()
     clean_rows = []
     seen_serials = set()
@@ -134,6 +147,7 @@ def build_inbound_result(packing_slip_no, rows, page_counts, shipment_rows=None)
     )
     return {
         "packing_slip_no": packing_slip_no,
+        "packing_slip_type": packing_slip_type,
         "page_counts": list(page_counts),
         "pages_read": [entry["page"] for entry in page_counts],
         "expected_total": expected_total,

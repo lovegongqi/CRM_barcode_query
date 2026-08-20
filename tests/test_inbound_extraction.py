@@ -72,8 +72,10 @@ class InboundExtractionTest(unittest.TestCase):
             PACKING_SLIP_NO,
             self.rows,
             self.page_counts,
+            packing_slip_type="销售订单",
         )
 
+        self.assertEqual(result["packing_slip_type"], "销售订单")
         self.assertEqual(result["pages_read"], [1, 2])
         self.assertEqual(result["total_serials"], 3)
         self.assertEqual(result["duplicate_serials"], ["SN00000002"])
