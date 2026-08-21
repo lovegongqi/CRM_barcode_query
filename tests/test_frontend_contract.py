@@ -1015,6 +1015,69 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('已选条码 ${summary.total || 0} 个，产品 ${(summary.groups || []).length} 条，数量合计 ${totalQty}。', transfer)
         self.assertNotIn("<th>条码</th><th>匹配前缀</th><th>产品型号</th><th>产品名称</th>", transfer)
 
+    def test_transfer_distributor_history_waits_for_async_server_history(self):
+        transfer = self.source("transfer.html")
+        save_history = transfer.split("function saveDistributorHistory(value)", 1)[1].split(
+            "function mergeDistributorHistory(values)", 1
+        )[0]
+        merge_history = transfer.split("function mergeDistributorHistory(values)", 1)[1].split(
+            "function filteredDistributorHistory()", 1
+        )[0]
+        delete_history = transfer.split("async function deleteDistributorHistory(name)", 1)[1].split(
+            "function openDistributorImportModal()", 1
+        )[0]
+        keyboard_history = transfer.split("function handleDistributorKeydown(event)", 1)[1].split(
+            "function hideDistributorDropdownSoon()", 1
+        )[0]
+
+        self.assertIn("async function saveDistributorHistory(value)", transfer)
+        self.assertIn("async function mergeDistributorHistory(values)", transfer)
+        self.assertIn("async function handleDistributorKeydown(event)", transfer)
+        self.assertIn("await loadDistributorHistory()", save_history)
+        self.assertIn("await loadDistributorHistory()", merge_history)
+        self.assertIn("await loadDistributorHistory()", delete_history)
+        self.assertIn("await filteredDistributorHistory()", keyboard_history)
+
+    def test_transfer_live_log_only_shows_during_unmatched_summary_queries(self):
+        transfer = self.source("transfer.html")
+        render_logs = transfer.split("function renderLogs(", 1)[1].split("function renderPreviewQueries", 1)[0]
+
+        self.assertIn(
+            "function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='', showPreviewQuery=false)",
+            transfer,
+        )
+        self.assertNotIn('id="transferSummaryLog"', transfer)
+        self.assertIn(
+            "const previewEntries = Object.entries((jobData && jobData.barcode_states) || {});",
+            render_logs,
+        )
+        self.assertIn(
+            "const showLookupProgress = showPreviewQuery && previewEntries.length && !(jobData && jobData.done);",
+            render_logs,
+        )
+        self.assertIn("previewLog.style.display = showLookupProgress ? 'block' : 'none';", render_logs)
+        self.assertEqual(
+            transfer.count("renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true)"),
+            2,
+        )
+
+    def test_transfer_preview_uses_one_live_row_per_representative_barcode(self):
+        transfer = self.source("transfer.html")
+        preview_queries = transfer.split("function renderPreviewQueries(barcodeStates)", 1)[1].split(
+            "function startTransferPolling", 1
+        )[0]
+
+        self.assertIn('id="previewQueries"', transfer)
+        self.assertIn('id="previewQueriesBadge"', transfer)
+        self.assertIn('id="previewQueriesRows"', transfer)
+        self.assertIn("<th>#</th><th>代表条码</th><th>查询通道</th><th>实时状态</th>", transfer)
+        self.assertIn("Object.entries(barcodeStates)", preview_queries)
+        self.assertIn("const stateLabel = {ok: '成功', failed: '失败', querying: '查询中…', pending: '等待中'}", preview_queries)
+        self.assertIn("row.message || stateLabel[row.state]", preview_queries)
+        self.assertIn("<code>${escapeHtml(row.barcode)}</code>", preview_queries)
+        self.assertNotIn("function renderPreviewLogRows(logs)", transfer)
+        self.assertNotIn(".preview-log-row {", transfer)
+
     def test_transfer_summary_detail_modal_uses_aurora_colors(self):
         transfer = self.source("transfer.html")
         self.assertIn(".summary-detail-modal {", transfer)

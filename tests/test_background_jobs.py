@@ -385,6 +385,130 @@ class BackgroundJobTests(unittest.TestCase):
             ],
         )
 
+    def test_transfer_summary_initializes_and_updates_each_representative_barcode_state(self):
+        job = app_module._empty_summary_job("transfer-1")
+        job.update({
+            "running": True,
+            "started_at": "2026-08-21 17:45:00",
+        })
+        with app_module.summary_job_lock:
+            app_module.summary_jobs[job["job_id"]] = job
+
+        observed = {}
+
+        def fake_ensure(_barcodes, _log, _worker, state_tracker=None):
+            with app_module.summary_job_lock:
+                observed["pending"] = dict(app_module.summary_jobs[job["job_id"]].get("barcode_states") or {})
+            state_tracker("REP-001", "querying", "查询1")
+            state_tracker("REP-001", "ok", "查询1")
+            state_tracker("REP-002", "querying", "查询2")
+            state_tracker("REP-002", "failed", "查询2")
+            return {"queried": [], "failed": []}
+
+        try:
+            with mock.patch.object(
+                app_module,
+                "filter_disassembly_barcodes",
+                return_value=(["REP-001", "REP-002"], []),
+            ), mock.patch.object(
+                app_module,
+                "_missing_product_library_representatives",
+                return_value={"P1": "REP-001", "P2": "REP-002"},
+            ), mock.patch.object(
+                app_module,
+                "_crm_ready_for_auto_query",
+                return_value=(True, "已登录"),
+            ), mock.patch.object(
+                app_module,
+                "ensure_product_library_for_barcodes",
+                side_effect=fake_ensure,
+            ), mock.patch.object(
+                app_module,
+                "build_transfer_summary",
+                return_value={"groups": [], "details": [], "missing": [], "incomplete": [], "blocked": []},
+            ), mock.patch.object(
+                app_module,
+                "_exclude_unmatched_transfer_barcodes",
+                return_value=[],
+            ):
+                app_module._run_summary_job(
+                    job["job_id"],
+                    object(),
+                    ["REP-001", "REP-002"],
+                    "移出",
+                    "测试分销商",
+                )
+
+            self.assertEqual(
+                observed["pending"],
+                {
+                    "REP-001": {"state": "pending", "channel": "", "channel_label": "", "message": "等待查询", "level": "dim"},
+                    "REP-002": {"state": "pending", "channel": "", "channel_label": "", "message": "等待查询", "level": "dim"},
+                },
+            )
+            with app_module.summary_job_lock:
+                states = dict(app_module.summary_jobs[job["job_id"]]["barcode_states"])
+            self.assertEqual(states["REP-001"]["state"], "ok")
+            self.assertEqual(states["REP-001"]["channel_label"], "查询1")
+            self.assertEqual(states["REP-002"]["state"], "failed")
+            self.assertEqual(states["REP-002"]["channel_label"], "查询2")
+            with app_module.summary_job_lock:
+                messages = [row["message"] for row in app_module.summary_jobs[job["job_id"]]["logs"]]
+            self.assertFalse(any(message.startswith("代表条码 REP-") for message in messages))
+        finally:
+            with app_module.summary_job_lock:
+                app_module.summary_jobs.pop(job["job_id"], None)
+
+    def test_representative_barcode_state_receives_each_query_process_message(self):
+        worker = FakeQueryWorker("query-1", delay=0)
+        updates = []
+
+        def track(barcode, state, channel, message="", level="dim"):
+            updates.append((barcode, state, channel, message, level))
+
+        with mock.patch.object(
+            app_module,
+            "_missing_product_library_representatives",
+            return_value={"347": "3472311270178"},
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "query_slots",
+            ["query-1"],
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            return_value=worker,
+        ), mock.patch.object(
+            app_module,
+            "existing_barcode_result_paths",
+            return_value=[],
+        ), mock.patch.object(
+            app_module,
+            "barcode_metadata_exists",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "delete_temporary_query_result",
+        ), mock.patch.object(
+            app_module,
+            "match_product_library",
+            return_value={"product_code": "P-347", "product_name": "测试产品"},
+        ):
+            app_module.ensure_product_library_for_barcodes(
+                ["3472311270178"],
+                worker=worker,
+                state_tracker=track,
+            )
+
+        process_messages = [
+            message
+            for barcode, state, channel, message, _level in updates
+            if barcode == "3472311270178" and state == "querying" and channel == "查询1"
+        ]
+        self.assertIn("正在查询：3472311270178", process_messages)
+        self.assertIn("查询完成：3472311270178", process_messages)
+        self.assertEqual(updates[-1], ("3472311270178", "ok", "查询1", "查询成功", "success"))
+
     def test_product_library_query_status_returns_logs_since_sequence(self):
         with app_module.library_query_lock:
             app_module.library_query_job.update({

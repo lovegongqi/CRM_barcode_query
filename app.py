@@ -5235,6 +5235,19 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
         auto_library = {'queried': [], 'failed': []}
         representatives = _missing_product_library_representatives(barcodes)
         if representatives:
+            with summary_job_lock:
+                job = summary_jobs.get(job_id)
+                if job is not None:
+                    job['barcode_states'] = {
+                        barcode: {
+                            'state': 'pending',
+                            'channel': '',
+                            'channel_label': '',
+                            'message': '等待查询',
+                            'level': 'dim',
+                        }
+                        for barcode in representatives.values()
+                    }
             items = "，".join([f"{prefix}←{barcode}" for prefix, barcode in representatives.items()])
             log(f"发现 {len(representatives)} 个缺失前缀：{items}", 'info')
             log("将自动逐个查询代表条码补充条码匹配；离开本页面不会停止后台汇总，可返回移库页查看日志", 'dim')
@@ -5243,8 +5256,13 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
                 log(ready_message, 'error')
                 finish(False, ready_message)
                 return
-            def _summary_state_cb(barcode, state, channel):
+            def _summary_state_cb(barcode, state, channel, message='', level='dim'):
                 if state in ('querying', 'ok', 'failed'):
+                    status_message = message or {
+                        'querying': '查询中…',
+                        'ok': '查询成功',
+                        'failed': '查询失败',
+                    }.get(state, '')
                     with summary_job_lock:
                         job = summary_jobs.get(job_id)
                         if job is not None:
@@ -5252,9 +5270,9 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
                                 'state': state,
                                 'channel': channel,
                                 'channel_label': channel,
+                                'message': _safe_log_text(status_message),
+                                'level': level,
                             }
-                emit(f"代表条码 {barcode} → {channel} → {state}", 'info' if state == 'ok' else 'warn')
-
             auto_library = ensure_product_library_for_barcodes(barcodes, log, worker, state_tracker=_summary_state_cb)
             if auto_library.get('failed'):
                 failed_items = "，".join([
@@ -7123,10 +7141,10 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
     barcode table, not a sequential one-at-a-time crawl.
 
     `state_tracker` is an optional callback invoked for each barcode with
-    (barcode, state, channel) where state ∈ {'querying','ok','failed'}. The
-    transfer / summary callers pass a tracker that updates the in-memory
-    job's barcode_states dict so the polling response can stream a live
-    per-barcode table.
+    (barcode, state, channel, message, level) where state is one of
+    {'querying','ok','failed'}. The transfer / summary callers pass a tracker
+    that updates the in-memory job's barcode_states dict so the polling
+    response can stream each query's latest step in a live per-barcode table.
     """
     representatives = _missing_product_library_representatives(selected_barcodes)
     result = {'queried': [], 'failed': []}
@@ -7142,10 +7160,10 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
     if not pool_slot_ids:
         pool_slot_ids = [(worker.slot_id if worker else crm_pool.default_slot('query'))]
 
-    def track(barcode, state, channel):
+    def track(barcode, state, channel, message='', level='dim'):
         if state_tracker:
             try:
-                state_tracker(barcode, state, channel)
+                state_tracker(barcode, state, channel, message, level)
             except Exception:
                 pass
 
@@ -7164,9 +7182,15 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
         existing_paths = existing_barcode_result_paths(barcode)
         had_metadata = barcode_metadata_exists(barcode)
         emit(f"自动补充 {index_0 + 1}/{total}：前缀 {prefix}，代表条码 {barcode}（{channel_label}）", "info")
-        emit(f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}", "dim")
-        track(barcode, 'querying', channel_label)
-        success, message = worker_for_slot.query_barcode(barcode, log, TEMP_QUERY_DIR)
+        start_message = f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}"
+        emit(start_message, "dim")
+        track(barcode, 'querying', channel_label, start_message, 'dim')
+
+        def row_log(message, level='dim'):
+            emit(message, level)
+            track(barcode, 'querying', channel_label, message, level)
+
+        success, message = worker_for_slot.query_barcode(barcode, row_log, TEMP_QUERY_DIR)
         if success:
             delete_temporary_query_result(
                 barcode,
@@ -7175,7 +7199,14 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
                 keep_metadata=had_metadata,
             )
         emit(f"代表条码 {barcode} 查询返回：{'成功' if success else '失败'}（{channel_label}）", "success" if success else "warn")
-        track(barcode, 'ok' if success else 'failed', channel_label)
+        final_message = "查询成功" if success else f"查询失败：{_brief_batch_error(message, 300)}"
+        track(
+            barcode,
+            'ok' if success else 'failed',
+            channel_label,
+            final_message,
+            'success' if success else 'error',
+        )
         if success and match_product_library(barcode):
             result['queried'].append({'prefix': prefix, 'barcode': barcode, 'channel': channel_label})
             matched = match_product_library(barcode) or {}

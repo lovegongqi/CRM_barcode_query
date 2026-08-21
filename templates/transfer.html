@@ -84,6 +84,19 @@
         .blocked { background:#fff1f2; border-color:#fecaca; color:#991b1b; }
         .log { background:#0f172a; color:#d4d4d4; border-radius:8px; padding:12px; font-family:"Courier New", monospace; font-size:12px; max-height:260px; overflow:auto; line-height:1.7; }
         .log .info { color:#4fc3f7; } .log .success { color:#81c784; } .log .error { color:#e57373; } .log .warn { color:#ffb74d; } .log .dim { color:#94a3b8; }
+        .preview-log { margin-top:12px; border:1px solid rgba(139,190,220,.22); border-radius:8px; background:rgba(8,18,32,.78); overflow:hidden; }
+        .preview-query-head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; border-bottom:1px solid rgba(139,190,220,.16); color:#d7edf4; }
+        .preview-query-table-wrap { max-height:240px; overflow:auto; }
+        .preview-query-table { min-width:560px; }
+        .preview-query-table th { background:rgba(46,70,103,.78); border-bottom-color:rgba(139,190,220,.18); color:#aeeefa; }
+        .preview-query-table td { border-bottom-color:rgba(139,190,220,.14); color:#b9ceda; }
+        .preview-query-table th:first-child, .preview-query-table td:first-child { width:52px; text-align:center; }
+        .preview-query-table td:last-child { min-width:220px; overflow-wrap:anywhere; }
+        .preview-query-table code { color:#67dfff; }
+        .preview-query-table tr.dim td:last-child { color:#94a3b8; }
+        .preview-query-table tr.warn td:last-child { color:#ffbf4a; }
+        .preview-query-table tr.success td:last-child { color:#55e7b0; }
+        .preview-query-table tr.error td:last-child { color:#ff7089; }
         .pill { display:inline-block; padding:2px 7px; border-radius:999px; background:#e0f2fe; color:#0369a1; font-size:12px; font-weight:700; }
         .distributor-picker { position:relative; }
         .distributor-dropdown { display:none; position:absolute; z-index:30; top:calc(100% + 4px); left:0; right:0; max-height:220px; overflow:auto; background:#fff; border:1px solid #cfd8e3; border-radius:6px; box-shadow:0 14px 32px rgba(15,23,42,.14); }
@@ -173,7 +186,18 @@
                     <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
                     <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
                 </div>
-                <div class="preview-log summary-log" id="previewLog" style="display:none"><div class="dim">点击「汇总预览」后此处实时显示查询进度</div></div>
+                <div class="preview-log" id="previewLog" style="display:none">
+                    <div class="preview-query-head">
+                        <strong>代表条码查询进度</strong>
+                        <span class="aurora-live-badge" id="previewQueriesBadge">0 / 0</span>
+                    </div>
+                    <div class="preview-query-table-wrap" id="previewQueries">
+                        <table class="preview-query-table">
+                            <thead><tr><th>#</th><th>代表条码</th><th>查询通道</th><th>实时状态</th></tr></thead>
+                            <tbody id="previewQueriesRows"></tbody>
+                        </table>
+                    </div>
+                </div>
             </div>
 
             <div class="card transfer-summary-card" id="transferSummaryCard" hidden>
@@ -184,7 +208,6 @@
                         <button type="button" class="aurora-live-action" id="transferSummaryToggle" onclick="toggleTransferSummary()" aria-expanded="true" aria-controls="summaryBox" title="收起汇总明细">收起</button>
                     </div>
                 </div>
-                <div class="summary-log" id="transferSummaryLog" style="display:none"><div class="dim">点击「汇总预览」后此处实时显示查询进度</div></div>
                 <div class="summary" id="summaryBox"></div>
             </div>
 
@@ -755,10 +778,11 @@ async function loadDistributorHistory() {
     return serverList.length ? serverList : cached;
 }
 
-function saveDistributorHistory(value) {
+async function saveDistributorHistory(value) {
     const name = String(value || '').trim();
     if (!name || name === OWN_DEALER_NAME) return;
-    const rows = [name, ...loadDistributorHistory().filter(x => x !== name)].slice(0, 30);
+    const history = await loadDistributorHistory();
+    const rows = [name, ...history.filter(x => x !== name)].slice(0, 30);
     localStorage.setItem('transferDistributorHistory', JSON.stringify(rows));
     fetch('/api/distributor-history', {
         method: 'POST',
@@ -768,12 +792,13 @@ function saveDistributorHistory(value) {
     renderDistributorHistory();
 }
 
-function mergeDistributorHistory(values) {
+async function mergeDistributorHistory(values) {
     const incoming = Array.from(new Set((values || [])
         .map(x => String(x || '').trim())
         .filter(x => x && x !== OWN_DEALER_NAME)));
     if (!incoming.length) return;
-    const rows = [...incoming, ...loadDistributorHistory().filter(x => !incoming.includes(x))].slice(0, 30);
+    const history = await loadDistributorHistory();
+    const rows = [...incoming, ...history.filter(x => !incoming.includes(x))].slice(0, 30);
     localStorage.setItem('transferDistributorHistory', JSON.stringify(rows));
     renderDistributorHistory();
 }
@@ -831,7 +856,7 @@ async function deleteDistributorHistory(name) {
         return;
     }
     if (!confirm(`确定删除目标分销商历史：${name}？`)) return;
-    const localRows = loadDistributorHistory().filter(row => row !== name);
+    const localRows = (await loadDistributorHistory()).filter(row => row !== name);
     localStorage.setItem('transferDistributorHistory', JSON.stringify(localRows));
     renderDistributorHistory(true);
     const data = await fetch('/api/distributor-history', {
@@ -909,8 +934,8 @@ async function importDistributorHistory() {
     appendLog(`已导入目标分销商 ${rows.length} 个`, 'success');
 }
 
-function handleDistributorKeydown(event) {
-    const rows = filteredDistributorHistory();
+async function handleDistributorKeydown(event) {
+    const rows = await filteredDistributorHistory();
     if (!rows.length || !['ArrowDown', 'ArrowUp', 'Enter', 'Escape'].includes(event.key)) return;
     if (event.key === 'Escape') {
         const dropdown = document.getElementById('distributorHistoryDropdown');
@@ -1290,11 +1315,7 @@ async function previewTransfer() {
     submitBtn.disabled = true;
     lastSummary = null;
     if (previewTimer) clearInterval(previewTimer);
-    const summaryLog = document.getElementById('transferSummaryLog');
-    if (summaryLog) {
-        summaryLog.hidden = false;
-        summaryLog.innerHTML = '<div class="info">[预览中] 启动汇总查询…</div>';
-    }
+    hidePreviewLog();
     appendLog('开始汇总预览，缺少条码匹配前缀时会自动查询代表条码...', 'info');
     let data = null;
     try {
@@ -1345,7 +1366,7 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
     if (data.job_id) sessionStorage.setItem(`crm_summary_job_id_${slotId}`, data.job_id);
     if (slotId !== currentTransferSlot) return;
     if (data.job_id) currentSummaryJobId = data.job_id;
-    renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时');
+    renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true);
     if (data.summary) renderSummary(data.summary);
     if (!data.done) return;
 
@@ -1355,15 +1376,9 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
     previewBtn.disabled = false;
     previewBtn.textContent = '汇总预览';
 
-    // Query is done. Hide both live log boxes — the form-area previewLog
-    // (the user no longer needs the running indicator next to the buttons)
-    // and the in-card transferSummaryLog (already-superseded by the
-    // product-detail list that just rendered). The bottom
-    // 移库实时记录 card still keeps the full history.
-    const previewLog = document.getElementById('previewLog');
-    if (previewLog) previewLog.style.display = 'none';
-    const summaryLog = document.getElementById('transferSummaryLog');
-    if (summaryLog) summaryLog.style.display = 'none';
+    // The unmatched-barcode lookup is done; replace its temporary progress
+    // with the product summary rendered above.
+    hidePreviewLog();
 
     lastSummary = data.summary_success ? data.summary : null;
     document.getElementById('submitBtn').disabled = !data.summary_success;
@@ -1438,34 +1453,22 @@ function appendLog(message, level='dim', recordId='') {
     if (window.globalLogAppend) window.globalLogAppend(message, level);
 }
 
-function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='') {
+function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='', showPreviewQuery=false) {
     const box = document.getElementById('transferLog');
     const previewLog = document.getElementById('previewLog');
-    const summaryLog = document.getElementById('transferSummaryLog');
     if ((!logs || !logs.length) && !jobData) return;
     const durationLine = jobDurationLine(jobData, runningLabel, doneLabel);
-    const key = JSON.stringify({logs: logs || [], durationLine});
+    const previewEntries = Object.entries((jobData && jobData.barcode_states) || {});
+    const key = JSON.stringify({logs: logs || [], durationLine, previewEntries: showPreviewQuery ? previewEntries : []});
     if (key === lastRenderedLogKey) return;
     lastRenderedLogKey = key;
     const lines = (logs || []).map(row => `<div class="${escapeHtml(row.level || 'dim')}">[${escapeHtml(row.time || '')}] ${escapeHtml(row.message || '')}</div>`).join('') + durationLine;
     box.innerHTML = lines;
     box.scrollTop = box.scrollHeight;
     if (previewLog) {
-        // The form-area log mirrors the same lines but stays visible the
-        // whole time. Show it the moment a query starts so the user sees
-        // progress next to the 汇总预览 button they just clicked.
-        previewLog.style.display = 'block';
-        previewLog.innerHTML = lines;
-        previewLog.scrollTop = previewLog.scrollHeight;
+        const showLookupProgress = showPreviewQuery && previewEntries.length && !(jobData && jobData.done);
+        previewLog.style.display = showLookupProgress ? 'block' : 'none';
     }
-    if (summaryLog) {
-        summaryLog.style.display = 'block';
-        summaryLog.innerHTML = lines;
-        summaryLog.scrollTop = summaryLog.scrollHeight;
-    }
-    // Per-barcode live table — populates from jobData.barcode_states when
-    // the polling response carries it. One row per barcode, with channel
-    // and the running state (pending / querying / ok / failed).
     renderPreviewQueries(jobData && jobData.barcode_states ? jobData.barcode_states : null);
     if (recordId) updateTransferRealtimeRecord(recordId, jobData || {}, logs || []);
     if (logs && logs.length && window.globalLogReplaceRows) window.globalLogReplaceRows(logs);
@@ -1493,7 +1496,7 @@ function renderPreviewQueries(barcodeStates) {
         .sort((a, b) => (a.started_at || 0) - (b.started_at || 0));
     tbody.innerHTML = sorted.map((row, i) => {
         const cls = stateClass[row.state] || 'dim';
-        const label = stateLabel[row.state] || row.state || '?';
+        const label = row.message || stateLabel[row.state] || row.state || '?';
         return `<tr class="${cls}"><td>${i + 1}</td><td><code>${escapeHtml(row.barcode)}</code></td><td>${escapeHtml(channelFor(row))}</td><td>${escapeHtml(label)}</td></tr>`;
     }).join('');
 }
@@ -1591,7 +1594,7 @@ async function restoreSummaryStatus() {
         sessionStorage.setItem(`crm_summary_job_id_${slotId}`, data.job_id);
     }
 
-    renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时');
+    renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true);
     if (data.summary) renderSummary(data.summary);
 
     const previewBtn = document.getElementById('previewBtn');
@@ -1728,7 +1731,7 @@ async function loadQueriedDealerHistory() {
     const data = await fetch('/api/distributor-history').then(r => r.json()).catch(() => null);
     if (data && data.success) {
         canDeleteDistributorHistory = !!data.can_delete;
-        mergeDistributorHistory(data.dealers || []);
+        await mergeDistributorHistory(data.dealers || []);
     }
 }
 
