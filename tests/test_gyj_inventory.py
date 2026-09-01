@@ -64,15 +64,19 @@ class GYJInventoryParserTests(unittest.TestCase):
 
 
 class FakeInventoryPage:
-    def __init__(self, reports):
+    def __init__(self, reports, delayed_pagination=False):
         self.reports = reports
+        self.delayed_pagination = delayed_pagination
         self.visited = []
         self.filled = []
         self.selected = []
+        self.waits = []
         self.queries = 0
         self.expanded = 0
         self.current_url = None
         self.page_index = 0
+        self.pending_page = False
+        self.pending_phase = 0
 
     def goto(self, url, **_kwargs):
         self.visited.append(url)
@@ -92,10 +96,26 @@ class FakeInventoryPage:
         self.queries += 1
 
     def read_table_page(self, _report):
-        return self.reports[self.current_url][self.page_index]
+        snapshot = dict(self.reports[self.current_url][self.page_index])
+        snapshot.setdefault("page_number", self.page_index + 1)
+        snapshot["loading"] = self.pending_page and self.pending_phase == 0
+        return snapshot
 
     def next_page(self):
-        self.page_index += 1
+        if not self.delayed_pagination:
+            self.page_index += 1
+            return
+        self.pending_page = True
+        self.pending_phase = 0
+
+    def wait_for_timeout(self, milliseconds):
+        self.waits.append(milliseconds)
+        if not self.pending_page:
+            return
+        self.pending_phase += 1
+        if self.pending_phase >= 2:
+            self.page_index += 1
+            self.pending_page = False
 
 
 def stock_page(rows, total, has_next=False):
@@ -108,7 +128,12 @@ def stock_page(rows, total, has_next=False):
 
 
 def material_page(rows, total, has_next=False):
-    return {"rows": rows, "total": total, "has_next": has_next}
+    return {
+        "headers": ["条码", "名称", "规格", "型号", "类别", "单位", "状态"],
+        "rows": rows,
+        "total": total,
+        "has_next": has_next,
+    }
 
 
 def serial_page(rows, total, has_next=False):
@@ -134,6 +159,7 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertEqual(result, "10000000000000000000000000000.3")
         self.assertEqual(page.visited, [GYJ_STOCK_URL])
         self.assertEqual(page.filled, [("请输入条码、名称、助记码、规格、型号等信息", "A1")])
+        self.assertFalse(any(label == "仓库" for label, _value in page.filled))
         self.assertFalse(any(label == "仓库" for label, _value in page.selected))
 
     def test_read_stock_totals_aggregates_all_pages_without_focused_filter(self):
@@ -175,6 +201,59 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertNotIn("OFF", repr(result))
         self.assertNotIn("27", repr(result))
 
+    def test_rejects_reordered_later_headers_without_leaking_price_data(self):
+        second = stock_page(
+            [["A1", "甲", "", "", "", "个", "3", "999", "2997"]], 2
+        )
+        second["headers"] = [
+            "条码", "名称", "规格", "型号", "类别", "单位", "库存", "成本价", "库存金额",
+        ]
+        page = FakeInventoryPage({
+            GYJ_STOCK_URL: [
+                stock_page([["A1", "甲", "", "", "", "个", "998", "1", "998"]], 2, True),
+                second,
+            ]
+        })
+
+        with self.assertRaises(GYJInventoryReadError) as caught:
+            GYJInventoryReader(page).read_stock_totals()
+
+        message = repr(caught.exception)
+        self.assertIn("表头", message)
+        self.assertNotIn("成本价", message)
+        self.assertNotIn("库存金额", message)
+        self.assertNotIn("999", message)
+        self.assertNotIn("2997", message)
+
+    def test_material_rows_require_headers_name_and_boolean_badge_observation(self):
+        cases = []
+        missing_header = material_page(
+            [["A1", "甲", "", "", "", "个", "启用"]], 1
+        )
+        missing_header["headers"] = ["条码", "规格", "型号", "类别", "单位", "状态"]
+        missing_header["serial_badges"] = [False]
+        cases.append(missing_header)
+        cases.append(material_page([
+            {"barcode": "A1", "name": "", "serial_badge": False, "enabled": True},
+        ], 1))
+        cases.append(material_page([
+            {"barcode": "A1", "name": "序列商品 序", "enabled": True},
+        ], 1))
+        non_boolean = material_page(
+            [["A1", "序列商品 序", "", "", "", "个", "启用"]], 1
+        )
+        non_boolean["serial_badges"] = [None]
+        cases.append(non_boolean)
+
+        for snapshot in cases:
+            with self.subTest(snapshot=snapshot):
+                page = FakeInventoryPage({
+                    GYJ_MATERIAL_URL: [snapshot],
+                    GYJ_STOCK_URL: [stock_page([], 0)],
+                })
+                with self.assertRaises(GYJInventoryReadError):
+                    GYJInventoryReader(page).load_catalog()
+
     def test_material_name_only_removes_a_confirmed_serial_badge(self):
         page = FakeInventoryPage({
             GYJ_MATERIAL_URL: [{
@@ -209,8 +288,22 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertEqual(page.expanded, 1)
         self.assertIn(("商品", "A1"), page.filled)
         self.assertIn(("已出库", "否"), page.selected)
+        self.assertFalse(any(label == "仓库" for label, _value in page.filled))
         self.assertFalse(any(label == "仓库" for label, _value in page.selected))
         self.assertNotIn("10", repr(result))
+
+    def test_waits_for_loading_and_stale_rows_before_collecting_next_page(self):
+        page = FakeInventoryPage({
+            GYJ_STOCK_URL: [
+                stock_page([["A1", "甲", "", "", "", "个", "9", "1", "9"]], 2, True),
+                stock_page([["B2", "乙", "", "", "", "个", "8", "2", "16"]], 2),
+            ]
+        }, delayed_pagination=True)
+
+        result = GYJInventoryReader(page).read_stock_totals()
+
+        self.assertEqual(result, {"A1": "1", "B2": "2"})
+        self.assertGreaterEqual(len(page.waits), 2)
 
     def test_lookup_serial_filters_by_serial_and_returns_none_or_one_row(self):
         page = FakeInventoryPage({

@@ -27,6 +27,10 @@ def _header_indexes(headers):
     return {"".join(str(header or "").split()): index for index, header in enumerate(headers or [])}
 
 
+def _normalized_headers(headers):
+    return tuple("".join(str(header or "").split()) for header in headers or [])
+
+
 def _cell(row, indexes, header):
     index = indexes.get(header)
     if index is None or index >= len(row):
@@ -68,19 +72,26 @@ def parse_stock_rows(headers, rows):
 def parse_material_rows(rows):
     materials = {}
     for row in rows or []:
-        barcode = _text(row.get("barcode"))
-        if not barcode or row.get("enabled") is False:
+        if not isinstance(row, dict):
+            raise GYJInventoryReadError("GYJ 商品信息行格式无效")
+        if _is_total_row(row):
             continue
-        if "serial_badge" not in row:
+        barcode = _text(row.get("barcode"))
+        name = _text(row.get("name"))
+        if not barcode or not name:
+            raise GYJInventoryReadError("GYJ 商品信息缺少条码或名称")
+        if not isinstance(row.get("serial_badge"), bool):
             raise GYJInventoryReadError(f"GYJ 商品缺少序列号设置：{barcode}")
+        if row.get("enabled") is False:
+            continue
         materials[barcode] = {
             "barcode": barcode,
-            "name": _text(row.get("name")),
+            "name": name,
             "spec": _text(row.get("spec")),
             "model": _text(row.get("model")),
             "category": _text(row.get("category")),
             "unit": _text(row.get("unit")),
-            "has_serial": row.get("serial_badge") is True,
+            "has_serial": row["serial_badge"],
         }
     return materials
 
@@ -228,18 +239,25 @@ class GYJInventoryReader:
                     .map(row => {
                     const cells = Array.from(row.querySelectorAll('td'));
                     const nameCell = nameIndex === undefined ? null : cells[nameIndex];
-                    serialBadges.push(!!nameCell && Array.from(nameCell.querySelectorAll('*')).some(node =>
-                        visible(node) && (node.innerText || node.textContent || '').trim() === '序')));
+                    serialBadges.push(nameCell ? Array.from(nameCell.querySelectorAll('*')).some(node =>
+                        visible(node) && (node.innerText || node.textContent || '').trim() === '序') : null);
                     return cells.map(cell => (cell.innerText || cell.textContent || '').replace(/\\s+/g, ' ').trim());
                 });
                 const totalNode = Array.from(document.querySelectorAll('.ant-pagination-total-text'))
                     .filter(visible).pop();
                 const next = Array.from(document.querySelectorAll('.ant-pagination-next')).filter(visible).pop();
+                const activePage = Array.from(document.querySelectorAll('.ant-pagination-item-active'))
+                    .filter(visible).pop();
+                const loading = Array.from(document.querySelectorAll(
+                    '.ant-spin-spinning, .ant-table-loading, [aria-busy="true"]'
+                )).some(visible);
                 return {
                     headers,
                     rows,
                     serial_badges: serialBadges,
                     total: totalNode ? (totalNode.innerText || totalNode.textContent || '') : null,
+                    page_number: activePage ? (activePage.innerText || activePage.textContent || '').trim() : null,
+                    loading,
                     has_next: !!(next && !next.classList.contains('ant-pagination-disabled') &&
                         next.getAttribute('aria-disabled') !== 'true')
                 };
@@ -260,7 +278,31 @@ class GYJInventoryReader:
         if next_button.count() != 1:
             raise GYJInventoryReadError("GYJ 报表分页下一页不可用")
         next_button.click()
-        self.browser_page.wait_for_timeout(300)
+
+    @staticmethod
+    def _page_marker(snapshot):
+        page_number = _text(snapshot.get("page_number"))
+        rows = snapshot.get("rows") or []
+        row_signature = tuple(
+            tuple(_text(value) for value in (row.values() if isinstance(row, dict) else row))
+            for row in rows
+        )
+        return page_number, row_signature
+
+    def _wait_for_page_change(self, report, previous):
+        previous_page, previous_rows = self._page_marker(previous)
+        waiter = self.page if hasattr(self.page, "wait_for_timeout") else self.browser_page
+        for _attempt in range(150):
+            snapshot = self._read_table_page(report)
+            page_number, rows = self._page_marker(snapshot)
+            page_changed = bool(
+                previous_page and page_number and page_number != previous_page
+            )
+            rows_changed = rows != previous_rows
+            if not snapshot.get("loading") and (page_changed or rows_changed):
+                return snapshot
+            waiter.wait_for_timeout(100)
+        raise GYJInventoryReadError("GYJ 报表分页未在限时内更新")
 
     @staticmethod
     def _total_count(value):
@@ -275,14 +317,21 @@ class GYJInventoryReader:
 
     def _collect_pages(self, report):
         headers = None
+        normalized_headers = None
         rows = []
         badges = []
         expected_total = None
+        snapshot = self._read_table_page(report)
         for _page_number in range(1, 1001):
-            snapshot = self._read_table_page(report)
             page_headers = list(snapshot.get("headers") or [])
-            if headers is None and page_headers:
+            page_normalized_headers = _normalized_headers(page_headers)
+            if not page_normalized_headers:
+                raise GYJInventoryReadError("GYJ 报表缺少表头")
+            if headers is None:
                 headers = page_headers
+                normalized_headers = page_normalized_headers
+            elif page_normalized_headers != normalized_headers:
+                raise GYJInventoryReadError("GYJ 报表分页表头发生变化")
             page_rows = list(snapshot.get("rows") or [])
             page_badges = list(snapshot.get("serial_badges") or [])
             for index, row in enumerate(page_rows):
@@ -298,6 +347,7 @@ class GYJInventoryReader:
             if not snapshot.get("has_next"):
                 break
             self._next_page()
+            snapshot = self._wait_for_page_change(report, snapshot)
         else:
             raise GYJInventoryReadError("GYJ 报表分页超过安全上限")
         if expected_total is not None and expected_total != len(rows):
@@ -308,9 +358,7 @@ class GYJInventoryReader:
 
     @staticmethod
     def _material_page_rows(headers, rows, badges):
-        if not rows or isinstance(rows[0], dict):
-            return rows
-        normalized = ["".join(str(header or "").split()) for header in headers]
+        normalized = list(_normalized_headers(headers))
 
         def index_of(*names):
             for name in names:
@@ -327,6 +375,19 @@ class GYJInventoryReader:
             "unit": index_of("单位", "基本单位"),
             "status": index_of("状态", "启用状态"),
         }
+        if indexes["barcode"] is None or indexes["name"] is None or indexes["status"] is None:
+            raise GYJInventoryReadError("GYJ 商品信息缺少必需表头")
+        if not rows:
+            return []
+        if isinstance(rows[0], dict):
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise GYJInventoryReadError("GYJ 商品信息行格式无效")
+                if not _text(row.get("barcode")) or not _text(row.get("name")):
+                    raise GYJInventoryReadError("GYJ 商品信息缺少条码或名称")
+                if not isinstance(row.get("serial_badge"), bool):
+                    raise GYJInventoryReadError("GYJ 商品缺少序列号设置")
+            return rows
         parsed = []
         for position, row in enumerate(rows):
             def value(field):
@@ -334,7 +395,11 @@ class GYJInventoryReader:
                 return _text(row[index]) if index is not None and index < len(row) else ""
 
             status = value("status")
-            has_serial = badges[position] is True
+            if position >= len(badges) or not isinstance(badges[position], bool):
+                raise GYJInventoryReadError("GYJ 商品缺少序列号设置")
+            if not value("barcode") or not value("name"):
+                raise GYJInventoryReadError("GYJ 商品信息缺少条码或名称")
+            has_serial = badges[position]
             name = value("name")
             if has_serial:
                 name = name.removesuffix(" 序").removesuffix("序").rstrip()
