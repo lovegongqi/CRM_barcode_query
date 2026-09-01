@@ -8849,6 +8849,20 @@ def gyj_credentials_owner_key():
     return ""
 
 
+def gyj_worker_owner_key(owner=""):
+    owner = str(owner or "").strip()
+    if not owner:
+        return gyj_credentials_owner_key()
+    for row in load_accounts():
+        if owner in {str(row.get("id") or ""), str(row.get("username") or "")}:
+            return str(row.get("username") or "").strip()
+    return owner
+
+
+def gyj_worker_for_owner(owner=""):
+    return gyj_worker.get(gyj_worker_owner_key(owner))
+
+
 def load_gyj_credentials_store():
     with gyj_credentials_lock:
         try:
@@ -10182,7 +10196,7 @@ def api_gyj_login():
         return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
     if not save_remembered_gyj_credentials(remember, username, password):
         return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
-    worker = gyj_worker.get(gyj_credentials_owner_key())
+    worker = gyj_worker_for_owner()
     ok, message = worker.login_step1(username, password)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10196,7 +10210,7 @@ def api_gyj_login():
 def api_gyj_login_captcha():
     data = request.get_json(silent=True) or {}
     captcha = str(data.get("captcha") or "").strip()
-    worker = gyj_worker.get(gyj_credentials_owner_key())
+    worker = gyj_worker_for_owner()
     ok, message = worker.login_step2(captcha)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10208,14 +10222,14 @@ def api_gyj_login_captcha():
 @app.route("/api/gyj/captcha-preview", methods=["GET"])
 @app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
 def api_gyj_captcha_preview():
-    worker = gyj_worker.get(gyj_credentials_owner_key())
+    worker = gyj_worker_for_owner()
     return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
 
 
 @app.route("/api/gyj/login-status", methods=["GET"])
 @app.route("/api/inbound/gyj/login-status", methods=["GET"])
 def api_gyj_login_status():
-    worker = gyj_worker.get(gyj_credentials_owner_key())
+    worker = gyj_worker_for_owner()
     ok, message = worker.check_login_status()
     return jsonify({
         'success': bool(ok), 'logged_in': bool(ok), 'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
@@ -10339,7 +10353,7 @@ def api_inbound_gyj_start():
     except GYJInboundError as error:
         return jsonify({'success': False, 'error': str(error)}), 409
 
-    worker = gyj_worker.get(owner)
+    worker = gyj_worker_for_owner(owner)
     logged_in, message = worker.check_login_status()
     if not logged_in:
         return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
