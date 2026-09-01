@@ -53,6 +53,25 @@ class InventoryStoreTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(event, ("task_created", "管理员"))
 
+    def _assert_catalog_rejected_without_records(self, catalog):
+        store = InventoryStore(self.db_path)
+        with self.assertRaisesRegex(ValueError, "catalog item must contain exactly the allowed keys"):
+            store.create_task("admin", "管理员", catalog)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM inventory_tasks").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM inventory_items").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM inventory_audit_events").fetchone()[0], 0)
+
+    def test_catalog_missing_key_is_rejected_without_persisting_records(self):
+        product = self.catalog()[0].copy()
+        del product["unit"]
+        self._assert_catalog_rejected_without_records([product])
+
+    def test_catalog_extra_price_key_is_rejected_without_persisting_records(self):
+        product = self.catalog()[0].copy()
+        product["cost_price"] = "100"
+        self._assert_catalog_rejected_without_records([product])
+
     def test_quantity_helpers_do_not_use_binary_float_rounding(self):
         self.assertEqual(normalize_quantity("10.00"), "10")
         self.assertEqual(normalize_quantity("0.125"), "0.125")

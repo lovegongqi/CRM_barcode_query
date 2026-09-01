@@ -7,6 +7,11 @@ import sqlite3
 import uuid
 
 
+_CATALOG_KEYS = frozenset(
+    {"barcode", "name", "spec", "model", "category", "unit", "has_serial", "initial_stock"}
+)
+
+
 class InventoryConflict(RuntimeError):
     pass
 
@@ -220,6 +225,9 @@ class InventoryStore:
         return dict(row) if row is not None else None
 
     def create_task(self, owner, actor, catalog):
+        for product in catalog:
+            if not isinstance(product, dict) or set(product) != _CATALOG_KEYS:
+                raise ValueError("catalog item must contain exactly the allowed keys")
         task_id = uuid.uuid4().hex
         timestamp = self._now_text()
         connection = self.connect()
