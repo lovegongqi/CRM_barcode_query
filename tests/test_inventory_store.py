@@ -269,3 +269,35 @@ class InventoryStoreTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_expired'",
                 (task["task_id"],),
             ).fetchone()[0], 1)
+
+    def test_assertion_waiting_for_write_lock_rechecks_expiry_after_acquiring_it(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        current[0] += timedelta(seconds=119)
+        blocker = store.connect()
+        blocker.execute("BEGIN IMMEDIATE")
+        result = []
+
+        def assert_lock():
+            try:
+                store.assert_item_lock(task["task_id"], "A1", "device-a", "counting")
+                result.append("accepted")
+            except InventoryConflict:
+                result.append("conflict")
+
+        worker = threading.Thread(target=assert_lock)
+        worker.start()
+        # The immediate transaction is blocked here; advance beyond the lease before releasing it.
+        current[0] += timedelta(seconds=2)
+        blocker.commit()
+        blocker.close()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result, ["conflict"])
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_expired'",
+                (task["task_id"],),
+            ).fetchone()[0], 1)

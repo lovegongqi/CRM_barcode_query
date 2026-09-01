@@ -456,10 +456,10 @@ class InventoryStore:
             connection.close()
 
     def assert_item_lock(self, task_id, barcode, device_id, phase):
-        now = self._now_text()
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            now = self._now_text()
             self._expire_locks(connection, task_id, now)
             lock = connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
