@@ -38,6 +38,7 @@ from gyj_inbound import (
     GYJ_PURCHASE_IN_URL,
     build_gyj_purchase_lines,
 )
+from gyj_inventory import GYJInventoryReadError, GYJInventoryReader
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -3887,6 +3888,71 @@ class GYJSession:
                 self.logged_in = False
                 return False, str(error)
 
+    def load_inventory_catalog(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).load_catalog()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_total_stock(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock_totals(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_stock_totals()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_serials(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_unshipped_serials(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def lookup_inventory_serial(self, serial):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).lookup_serial(serial)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
     def save_purchase_inbound(
         self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
     ):
@@ -3976,6 +4042,21 @@ class GYJWorker:
 
     def check_login_status(self):
         return self._call("check_login_status")
+
+    def load_inventory_catalog(self):
+        return self._call("load_inventory_catalog")
+
+    def read_inventory_stock(self, barcode):
+        return self._call("read_inventory_stock", barcode)
+
+    def read_inventory_stock_totals(self):
+        return self._call("read_inventory_stock_totals")
+
+    def read_inventory_serials(self, barcode):
+        return self._call("read_inventory_serials", barcode)
+
+    def lookup_inventory_serial(self, serial):
+        return self._call("lookup_inventory_serial", serial)
 
     def save_purchase_inbound(
         self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
@@ -8880,6 +8961,8 @@ def required_permission_for_path(path):
         return "crm"
     if path == "/transfer" or path.startswith("/api/transfer") or path.startswith("/api/crm/transfer"):
         return "transfer"
+    if path.startswith("/api/gyj"):
+        return "account-self"
     if path == "/inbound" or path.startswith("/api/inbound"):
         return "inbound"
     if path.startswith("/api/distributor-history"):
@@ -10072,8 +10155,9 @@ def api_inbound_export():
     )
 
 
+@app.route("/api/gyj/credentials", methods=["GET", "POST"])
 @app.route("/api/inbound/gyj/credentials", methods=["GET", "POST"])
-def api_inbound_gyj_credentials():
+def api_gyj_credentials():
     if request.method == "GET":
         return jsonify({"success": True, **get_remembered_gyj_credentials()})
     data = request.get_json(silent=True) or {}
@@ -10087,8 +10171,9 @@ def api_inbound_gyj_credentials():
     return jsonify({"success": True, "remember": remember})
 
 
+@app.route("/api/gyj/login", methods=["POST"])
 @app.route("/api/inbound/gyj/login", methods=["POST"])
-def api_inbound_gyj_login():
+def api_gyj_login():
     data = request.get_json(silent=True) or {}
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
@@ -10097,7 +10182,7 @@ def api_inbound_gyj_login():
         return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
     if not save_remembered_gyj_credentials(remember, username, password):
         return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
-    worker = gyj_worker.get(_current_inbound_owner())
+    worker = gyj_worker.get(gyj_credentials_owner_key())
     ok, message = worker.login_step1(username, password)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10106,11 +10191,12 @@ def api_inbound_gyj_login():
     }), (200 if ok else 409)
 
 
+@app.route("/api/gyj/login/captcha", methods=["POST"])
 @app.route("/api/inbound/gyj/login/captcha", methods=["POST"])
-def api_inbound_gyj_login_captcha():
+def api_gyj_login_captcha():
     data = request.get_json(silent=True) or {}
     captcha = str(data.get("captcha") or "").strip()
-    worker = gyj_worker.get(_current_inbound_owner())
+    worker = gyj_worker.get(gyj_credentials_owner_key())
     ok, message = worker.login_step2(captcha)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10119,15 +10205,17 @@ def api_inbound_gyj_login_captcha():
     }), (200 if ok else 409)
 
 
+@app.route("/api/gyj/captcha-preview", methods=["GET"])
 @app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
-def api_inbound_gyj_captcha_preview():
-    worker = gyj_worker.get(_current_inbound_owner())
+def api_gyj_captcha_preview():
+    worker = gyj_worker.get(gyj_credentials_owner_key())
     return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
 
 
+@app.route("/api/gyj/login-status", methods=["GET"])
 @app.route("/api/inbound/gyj/login-status", methods=["GET"])
-def api_inbound_gyj_login_status():
-    worker = gyj_worker.get(_current_inbound_owner())
+def api_gyj_login_status():
+    worker = gyj_worker.get(gyj_credentials_owner_key())
     ok, message = worker.check_login_status()
     return jsonify({
         'success': bool(ok), 'logged_in': bool(ok), 'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),

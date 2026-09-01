@@ -745,6 +745,90 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
         self.assertEqual(worker.owner, "admin")
 
+    def _assert_gyj_alias_equivalent(self, shared, inbound):
+        self.assertEqual(shared.status_code, inbound.status_code)
+        self.assertEqual(shared.content_type, inbound.content_type)
+        self.assertEqual(shared.data, inbound.data)
+
+    def test_shared_gyj_credentials_get_and_post_match_inbound_aliases(self):
+        client = self._login("admin", "88293529")
+        remembered = {"remember": True, "username": "gyj-user"}
+        with mock.patch.object(
+            app_module, "get_remembered_gyj_credentials", return_value=remembered
+        ):
+            shared_get = client.get("/api/gyj/credentials")
+            inbound_get = client.get("/api/inbound/gyj/credentials")
+        self._assert_gyj_alias_equivalent(shared_get, inbound_get)
+
+        payload = {"remember": False, "username": "", "password": ""}
+        with mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared_post = client.post("/api/gyj/credentials", json=payload)
+            inbound_post = client.post("/api/inbound/gyj/credentials", json=payload)
+        self._assert_gyj_alias_equivalent(shared_post, inbound_post)
+
+    def test_shared_gyj_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        payload = {"username": "gyj-user", "password": "secret", "remember": False}
+        with mock.patch.object(app_module, "gyj_worker", worker), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared = client.post("/api/gyj/login", json=payload)
+            inbound = client.post("/api/inbound/gyj/login", json=payload)
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.post("/api/gyj/login/captcha", json={"captcha": "1234"})
+            inbound = client.post("/api/inbound/gyj/login/captcha", json={"captcha": "1234"})
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_preview_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/captcha-preview")
+            inbound = client.get("/api/inbound/gyj/captcha-preview")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_login_status_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_routes_require_tool_login(self):
+        anonymous = app_module.app.test_client()
+        requests = [
+            ("get", "/api/gyj/credentials", None),
+            ("post", "/api/gyj/credentials", {}),
+            ("post", "/api/gyj/login", {}),
+            ("post", "/api/gyj/login/captcha", {}),
+            ("get", "/api/gyj/captcha-preview", None),
+            ("get", "/api/gyj/login-status", None),
+        ]
+        for method, path, payload in requests:
+            with self.subTest(path=path, method=method):
+                kwargs = {"json": payload} if payload is not None else {}
+                response = getattr(anonymous, method)(path, **kwargs)
+                self.assertEqual(response.status_code, 401)
+
+    def test_shared_gyj_routes_use_account_self_instead_of_inbound_permission(self):
+        client = self._login("transfer-only", "transfer-pass")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+
+        self.assertEqual(shared.status_code, 200)
+        self.assertEqual(inbound.status_code, 403)
+
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):
         client = self._login("admin", "88293529")
         with mock.patch.object(
