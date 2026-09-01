@@ -279,8 +279,11 @@ class InventoryStoreTests(unittest.TestCase):
         blocker = store.connect()
         blocker.execute("BEGIN IMMEDIATE")
         result = []
+        assertion_ready = threading.Event()
+        version_before = store.get_task_snapshot("admin", task["task_id"])["version"]
 
         def assert_lock():
+            assertion_ready.set()
             try:
                 store.assert_item_lock(task["task_id"], "A1", "device-a", "counting")
                 result.append("accepted")
@@ -289,7 +292,8 @@ class InventoryStoreTests(unittest.TestCase):
 
         worker = threading.Thread(target=assert_lock)
         worker.start()
-        # The immediate transaction is blocked here; advance beyond the lease before releasing it.
+        self.assertTrue(assertion_ready.wait(1))
+        # The worker is about to attempt BEGIN IMMEDIATE while the blocker remains open.
         current[0] += timedelta(seconds=2)
         blocker.commit()
         blocker.close()
@@ -297,6 +301,9 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(result, ["conflict"])
         with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT version FROM inventory_tasks WHERE task_id = ?", (task["task_id"],)
+            ).fetchone()[0], version_before + 1)
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_expired'",
                 (task["task_id"],),

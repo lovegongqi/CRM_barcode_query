@@ -41,3 +41,10 @@
 - Added a deterministic contention regression that advances the clock past expiry while the assertion is blocked; it verifies `InventoryConflict` plus persisted expiry audit/version behavior.
 - Focused store suite: `python3 -m unittest tests.test_inventory_store -v` — 21 passed.
 - Full suite: `python3 -m unittest discover -s tests -p 'test*.py' -v` — 281 passed.
+
+## Review fixes (round 3)
+
+- Made the assertion contention regression explicitly synchronize the worker immediately before `assert_item_lock` while the SQLite blocker remains open.
+- The test advances the injected clock only after that synchronization, releases the blocker, and verifies both `InventoryConflict` and the persisted task version increment.
+- Focused regression: 1 passed; focused store suite: 21 passed.
+- Full suite: `python3 -m unittest discover -s tests -p 'test*.py' -v` — 281 passed.
