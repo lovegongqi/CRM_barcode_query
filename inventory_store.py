@@ -218,7 +218,11 @@ class InventoryStore:
             )
 
     def _now_text(self):
-        return self.now().isoformat(timespec="seconds")
+        return self._timestamp_text(self.now())
+
+    @staticmethod
+    def _timestamp_text(value):
+        return value.isoformat(timespec="microseconds" if value.microsecond else "seconds")
 
     @staticmethod
     def _row_dict(row):
@@ -367,12 +371,12 @@ class InventoryStore:
         return len(expired)
 
     def claim_item(self, task_id, barcode, device_id, actor, phase):
-        now_dt = self.now()
-        now = now_dt.isoformat(timespec="seconds")
-        expires = (now_dt + timedelta(seconds=120)).isoformat(timespec="seconds")
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            now_dt = self.now()
+            now = self._timestamp_text(now_dt)
+            expires = self._timestamp_text(now_dt + timedelta(seconds=120))
             self._expire_locks(connection, task_id, now)
             item = connection.execute(
                 "SELECT 1 FROM inventory_items WHERE task_id = ? AND barcode = ?",
@@ -421,12 +425,12 @@ class InventoryStore:
             connection.close()
 
     def heartbeat_lock(self, task_id, barcode, device_id):
-        now_dt = self.now()
-        now = now_dt.isoformat(timespec="seconds")
-        expires = (now_dt + timedelta(seconds=120)).isoformat(timespec="seconds")
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            now_dt = self.now()
+            now = self._timestamp_text(now_dt)
+            expires = self._timestamp_text(now_dt + timedelta(seconds=120))
             self._expire_locks(connection, task_id, now)
             lock = connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
@@ -464,6 +468,7 @@ class InventoryStore:
                 self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "assertion_failed", now)
                 connection.commit()
                 raise InventoryConflict("设备未持有当前阶段的商品锁")
+            connection.commit()
         except Exception:
             connection.rollback()
             raise

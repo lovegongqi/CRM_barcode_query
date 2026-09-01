@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 
@@ -142,7 +143,7 @@ class InventoryStoreTests(unittest.TestCase):
         store = InventoryStore(self.db_path, now=lambda: current[0])
         task = store.create_task("admin", "管理员", self.catalog())
         first = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
-        self.assertEqual(first["expires_at"], "2026-09-01T10:02:00")
+        self.assertEqual(first["expires_at"], "2026-09-01T10:02:00.500000")
         version_after_claim = store.get_task_snapshot("admin", task["task_id"])["version"]
         current[0] = datetime(2026, 9, 1, 10, 1, 0)
         renewed = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
@@ -209,5 +210,62 @@ class InventoryStoreTests(unittest.TestCase):
         with sqlite3.connect(self.db_path) as connection:
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_conflict'",
+                (task["task_id"],),
+            ).fetchone()[0], 1)
+
+    def test_subsecond_claim_keeps_lock_for_at_least_120_seconds(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0, 500000)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        lock = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        self.assertEqual(lock["expires_at"], "2026-09-01T10:02:00.500000")
+        current[0] = datetime(2026, 9, 1, 10, 2, 0, 499999)
+        self.assertEqual(store.release_expired_locks(task["task_id"]), 0)
+        current[0] = datetime(2026, 9, 1, 10, 2, 0, 500000)
+        self.assertEqual(store.release_expired_locks(task["task_id"]), 1)
+
+    def test_claim_derives_lease_time_after_waiting_for_write_lock(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        now_called = threading.Event()
+
+        def clock():
+            now_called.set()
+            return current[0]
+
+        store = InventoryStore(self.db_path, now=clock)
+        task = store.create_task("admin", "管理员", self.catalog())
+        now_called.clear()
+        blocker = store.connect()
+        blocker.execute("BEGIN IMMEDIATE")
+        result = []
+
+        def claim():
+            result.append(store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting"))
+
+        worker = threading.Thread(target=claim)
+        worker.start()
+        self.assertFalse(now_called.wait(0.1))
+        current[0] += timedelta(seconds=5)
+        blocker.commit()
+        blocker.close()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result[0]["expires_at"], "2026-09-01T10:02:05")
+
+    def test_asserting_valid_item_commits_expiry_cleanup_for_another_item(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        current[0] += timedelta(seconds=60)
+        store.claim_item(task["task_id"], "B2", "device-b", "乙", "counting")
+        current[0] += timedelta(seconds=61)
+        store.assert_item_lock(task["task_id"], "B2", "device-b", "counting")
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM inventory_item_locks WHERE task_id = ? AND barcode = 'A1'", (task["task_id"],)
+            ).fetchone())
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_expired'",
                 (task["task_id"],),
             ).fetchone()[0], 1)

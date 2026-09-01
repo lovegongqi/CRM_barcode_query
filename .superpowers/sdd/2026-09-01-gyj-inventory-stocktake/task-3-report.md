@@ -24,4 +24,13 @@
 ## Risks
 
 - Audit event names are implementation-level strings (`lock_claimed`, `lock_heartbeat`, `lock_conflict`, `lock_expired`, `lock_admin_unlocked`); callers should use these names consistently.
-- Lock timestamps intentionally serialize to seconds, so sub-second clock values are rounded down for comparisons and expiry boundaries.
+- Lock timestamps serialize with microseconds when present, while whole-second values retain compact ISO formatting.
+
+## Review fixes (round 1)
+
+- Lease timestamps are now derived only after `BEGIN IMMEDIATE` succeeds in claim and heartbeat paths.
+- Timestamp serialization preserves microseconds when present, guaranteeing at least 120 elapsed seconds.
+- Successful lock assertions now commit expiry cleanup; expired locks on other items are removed with their audit/version changes preserved.
+- Added deterministic sub-second, write-lock contention, and two-item assertion cleanup regressions.
+- Focused store suite: `python3 -m unittest tests.test_inventory_store -v` — 20 passed.
+- Full suite: `python3 -m unittest discover -s tests -p 'test*.py' -v` — 280 passed.
