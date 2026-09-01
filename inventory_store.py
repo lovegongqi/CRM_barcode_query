@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, localcontext
 import os
 import sqlite3
+import uuid
 
 
 class InventoryConflict(RuntimeError):
@@ -210,3 +211,114 @@ class InventoryStore:
                     ON inventory_discrepancies(status);
                 """
             )
+
+    def _now_text(self):
+        return self.now().isoformat(timespec="seconds")
+
+    @staticmethod
+    def _row_dict(row):
+        return dict(row) if row is not None else None
+
+    def create_task(self, owner, actor, catalog):
+        task_id = uuid.uuid4().hex
+        timestamp = self._now_text()
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            active = connection.execute(
+                """SELECT 1 FROM inventory_tasks
+                   WHERE owner = ? AND phase IN ('loading', 'counting', 'serial_check', 'sync_error')
+                   LIMIT 1""",
+                (owner,),
+            ).fetchone()
+            if active:
+                raise InventoryConflict("该用户已有进行中的盘点任务")
+            connection.execute(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, version, started_at)
+                   VALUES (?, ?, ?, 'loading', 1, ?)""",
+                (task_id, owner, actor, timestamp),
+            )
+            for product in catalog:
+                connection.execute(
+                    """INSERT INTO inventory_items
+                       (task_id, barcode, name, spec, model, category, unit,
+                        has_serial, initial_stock, book_quantity, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        task_id,
+                        product["barcode"],
+                        product["name"],
+                        product["spec"],
+                        product["model"],
+                        product["category"],
+                        product["unit"],
+                        1 if product["has_serial"] else 0,
+                        normalize_quantity(product["initial_stock"]),
+                        normalize_quantity(product["initial_stock"]),
+                        timestamp,
+                    ),
+                )
+            connection.execute(
+                """INSERT INTO inventory_audit_events
+                   (task_id, event_type, actor, details, created_at)
+                   VALUES (?, 'task_created', ?, ?, ?)""",
+                (task_id, actor, "catalog_loaded", timestamp),
+            )
+            connection.commit()
+            return self._row_dict(connection.execute(
+                "SELECT * FROM inventory_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone())
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def get_active_task(self, owner):
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM inventory_tasks
+                   WHERE owner = ? AND phase IN ('loading', 'counting', 'serial_check', 'sync_error')
+                   ORDER BY started_at DESC LIMIT 1""",
+                (owner,),
+            ).fetchone()
+        return self._row_dict(row)
+
+    def get_task_snapshot(self, owner, task_id, known_version=None):
+        connection = self.connect()
+        try:
+            task = connection.execute(
+                "SELECT * FROM inventory_tasks WHERE task_id = ? AND owner = ?",
+                (task_id, owner),
+            ).fetchone()
+            if task is None:
+                raise InventoryNotFound("盘点任务不存在")
+            if known_version is not None and int(known_version) == int(task["version"]):
+                return {"success": True, "unchanged": True, "version": task["version"]}
+            snapshot = self._row_dict(task)
+            snapshot["items"] = [self._row_dict(row) for row in connection.execute(
+                "SELECT * FROM inventory_items WHERE task_id = ? ORDER BY barcode",
+                (task_id,),
+            )]
+            snapshot["success"] = True
+            return snapshot
+        finally:
+            connection.close()
+
+    def list_items(self, task_id, query="", state="", include_zero=False):
+        query = str(query or "").strip()
+        clauses = ["task_id = ?"]
+        params = [task_id]
+        if state:
+            clauses.append("status = ?")
+            params.append(state)
+        if query:
+            clauses.append("(LOWER(barcode) LIKE LOWER(?) OR LOWER(name) LIKE LOWER(?))")
+            pattern = f"%{query}%"
+            params.extend((pattern, pattern))
+        elif not include_zero:
+            clauses.append("initial_stock <> '0'")
+        sql = "SELECT * FROM inventory_items WHERE " + " AND ".join(clauses) + " ORDER BY barcode"
+        with self.connect() as connection:
+            return [self._row_dict(row) for row in connection.execute(sql, params)]
