@@ -1,7 +1,7 @@
 """Durable persistence primitives for GYJ inventory stocktake."""
 
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import os
 import sqlite3
 
@@ -19,7 +19,11 @@ class InventoryPermissionDenied(RuntimeError):
 
 
 def _decimal_text(number):
-    text = format(number.normalize(), "f")
+    # ``format(..., "f")`` does not apply the active context, unlike
+    # ``normalize()``. Strip insignificant fractional zeroes explicitly.
+    text = format(number, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
     return "0" if text in {"-0", ""} else text
 
 
@@ -34,9 +38,16 @@ def normalize_quantity(value):
 
 
 def quantity_difference(actual, book):
-    return _decimal_text(
-        Decimal(normalize_quantity(actual)) - Decimal(normalize_quantity(book))
+    actual_number = Decimal(normalize_quantity(actual))
+    book_number = Decimal(normalize_quantity(book))
+    precision = (
+        max(len(actual_number.as_tuple().digits), len(book_number.as_tuple().digits))
+        + abs(actual_number.as_tuple().exponent - book_number.as_tuple().exponent)
+        + 2
     )
+    with localcontext() as context:
+        context.prec = precision
+        return _decimal_text(actual_number - book_number)
 
 
 class InventoryStore:
