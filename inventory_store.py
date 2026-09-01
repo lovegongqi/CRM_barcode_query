@@ -1,6 +1,6 @@
 """Durable persistence primitives for GYJ inventory stocktake."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 import os
 import sqlite3
@@ -330,3 +330,182 @@ class InventoryStore:
         sql = "SELECT * FROM inventory_items WHERE " + " AND ".join(clauses) + " ORDER BY barcode"
         with self.connect() as connection:
             return [self._row_dict(row) for row in connection.execute(sql, params)]
+
+    @staticmethod
+    def _audit(connection, task_id, event_type, actor, barcode=None, device_id=None, details=None, created_at=None):
+        connection.execute(
+            """INSERT INTO inventory_audit_events
+               (task_id, barcode, event_type, actor, device_id, details, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (task_id, barcode, event_type, actor, device_id, details, created_at),
+        )
+
+    @staticmethod
+    def _bump_version(connection, task_id):
+        connection.execute(
+            "UPDATE inventory_tasks SET version = version + 1 WHERE task_id = ?",
+            (task_id,),
+        )
+
+    def _expire_locks(self, connection, task_id, now_text):
+        expired = connection.execute(
+            "SELECT barcode, device_id FROM inventory_item_locks "
+            "WHERE task_id = ? AND expires_at <= ?",
+            (task_id, now_text),
+        ).fetchall()
+        for lock in expired:
+            connection.execute(
+                "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, lock["barcode"]),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "lock_expired", "system",
+                barcode=lock["barcode"], device_id=lock["device_id"],
+                details="expires_at_reached", created_at=now_text,
+            )
+        return len(expired)
+
+    def claim_item(self, task_id, barcode, device_id, actor, phase):
+        now_dt = self.now()
+        now = now_dt.isoformat(timespec="seconds")
+        expires = (now_dt + timedelta(seconds=120)).isoformat(timespec="seconds")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_locks(connection, task_id, now)
+            item = connection.execute(
+                "SELECT 1 FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            existing = connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if existing is not None and existing["device_id"] != device_id:
+                self._audit(
+                    connection, task_id, "lock_conflict", actor,
+                    barcode=barcode, device_id=device_id,
+                    details="owned_by=" + existing["device_id"], created_at=now,
+                )
+                connection.commit()
+                raise InventoryConflict("商品已被其他设备锁定")
+            if existing is None:
+                connection.execute(
+                    """INSERT INTO inventory_item_locks
+                       (task_id, barcode, device_id, actor, phase, claimed_at, heartbeat_at, expires_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (task_id, barcode, device_id, actor, phase, now, now, expires),
+                )
+                self._bump_version(connection, task_id)
+                self._audit(connection, task_id, "lock_claimed", actor, barcode, device_id, phase, now)
+            else:
+                connection.execute(
+                    """UPDATE inventory_item_locks
+                       SET actor = ?, phase = ?, heartbeat_at = ?, expires_at = ?
+                       WHERE task_id = ? AND barcode = ?""",
+                    (actor, phase, now, expires, task_id, barcode),
+                )
+                self._audit(connection, task_id, "lock_heartbeat", actor, barcode, device_id, "reclaim", now)
+            connection.commit()
+            return self._row_dict(connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone())
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def heartbeat_lock(self, task_id, barcode, device_id):
+        now_dt = self.now()
+        now = now_dt.isoformat(timespec="seconds")
+        expires = (now_dt + timedelta(seconds=120)).isoformat(timespec="seconds")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_locks(connection, task_id, now)
+            lock = connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if lock is None or lock["device_id"] != device_id:
+                self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "heartbeat_owner_mismatch", now)
+                connection.commit()
+                raise InventoryConflict("设备未持有商品锁")
+            connection.execute(
+                "UPDATE inventory_item_locks SET heartbeat_at = ?, expires_at = ? WHERE task_id = ? AND barcode = ?",
+                (now, expires, task_id, barcode),
+            )
+            self._audit(connection, task_id, "lock_heartbeat", lock["actor"], barcode, device_id, "extension", now)
+            connection.commit()
+            return self._row_dict(connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
+            ).fetchone())
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def assert_item_lock(self, task_id, barcode, device_id, phase):
+        now = self._now_text()
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expire_locks(connection, task_id, now)
+            lock = connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
+            ).fetchone()
+            if lock is None or lock["device_id"] != device_id or lock["phase"] != phase:
+                self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "assertion_failed", now)
+                connection.commit()
+                raise InventoryConflict("设备未持有当前阶段的商品锁")
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def release_expired_locks(self, task_id):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            count = self._expire_locks(connection, task_id, self._now_text())
+            connection.commit()
+            return count
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def admin_unlock(self, task_id, barcode, actor, is_admin):
+        if is_admin is not True:
+            raise InventoryPermissionDenied("只有管理员可以强制解锁")
+        now = self._now_text()
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            lock = connection.execute(
+                "SELECT device_id FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
+            ).fetchone()
+            if lock is None:
+                self._audit(connection, task_id, "lock_admin_unlocked", actor, barcode, details="no_lock", created_at=now)
+                connection.commit()
+                return {"unlocked": False, "task_id": task_id, "barcode": barcode}
+            connection.execute(
+                "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
+            )
+            self._bump_version(connection, task_id)
+            self._audit(connection, task_id, "lock_admin_unlocked", actor, barcode, lock["device_id"], "manual_unlock", now)
+            connection.commit()
+            return {"unlocked": True, "task_id": task_id, "barcode": barcode}
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()

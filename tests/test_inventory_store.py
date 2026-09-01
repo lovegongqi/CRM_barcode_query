@@ -2,8 +2,15 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
-from inventory_store import InventoryConflict, InventoryStore, normalize_quantity, quantity_difference
+from inventory_store import (
+    InventoryConflict,
+    InventoryPermissionDenied,
+    InventoryStore,
+    normalize_quantity,
+    quantity_difference,
+)
 
 
 class InventoryStoreTests(unittest.TestCase):
@@ -110,3 +117,97 @@ class InventoryStoreTests(unittest.TestCase):
                 )
         self.assertTrue(quantity_columns)
         self.assertTrue(all(column_type == "TEXT" for _, _, column_type in quantity_columns))
+
+    def test_first_device_wins_and_only_admin_can_force_unlock(self):
+        store = InventoryStore(self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0))
+        task = store.create_task("admin", "管理员", self.catalog())
+        lock = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        self.assertEqual(lock["device_id"], "device-a")
+        with self.assertRaises(InventoryConflict):
+            store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")
+        with self.assertRaises(InventoryPermissionDenied):
+            store.admin_unlock(task["task_id"], "A1", "乙", False)
+
+    def test_lock_expires_after_two_minutes_without_heartbeat(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        current[0] += timedelta(seconds=121)
+        self.assertEqual(store.release_expired_locks(task["task_id"]), 1)
+        self.assertEqual(store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")["device_id"], "device-b")
+
+    def test_claim_reclaim_heartbeat_and_assertion_use_second_precision(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0, 500000)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        first = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        self.assertEqual(first["expires_at"], "2026-09-01T10:02:00")
+        version_after_claim = store.get_task_snapshot("admin", task["task_id"])["version"]
+        current[0] = datetime(2026, 9, 1, 10, 1, 0)
+        renewed = store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        self.assertEqual(renewed["heartbeat_at"], "2026-09-01T10:01:00")
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["version"], version_after_claim)
+        current[0] = datetime(2026, 9, 1, 10, 1, 30)
+        heartbeated = store.heartbeat_lock(task["task_id"], "A1", "device-a")
+        self.assertEqual(heartbeated["expires_at"], "2026-09-01T10:03:30")
+        store.assert_item_lock(task["task_id"], "A1", "device-a", "counting")
+        with self.assertRaises(InventoryConflict):
+            store.assert_item_lock(task["task_id"], "A1", "device-a", "serial_check")
+        with self.assertRaises(InventoryConflict):
+            store.heartbeat_lock(task["task_id"], "A1", "device-b")
+
+    def test_expiry_boundary_version_and_audit_semantics(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        claimed_version = store.get_task_snapshot("admin", task["task_id"])["version"]
+        current[0] += timedelta(seconds=120)
+        self.assertEqual(store.release_expired_locks(task["task_id"]), 1)
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["version"], claimed_version + 1)
+        with sqlite3.connect(self.db_path) as connection:
+            events = [row[0] for row in connection.execute(
+                "SELECT event_type FROM inventory_audit_events WHERE task_id = ? ORDER BY event_id",
+                (task["task_id"],),
+            )]
+        self.assertIn("lock_claimed", events)
+        self.assertIn("lock_expired", events)
+
+    def test_admin_unlock_changes_version_and_writes_audit(self):
+        store = InventoryStore(self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0))
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        before = store.get_task_snapshot("admin", task["task_id"])["version"]
+        result = store.admin_unlock(task["task_id"], "A1", "管理员", True)
+        self.assertEqual(result["unlocked"], True)
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["version"], before + 1)
+        self.assertEqual(store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")["device_id"], "device-b")
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_admin_unlocked'",
+                (task["task_id"],),
+            ).fetchone()[0], 1)
+
+    def test_release_expired_locks_does_not_delete_future_lock(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        current[0] += timedelta(seconds=119)
+        self.assertEqual(store.release_expired_locks(task["task_id"]), 0)
+        self.assertEqual(store.heartbeat_lock(task["task_id"], "A1", "device-a")["device_id"], "device-a")
+
+    def test_conflict_writes_audit_without_incrementing_version(self):
+        store = InventoryStore(self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0))
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        before = store.get_task_snapshot("admin", task["task_id"])["version"]
+        with self.assertRaises(InventoryConflict):
+            store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["version"], before)
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_conflict'",
+                (task["task_id"],),
+            ).fetchone()[0], 1)
