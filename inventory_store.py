@@ -792,9 +792,7 @@ class InventoryStore:
             prepared = []
             for item in items:
                 barcode = item["barcode"]
-                if barcode not in stock_totals:
-                    raise ValueError(f"库存汇总缺少已完成商品: {barcode}")
-                latest = normalize_quantity(stock_totals[barcode])
+                latest = normalize_quantity(stock_totals.get(barcode, "0"))
                 completed_book = normalize_quantity(item["completed_book_quantity"])
                 completed_actual = normalize_quantity(item["completed_counted_quantity"])
                 expected_current = _expected_current_quantity(

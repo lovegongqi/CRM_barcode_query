@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
 
@@ -173,6 +174,14 @@ class InventoryServiceTests(unittest.TestCase):
             "serial_check",
         )
 
+    def test_all_submitted_without_serial_pending_remains_counting(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "A1", "2")
+        self.submit(task["task_id"], "B2", "0", device_id="device-b")
+        snapshot = self.store.get_task_snapshot("admin", task["task_id"])
+        self.assertEqual([row["state"] for row in snapshot["items"]], ["matched", "matched"])
+        self.assertEqual(snapshot["phase"], "counting")
+
     def test_submit_failure_keeps_lock_and_success_releases_it(self):
         task = self.create_task()
         self.service.open_count_item("admin", task["task_id"], "A1", "device-a", "甲")
@@ -246,7 +255,18 @@ class InventoryServiceTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(movement, [("2", "1", "-1")])
 
-    def test_missing_completed_barcode_fails_closed_and_success_recovers_phase(self):
+    def test_reader_omitted_zero_stock_row_syncs_as_exact_zero(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "B2", "1", device_id="device-b")
+        self.worker.totals_result = (True, {})
+        result = self.service.sync_completed_items("admin", task["task_id"], force=True)
+        item = next(row for row in result["items"] if row["barcode"] == "B2")
+        self.assertFalse(result["skipped"])
+        self.assertEqual(item["latest_book_qty"], "0")
+        self.assertEqual(item["expected_current_qty"], "1")
+        self.assertEqual(result["movement_count"], 0)
+
+    def test_malformed_totals_fail_closed_and_success_recovers_phase(self):
         task = self.create_task()
         self.submit(task["task_id"], "A1", "1")
         self.submit(task["task_id"], "B2", "1", device_id="device-b")
@@ -254,7 +274,7 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(before["phase"], "serial_check")
         before_by_barcode = {row["barcode"]: row for row in before["items"]}
 
-        self.worker.totals_result = (True, {"A1": "1"})
+        self.worker.totals_result = (True, {"A1": "1", "B2": "not-a-number"})
         with self.assertRaisesRegex(InventoryServiceError, "B2"):
             self.service.sync_completed_items("admin", task["task_id"], force=True)
         failed = self.store.get_task_snapshot("admin", task["task_id"])
@@ -271,7 +291,7 @@ class InventoryServiceTests(unittest.TestCase):
                 (task["task_id"],),
             ).fetchone()[0], 0)
 
-        self.worker.totals_result = (True, {"A1": "1", "B2": "0"})
+        self.worker.totals_result = (True, {"A1": "1"})
         recovered = self.service.sync_completed_items("admin", task["task_id"])
         self.assertFalse(recovered["skipped"])
         self.assertEqual(recovered["phase"], "serial_check")
@@ -328,6 +348,100 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertTrue(
             self.service.sync_completed_items("admin", task["task_id"])["skipped"]
         )
+
+    def test_concurrent_non_forced_syncs_share_one_eligibility_check(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "A1", "2")
+        start = threading.Barrier(3)
+        second_read_entered = threading.Event()
+        call_lock = threading.Lock()
+        call_count = [0]
+
+        def hold_first_read_until_second_attempts():
+            with call_lock:
+                call_count[0] += 1
+                position = call_count[0]
+            if position == 1:
+                second_read_entered.wait(0.5)
+            else:
+                second_read_entered.set()
+
+        self.worker.on_totals_read = hold_first_read_until_second_attempts
+        results = []
+        errors = []
+
+        def sync():
+            start.wait()
+            try:
+                results.append(
+                    self.service.sync_completed_items("admin", task["task_id"])
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=sync) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        start.wait()
+        for thread in threads:
+            thread.join(2)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(self.worker.totals_reads, 1)
+        self.assertEqual(sorted(row["skipped"] for row in results), [False, True])
+
+    def test_different_tasks_can_sync_while_another_task_read_is_blocked(self):
+        other_worker = FakeInventoryWorker()
+        workers = {"admin": self.worker, "other": other_worker}
+        service = InventoryService(self.store, workers.__getitem__, now=self.now)
+        first_task = service.create_task("admin", "管理员")
+        second_task = service.create_task("other", "仓管员")
+        for owner, task, device in (
+            ("admin", first_task, "device-a"),
+            ("other", second_task, "device-b"),
+        ):
+            service.open_count_item(owner, task["task_id"], "A1", device, owner)
+            service.submit_count(owner, task["task_id"], "A1", device, owner, "2")
+
+        first_read_started = threading.Event()
+        release_first_read = threading.Event()
+
+        def block_first_read():
+            first_read_started.set()
+            release_first_read.wait(1)
+
+        self.worker.on_totals_read = block_first_read
+        errors = []
+        second_finished = threading.Event()
+
+        def first_sync():
+            try:
+                service.sync_completed_items("admin", first_task["task_id"])
+            except Exception as exc:
+                errors.append(exc)
+
+        def second_sync():
+            try:
+                service.sync_completed_items("other", second_task["task_id"])
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                second_finished.set()
+
+        first_thread = threading.Thread(target=first_sync)
+        second_thread = threading.Thread(target=second_sync)
+        first_thread.start()
+        self.assertTrue(first_read_started.wait(1))
+        second_thread.start()
+        try:
+            self.assertTrue(second_finished.wait(0.5))
+        finally:
+            release_first_read.set()
+            first_thread.join(2)
+            second_thread.join(2)
+        self.assertEqual(errors, [])
+        self.assertEqual(self.worker.totals_reads, 1)
+        self.assertEqual(other_worker.totals_reads, 1)
 
 
 if __name__ == "__main__":

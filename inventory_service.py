@@ -1,6 +1,8 @@
 """Service-layer transitions for live GYJ inventory counting."""
 
+from contextlib import contextmanager
 from datetime import datetime
+import threading
 
 from inventory_store import (
     InventoryConflict,
@@ -19,6 +21,27 @@ class InventoryService:
         self.store = store
         self.worker_provider = worker_provider
         self.now = now or datetime.now
+        self._sync_guards_lock = threading.Lock()
+        self._sync_guards = {}
+
+    @contextmanager
+    def _completed_sync_guard(self, owner, task_id):
+        key = (owner, task_id)
+        with self._sync_guards_lock:
+            entry = self._sync_guards.get(key)
+            if entry is None:
+                entry = [threading.Lock(), 0]
+                self._sync_guards[key] = entry
+            entry[1] += 1
+        entry[0].acquire()
+        try:
+            yield
+        finally:
+            entry[0].release()
+            with self._sync_guards_lock:
+                entry[1] -= 1
+                if entry[1] == 0:
+                    del self._sync_guards[key]
 
     @staticmethod
     def _worker_value(result):
@@ -99,6 +122,10 @@ class InventoryService:
         raise InventoryServiceError(message)
 
     def sync_completed_items(self, owner, task_id, force=False):
+        with self._completed_sync_guard(owner, task_id):
+            return self._sync_completed_items_locked(owner, task_id, force)
+
+    def _sync_completed_items_locked(self, owner, task_id, force):
         snapshot = self._snapshot(
             owner, task_id, {"counting", "serial_check", "sync_error"}
         )
