@@ -7,6 +7,7 @@ import threading
 from inventory_store import (
     InventoryConflict,
     InventoryNotFound,
+    InventoryPermissionDenied,
     normalize_quantity,
     quantity_difference,
 )
@@ -61,6 +62,21 @@ class InventoryService:
             raise InventoryServiceError(str(value or "GYJ 读取失败"))
         return value
 
+    def _call_worker(self, owner, method_name, *args):
+        try:
+            worker = self.worker_provider(owner)
+            result = getattr(worker, method_name)(*args)
+        except (
+            InventoryConflict,
+            InventoryNotFound,
+            InventoryPermissionDenied,
+            InventoryServiceError,
+        ):
+            raise
+        except Exception as exc:
+            raise InventoryServiceError("GYJ 读取失败") from exc
+        return self._worker_value(result)
+
     def _snapshot(self, owner, task_id, phases=None):
         snapshot = self.store.get_task_snapshot(owner, task_id)
         if phases is not None and snapshot["phase"] not in phases:
@@ -75,8 +91,7 @@ class InventoryService:
         raise InventoryNotFound("商品不存在")
 
     def create_task(self, owner, actor):
-        worker = self.worker_provider(owner)
-        catalog = self._worker_value(worker.load_inventory_catalog())
+        catalog = self._call_worker(owner, "load_inventory_catalog")
         task = self.store.create_task(owner, actor, catalog)
         return self.store.advance_count_phase_if_ready(owner, task["task_id"])
 
@@ -86,8 +101,7 @@ class InventoryService:
         if item["completed_actual_qty"] is not None:
             raise InventoryConflict("商品数量盘点已完成")
         self.store.claim_item(task_id, barcode, device_id, actor, "counting")
-        worker = self.worker_provider(owner)
-        value = self._worker_value(worker.read_inventory_stock(barcode))
+        value = self._call_worker(owner, "read_inventory_stock", barcode)
         try:
             book_quantity = normalize_quantity(value)
         except ValueError as exc:
@@ -105,8 +119,7 @@ class InventoryService:
             raise InventoryConflict("商品数量盘点已完成")
         actual_qty = normalize_quantity(actual_qty)
         self.store.assert_item_lock(task_id, barcode, device_id, "counting")
-        worker = self.worker_provider(owner)
-        value = self._worker_value(worker.read_inventory_stock(barcode))
+        value = self._call_worker(owner, "read_inventory_stock", barcode)
         try:
             latest_book_qty = normalize_quantity(value)
         except ValueError as exc:
@@ -153,9 +166,8 @@ class InventoryService:
                     "items": snapshot["items"],
                 }
 
-        worker = self.worker_provider(owner)
         try:
-            totals = self._worker_value(worker.read_inventory_stock_totals())
+            totals = self._call_worker(owner, "read_inventory_stock_totals")
         except InventoryServiceError as exc:
             self._mark_sync_error(owner, task_id, str(exc), self.now())
         if not isinstance(totals, dict):
@@ -251,8 +263,7 @@ class InventoryService:
                 current["skipped"] = True
                 return current
 
-        worker = self.worker_provider(owner)
-        value = self._worker_value(worker.read_inventory_serials(barcode))
+        value = self._call_worker(owner, "read_inventory_serials", barcode)
         rows = self._validated_expected_serials(value, barcode)
         result = self.store.replace_expected_serials(
             owner, task_id, barcode, device_id, actor, rows,
@@ -317,9 +328,8 @@ class InventoryService:
             if serial in expected:
                 classification = "matched"
             else:
-                worker = self.worker_provider(owner)
-                value = self._worker_value(
-                    worker.lookup_inventory_serial(serial)
+                value = self._call_worker(
+                    owner, "lookup_inventory_serial", serial
                 )
                 lookup = self._validated_serial_lookup(value, serial)
                 if lookup is None:

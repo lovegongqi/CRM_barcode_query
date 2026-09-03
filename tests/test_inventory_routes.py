@@ -16,11 +16,12 @@ os.environ["CRM_DATA_DIR"] = TEST_DATA_DIR.name
 os.environ["CRM_DESKTOP_APP"] = "0"
 
 import app as app_module
-from inventory_service import InventoryServiceError
+from inventory_service import InventoryService, InventoryServiceError
 from inventory_store import (
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
+    InventoryStore,
 )
 
 
@@ -346,6 +347,116 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertNotIn("999", body)
         self.assertNotIn("secret", body)
         self.assertNotIn("html", body.lower())
+
+    def test_real_service_maps_raised_worker_error_to_redacted_502(self):
+        secret = "cost=999; password=secret; <html>private page</html>"
+
+        class RaisingWorker:
+            def load_inventory_catalog(self):
+                raise RuntimeError(secret)
+
+        store = InventoryStore(
+            os.path.join(self.tempdir.name, "route-worker-error.sqlite3")
+        )
+        service = InventoryService(store, lambda _owner: RaisingWorker())
+        with (
+            mock.patch.object(app_module, "inventory_store", store),
+            mock.patch.object(app_module, "inventory_service", service),
+        ):
+            response = self.login_account("counter").post("/api/inventory/tasks")
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "success": False,
+                "error": "GYJ 库存读取失败，请检查登录状态后重试",
+            },
+        )
+        self.assertNotIn("999", body)
+        self.assertNotIn("secret", body)
+        self.assertNotIn("html", body.lower())
+
+    def test_real_service_background_sync_persists_error_and_active_retry_recovers(self):
+        secret = "cost=999; password=secret; <html>private page</html>"
+        retry_started = threading.Event()
+
+        class RetryWorker:
+            def __init__(self):
+                self.calls = 0
+
+            def read_inventory_stock_totals(self):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError(secret)
+                retry_started.set()
+                return True, {"A1": "2"}
+
+        store = InventoryStore(
+            os.path.join(self.tempdir.name, "route-sync-retry.sqlite3")
+        )
+        task = store.create_task("counter-id", "counter", [{
+            "barcode": "A1",
+            "name": "Filter",
+            "spec": "",
+            "model": "",
+            "category": "Parts",
+            "unit": "piece",
+            "has_serial": False,
+            "initial_stock": "2",
+        }])
+        task_id = task["task_id"]
+        store.advance_count_phase_if_ready("counter-id", task_id)
+        store.claim_item(task_id, "A1", "device-a", "counter", "counting")
+        store.set_open_book_quantity(
+            "counter-id", task_id, "A1", "device-a", "counter", "2"
+        )
+        store.record_count(
+            "counter-id",
+            task_id,
+            "A1",
+            "device-a",
+            "counter",
+            completed_book_qty="2",
+            completed_actual_qty="2",
+            diff_qty="0",
+            state="matched",
+        )
+        worker = RetryWorker()
+        service = InventoryService(store, lambda _owner: worker)
+
+        with (
+            mock.patch.object(app_module, "inventory_store", store),
+            mock.patch.object(app_module, "inventory_service", service),
+        ):
+            app_module._run_inventory_sync("counter-id", task_id)
+            failed = store.get_task_snapshot("counter-id", task_id)
+            self.assertEqual(failed["phase"], "sync_error")
+            self.assertIsNone(failed["last_sync_at"])
+            self.assertNotIn("999", failed["gyj_status"])
+            self.assertNotIn("secret", failed["gyj_status"])
+            self.assertNotIn("html", failed["gyj_status"].lower())
+
+            response = self.login_account("counter").get(
+                "/api/inventory/tasks/active"
+            )
+            self.assertEqual(response.status_code, 200)
+            response_body = response.get_data(as_text=True)
+            self.assertNotIn("999", response_body)
+            self.assertNotIn("secret", response_body)
+            self.assertNotIn("html", response_body.lower())
+            self.assertTrue(retry_started.wait(1))
+            with app_module.inventory_sync_lock:
+                retry_thread = app_module.inventory_sync_threads.get(task_id)
+            if retry_thread is not None:
+                retry_thread.join(1)
+
+        recovered = store.get_task_snapshot("counter-id", task_id)
+        self.assertEqual(worker.calls, 2)
+        self.assertEqual(recovered["phase"], "counting")
+        self.assertEqual(recovered["gyj_status"], "synced")
+        self.assertIsNotNone(recovered["last_sync_at"])
 
     def test_invalid_version_quantity_and_missing_device_are_400(self):
         self.store.get_active_task.return_value = {"task_id": "task-1"}
