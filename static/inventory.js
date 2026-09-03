@@ -15,6 +15,18 @@ let countDialogRequestId = 0;
 let inventoryHeartbeatTimer = null;
 let gyjLoginPollTimer = null;
 let gyjLoginSession = 0;
+let inventoryActiveTab = 'current';
+let inventoryTabGeneration = 0;
+let inventoryDifferenceState = 'open';
+let inventoryDifferenceGeneration = 0;
+let inventoryDifferenceSearchTimer = null;
+let currentSerialBarcode = '';
+let currentSerialData = null;
+let serialWorkspaceOpen = false;
+let serialWorkspaceEditable = false;
+let serialWorkspaceRequestId = 0;
+let serialScanPending = false;
+let serialRefreshTimer = null;
 
 function inventoryElement(id) {
     return document.getElementById(id);
@@ -64,6 +76,10 @@ async function inventoryRequest(url, options = {}) {
 
 function inventoryPost(url, body) {
     return inventoryRequest(url, {method: 'POST', body: JSON.stringify(body)});
+}
+
+function inventoryDelete(url, body) {
+    return inventoryRequest(url, {method: 'DELETE', body: JSON.stringify(body)});
 }
 
 function getInventoryDeviceId() {
@@ -296,6 +312,35 @@ function renderInventoryItems(items) {
     });
 }
 
+function renderSerialQueue(task) {
+    const section = inventoryElement('inventorySerialQueueRoot');
+    const root = inventoryElement('inventorySerialQueue');
+    const rows = task && task.phase === 'serial_check'
+        ? (task.items || []).filter((item) => item.state === 'serial_pending')
+        : [];
+    section.hidden = !(task && task.phase === 'serial_check');
+    root.replaceChildren();
+    if (!rows.length) {
+        root.append(inventoryNode('div', 'inventory-empty', '没有待核对的序列号商品。'));
+        return;
+    }
+    rows.forEach((item) => {
+        const button = inventoryNode('button', 'inventory-item inventory-serial-queue-item');
+        button.type = 'button';
+        button.setAttribute('aria-label', `打开 ${inventoryText(item.name, item.barcode)} 序列号核对`);
+        button.addEventListener('click', () => openSerialItem(item.barcode));
+        const top = inventoryNode('div', 'inventory-item-top');
+        const product = inventoryNode('div', 'inventory-item-product');
+        product.append(
+            inventoryNode('span', 'inventory-item-barcode', item.barcode),
+            inventoryNode('strong', 'inventory-item-name', item.name),
+        );
+        top.append(product, inventoryNode('span', 'inventory-state-badge', '待序列号'));
+        button.append(top, inventoryNode('p', 'inventory-item-details', inventoryDetailText(item)));
+        root.append(button);
+    });
+}
+
 function renderInventoryTask(task) {
     const meta = inventoryElement('inventoryTaskMeta');
     const createButton = inventoryElement('inventoryCreateTask');
@@ -304,6 +349,7 @@ function renderInventoryTask(task) {
         createButton.hidden = false;
         renderInventorySummary(null);
         renderInventoryItems([]);
+        renderSerialQueue(null);
         return;
     }
     const phaseLabels = {loading: '正在载入商品', counting: '数量盘点', serial_check: '序列号核对', sync_error: '同步需重试'};
@@ -313,6 +359,8 @@ function renderInventoryTask(task) {
     createButton.hidden = true;
     renderInventorySummary(task);
     renderInventoryItems(task.items || []);
+    renderSerialQueue(task);
+    if (serialWorkspaceOpen && task.phase !== 'serial_check') closeSerialWorkspace();
     if (task.gyj_status && task.gyj_status !== 'synced') setInventoryNotice(task.gyj_status, 'error');
 }
 
@@ -351,10 +399,18 @@ async function performInventoryPoll(force) {
             return;
         }
         if (data.task.unchanged) return;
-        inventoryTask = data.task;
-        lastInventoryVersion = data.task.version;
+        let nextTask = data.task;
+        if (nextTask.phase === 'serial_check') {
+            const detail = await inventoryRequest(`/api/inventory/tasks/${encodeURIComponent(nextTask.task_id)}`);
+            if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
+            if (detail.task && Array.isArray(detail.task.items)) {
+                nextTask = {...nextTask, items: detail.task.items};
+            }
+        }
+        inventoryTask = nextTask;
+        lastInventoryVersion = nextTask.version;
         renderInventoryTask(inventoryTask);
-        if (!data.task.gyj_status || data.task.gyj_status === 'synced') setInventoryNotice('');
+        if (!nextTask.gyj_status || nextTask.gyj_status === 'synced') setInventoryNotice('');
     } catch (error) {
         if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
         setInventoryNotice(error.message, 'error');
@@ -363,6 +419,7 @@ async function performInventoryPoll(force) {
 
 function pollInventoryTask(options = {}) {
     if (document.hidden) return Promise.resolve();
+    if (inventoryActiveTab !== 'current' && (!options || options.force !== true)) return Promise.resolve();
     if ((!options || options.force !== true) && inventorySearchTimer) {
         return inventoryPollPromise || Promise.resolve();
     }
@@ -629,6 +686,587 @@ async function handleInventorySearchEnter(event) {
     }
 }
 
+function setSerialMessage(message, kind = '') {
+    const target = inventoryElement('inventorySerialMessage');
+    target.textContent = message || '';
+    target.className = 'inventory-dialog-message' + (kind ? ` is-${kind}` : '');
+}
+
+function stopSerialRefreshTimer() {
+    if (serialRefreshTimer) clearInterval(serialRefreshTimer);
+    serialRefreshTimer = null;
+}
+
+async function sendSerialHeartbeat() {
+    if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
+    try {
+        await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/heartbeat`,
+            {device_id: inventoryDeviceId},
+        );
+    } catch (error) {
+        if (error.status === 409) {
+            const owner = error.data && error.data.lock_owner;
+            setSerialReadOnly(error.message, owner || '');
+        } else {
+            setSerialMessage(`锁定心跳失败：${error.message}`, 'error');
+        }
+    }
+}
+
+async function refreshSerialWorkspace() {
+    await sendSerialHeartbeat();
+    if (!serialWorkspaceEditable) return;
+    try {
+        await refreshSerialItem();
+    } catch (_error) {
+        // refreshSerialItem already keeps the workspace visible and reports the error.
+    }
+}
+
+function startSerialRefreshTimer() {
+    stopSerialRefreshTimer();
+    serialRefreshTimer = setInterval(refreshSerialWorkspace, 60000);
+}
+
+function setSerialReadOnly(message, owner = '') {
+    serialWorkspaceEditable = false;
+    stopSerialRefreshTimer();
+    inventoryElement('inventorySerialInput').disabled = true;
+    inventoryElement('inventorySerialFinish').disabled = true;
+    setSerialMessage(owner ? `${message} 当前锁定者：${owner}` : message, 'error');
+}
+
+function serialClassificationLabel(classification) {
+    const labels = {
+        matched: '匹配',
+        system_only: '账面独有',
+        physical_only: '实物独有',
+        unknown: '实物独有',
+        already_shipped: '实物独有（已出库）',
+        other_product: '其他商品',
+        duplicate: '重复扫描',
+    };
+    return labels[classification] || inventoryText(classification);
+}
+
+function serialListRow(row, canDelete) {
+    const item = inventoryNode('li', 'inventory-serial-row');
+    const copy = inventoryNode('div', 'inventory-serial-copy');
+    copy.append(
+        inventoryNode('strong', '', row.serial),
+        inventoryNode('span', '', [
+            row.lookup_barcode ? `查询商品 ${row.lookup_barcode}` : '',
+            row.lookup_name ? row.lookup_name : '',
+            row.warehouse ? `仓库 ${row.warehouse}` : '',
+            row.shipped ? '已出库' : '',
+        ].filter(Boolean).join(' · ')),
+    );
+    item.append(copy);
+    if (canDelete) {
+        const remove = inventoryNode('button', 'btn btn-secondary inventory-serial-remove', '删除误扫');
+        remove.type = 'button';
+        remove.addEventListener('click', () => deleteSerialScan(row.serial));
+        item.append(remove);
+    }
+    return item;
+}
+
+function renderSerialReconciliation(value) {
+    currentSerialData = value || {};
+    const item = currentSerialData.item || {};
+    const product = inventoryElement('inventorySerialProduct');
+    product.replaceChildren();
+    product.append(
+        inventoryNode('strong', 'inventory-item-name', item.name),
+        inventoryNode('div', 'inventory-item-barcode', currentSerialData.barcode || item.barcode),
+        inventoryNode('div', '', inventoryDetailText(item)),
+    );
+
+    const groups = [
+        ['matched', '匹配', true],
+        ['system_only', '账面独有', false],
+        ['physical_only', '实物独有', true],
+        ['other_product', '其他商品', true],
+        ['duplicates', '重复扫描', false],
+    ];
+    const counts = inventoryElement('inventorySerialCounts');
+    counts.replaceChildren();
+    groups.forEach(([key, label]) => {
+        const rows = Array.isArray(currentSerialData[key]) ? currentSerialData[key] : [];
+        const count = currentSerialData.counts && currentSerialData.counts[key] !== undefined
+            ? currentSerialData.counts[key]
+            : rows.length;
+        counts.append(inventoryMetric(label, count));
+    });
+
+    const details = inventoryElement('inventorySerialDetails');
+    details.replaceChildren();
+    groups.forEach(([key, label, canDelete]) => {
+        const rows = Array.isArray(currentSerialData[key]) ? currentSerialData[key] : [];
+        const section = inventoryNode('section', 'inventory-serial-group');
+        const heading = inventoryNode('h3', '', `${label} (${rows.length})`);
+        const list = inventoryNode('ul', 'inventory-serial-list');
+        if (rows.length) rows.forEach((row) => list.append(serialListRow(row, canDelete)));
+        else list.append(inventoryNode('li', 'inventory-empty', '暂无记录'));
+        section.append(heading, list);
+        details.append(section);
+    });
+}
+
+function closeSerialWorkspace() {
+    serialWorkspaceRequestId += 1;
+    stopSerialRefreshTimer();
+    serialWorkspaceOpen = false;
+    serialWorkspaceEditable = false;
+    serialScanPending = false;
+    currentSerialBarcode = '';
+    currentSerialData = null;
+    const dialog = inventoryElement('inventorySerialWorkspace');
+    if (dialog.open) dialog.close();
+}
+
+async function openSerialItem(barcode) {
+    if (!inventoryTask || inventoryTask.phase !== 'serial_check') return;
+    const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
+    if (!item || item.state !== 'serial_pending') return;
+    const requestId = ++serialWorkspaceRequestId;
+    const dialog = inventoryElement('inventorySerialWorkspace');
+    currentSerialBarcode = barcode;
+    currentSerialData = null;
+    serialWorkspaceOpen = true;
+    serialWorkspaceEditable = false;
+    stopSerialRefreshTimer();
+    inventoryElement('inventorySerialInput').value = '';
+    inventoryElement('inventorySerialInput').disabled = true;
+    inventoryElement('inventorySerialFinish').disabled = true;
+    renderSerialReconciliation({barcode, item, counts: {}});
+    setSerialMessage('正在锁定商品并从 GYJ 刷新账面序列号…');
+    if (!dialog.open) dialog.showModal();
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(barcode)}/serial/open`,
+            {device_id: inventoryDeviceId},
+        );
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
+        renderSerialReconciliation(data.serial);
+        serialWorkspaceEditable = true;
+        const input = inventoryElement('inventorySerialInput');
+        input.disabled = false;
+        inventoryElement('inventorySerialFinish').disabled = false;
+        setSerialMessage('已锁定并刷新账面序列号，可以开始扫描。', 'success');
+        startSerialRefreshTimer();
+        input.focus();
+    } catch (error) {
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
+        if (error.status === 409) {
+            const owner = error.data && error.data.lock_owner;
+            setSerialReadOnly(error.message, owner || '');
+            lastInventoryVersion = null;
+            await pollInventoryTask({force: true});
+        } else {
+            setSerialReadOnly(error.message);
+        }
+    }
+}
+
+async function refreshSerialItem(force = false) {
+    if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return null;
+    const requestId = serialWorkspaceRequestId;
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serial/refresh`,
+            {device_id: inventoryDeviceId, force: force === true},
+        );
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return null;
+        renderSerialReconciliation(data.serial);
+        return data.serial;
+    } catch (error) {
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return null;
+        if (error.status === 409) {
+            const owner = error.data && error.data.lock_owner;
+            setSerialReadOnly(error.message, owner || '');
+            lastInventoryVersion = null;
+            await pollInventoryTask({force: true});
+        } else {
+            setSerialMessage(`序列号刷新失败：${error.message}`, 'error');
+        }
+        throw error;
+    }
+}
+
+async function scanSerial(event) {
+    if (!event || event.key !== 'Enter') return;
+    event.preventDefault();
+    const input = inventoryElement('inventorySerialInput');
+    const serial = input.value.trim();
+    input.value = '';
+    if (!serial || serialScanPending || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) {
+        input.focus();
+        return;
+    }
+    serialScanPending = true;
+    const requestId = serialWorkspaceRequestId;
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serials`,
+            {device_id: inventoryDeviceId, serial},
+        );
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
+        const scan = data.scan || {};
+        if (scan.classification === 'duplicate') {
+            const duplicates = Array.isArray(currentSerialData && currentSerialData.duplicates)
+                ? currentSerialData.duplicates.slice()
+                : [];
+            duplicates.push(scan);
+            renderSerialReconciliation({
+                ...currentSerialData,
+                duplicates,
+                counts: {...(currentSerialData.counts || {}), duplicates: duplicates.length},
+            });
+        } else {
+            await refreshSerialItem();
+        }
+        setSerialMessage(`${inventoryText(scan.serial, serial)}：${serialClassificationLabel(scan.classification)}`, scan.classification === 'matched' ? 'success' : '');
+    } catch (error) {
+        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen) {
+            if (error.status === 409) {
+                const owner = error.data && error.data.lock_owner;
+                setSerialReadOnly(error.message, owner || '');
+            } else {
+                setSerialMessage(error.message, 'error');
+            }
+        }
+    } finally {
+        serialScanPending = false;
+        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen && serialWorkspaceEditable) input.focus();
+    }
+}
+
+async function deleteSerialScan(serial) {
+    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
+    const requestId = serialWorkspaceRequestId;
+    try {
+        const data = await inventoryDelete(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serials/${encodeURIComponent(serial)}`,
+            {device_id: inventoryDeviceId},
+        );
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
+        renderSerialReconciliation(data.serial);
+        setSerialMessage(`${serial} 已删除，操作已记录。`, 'success');
+    } catch (error) {
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
+        if (error.status === 409) {
+            const owner = error.data && error.data.lock_owner;
+            setSerialReadOnly(error.message, owner || '');
+        } else {
+            setSerialMessage(error.message, 'error');
+        }
+    } finally {
+        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen && serialWorkspaceEditable) {
+            inventoryElement('inventorySerialInput').focus();
+        }
+    }
+}
+
+async function finishSerialItem() {
+    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
+    const requestId = serialWorkspaceRequestId;
+    const finish = inventoryElement('inventorySerialFinish');
+    finish.disabled = true;
+    setSerialMessage('正在强制刷新 GYJ 账面序列号并完成核对…');
+    try {
+        const prefix = `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}`;
+        const data = await inventoryPost(`${prefix}/serial/finish`, {device_id: inventoryDeviceId});
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
+        renderSerialReconciliation(data.serial);
+        closeSerialWorkspace();
+        lastInventoryVersion = null;
+        setInventoryNotice('序列号核对已完成。', 'success');
+        await pollInventoryTask({force: true});
+    } catch (error) {
+        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
+        finish.disabled = false;
+        if (error.status === 409) {
+            const owner = error.data && error.data.lock_owner;
+            setSerialReadOnly(error.message, owner || '');
+        } else {
+            setSerialMessage(`未能完成核对：${error.message}。当前扫描界面已保留。`, 'error');
+            inventoryElement('inventorySerialInput').focus();
+        }
+    }
+}
+
+function setWorkspaceStatus(id, message, kind = '') {
+    const target = inventoryElement(id);
+    target.textContent = message || '';
+    target.className = 'inventory-notice' + (kind ? ` is-${kind}` : '');
+}
+
+function inventoryHistoryCounts(task, discrepancies) {
+    const items = Array.isArray(task.items) ? task.items : null;
+    const rows = discrepancies.filter((row) => row.task_id === task.task_id);
+    return {
+        products: items ? items.length : '加载失败',
+        quantity: items ? items.filter((item) => decimalDirection(item.diff_qty) !== 0).length : '加载失败',
+        serial: rows.filter((row) => row.serial !== null && row.serial !== undefined && row.serial !== '').length,
+    };
+}
+
+function renderInventoryHistory(tasks, discrepancies = []) {
+    const root = inventoryElement('inventoryHistory');
+    root.replaceChildren();
+    if (!tasks.length) {
+        root.append(inventoryNode('div', 'inventory-empty', '暂无已完成的盘点任务。'));
+        return;
+    }
+    tasks.forEach((task) => {
+        const counts = inventoryHistoryCounts(task, discrepancies);
+        const row = inventoryNode('article', 'inventory-history-row');
+        const title = inventoryNode('div', 'inventory-history-title');
+        title.append(
+            inventoryNode('strong', '', `任务号 ${inventoryText(task.task_id)}`),
+            inventoryNode('span', '', `开始时间 ${inventoryText(task.started_at)}`),
+            inventoryNode('span', '', `完成时间 ${inventoryText(task.completed_at)}`),
+        );
+        const metrics = inventoryNode('div', 'inventory-history-metrics');
+        metrics.append(
+            inventoryMetric('参与人数', '接口未提供'),
+            inventoryMetric('商品总数', counts.products),
+            inventoryMetric('数量差异', counts.quantity),
+            inventoryMetric('序列号差异', counts.serial),
+        );
+        const download = inventoryNode('a', 'btn btn-secondary inventory-history-export', '下载 Excel');
+        download.href = `/api/inventory/tasks/${encodeURIComponent(task.task_id)}/export`;
+        row.append(title, metrics, download);
+        root.append(row);
+    });
+}
+
+async function loadInventoryHistory(expectedGeneration = inventoryTabGeneration) {
+    setWorkspaceStatus('inventoryHistoryStatus', '正在读取历史任务…');
+    try {
+        const data = await inventoryRequest('/api/inventory/tasks/history');
+        if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
+        const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+        const detailRequests = tasks.map(async (task) => {
+            try {
+                const detail = await inventoryRequest(`/api/inventory/tasks/${encodeURIComponent(task.task_id)}`);
+                return {...task, items: Array.isArray(detail.task && detail.task.items) ? detail.task.items : []};
+            } catch (_error) {
+                return {...task, items: null};
+            }
+        });
+        const [details, open, archived] = await Promise.all([
+            Promise.all(detailRequests),
+            inventoryRequest('/api/inventory/discrepancies?state=open'),
+            inventoryRequest('/api/inventory/discrepancies?state=archived'),
+        ]);
+        if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
+        const discrepancies = [
+            ...(Array.isArray(open.discrepancies) ? open.discrepancies : []),
+            ...(Array.isArray(archived.discrepancies) ? archived.discrepancies : []),
+        ];
+        renderInventoryHistory(details, discrepancies);
+        setWorkspaceStatus('inventoryHistoryStatus', '');
+    } catch (error) {
+        if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
+        inventoryElement('inventoryHistory').replaceChildren();
+        setWorkspaceStatus('inventoryHistoryStatus', error.message, 'error');
+    }
+}
+
+function discrepancyKindLabel(kind) {
+    const labels = {
+        product_quantity: '商品数量差异',
+        system_only_serial: '账面独有',
+        physical_only_serial: '实物独有',
+        other_product_serial: '其他商品',
+        already_shipped_serial: '已出库序列号',
+        unknown_serial: '未知序列号',
+    };
+    return labels[kind] || inventoryText(kind);
+}
+
+function discrepancyNoteInputId(id, serial) {
+    return `inventoryDiscrepancyNote-${id}-${serial ? encodeURIComponent(serial) : 'product'}`;
+}
+
+function renderDiscrepancyRows(rows, state) {
+    const root = inventoryElement(state === 'archived' ? 'inventoryDifferencesArchived' : 'inventoryDifferencesOpen');
+    root.replaceChildren();
+    if (!rows.length) {
+        root.append(inventoryNode('div', 'inventory-empty', state === 'archived' ? '暂无已归档差异。' : '暂无待处理差异。'));
+        return;
+    }
+    rows.forEach((row) => {
+        const card = inventoryNode('article', 'inventory-discrepancy-card');
+        const head = inventoryNode('div', 'inventory-discrepancy-head');
+        const identity = inventoryNode('div', 'inventory-history-title');
+        identity.append(
+            inventoryNode('strong', '', `${inventoryText(row.barcode)} · ${inventoryText(row.name, '未命名商品')}`),
+            inventoryNode('span', '', `${discrepancyKindLabel(row.kind)} · 任务 ${inventoryText(row.task_id)}`),
+        );
+        if (row.serial !== null && row.serial !== undefined && row.serial !== '') {
+            identity.append(inventoryNode('code', 'inventory-discrepancy-serial', row.serial));
+        } else {
+            identity.append(inventoryNode('span', '', `账面 ${inventoryText(row.book_quantity)} · 实盘 ${inventoryText(row.counted_quantity)} · 差异 ${inventoryText(row.difference)}`));
+        }
+        head.append(identity);
+        if (CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin) {
+            const action = inventoryNode('button', 'btn btn-secondary', state === 'archived' ? '恢复' : '归档');
+            action.type = 'button';
+            action.addEventListener('click', () => state === 'archived' ? restoreDiscrepancy(row.id) : archiveDiscrepancy(row.id));
+            head.append(action);
+        }
+
+        const history = inventoryNode('div', 'inventory-note-history');
+        const notes = Array.isArray(row.notes) ? row.notes : [];
+        history.append(inventoryNode('h3', '', row.serial ? '序列号备注历史' : '商品备注历史'));
+        if (!notes.length) history.append(inventoryNode('p', 'inventory-empty', '暂无备注。'));
+        notes.forEach((note) => {
+            const entry = inventoryNode('div', 'inventory-note-entry');
+            entry.append(
+                inventoryNode('p', '', note.note),
+                inventoryNode('span', '', `${inventoryText(note.actor, '未知账号')} · ${inventoryText(note.created_at)}`),
+            );
+            history.append(entry);
+        });
+
+        const form = inventoryNode('div', 'inventory-note-form');
+        const input = inventoryNode('input', '');
+        input.id = discrepancyNoteInputId(row.id, row.serial);
+        input.type = 'text';
+        input.autocomplete = 'off';
+        input.placeholder = row.serial ? '追加序列号备注' : '追加商品备注';
+        input.setAttribute('aria-label', input.placeholder);
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') saveDiscrepancyNote(row.id, row.serial);
+        });
+        const save = inventoryNode('button', 'btn btn-primary', '追加备注');
+        save.type = 'button';
+        save.addEventListener('click', () => saveDiscrepancyNote(row.id, row.serial));
+        form.append(input, save);
+        card.append(head, history, form);
+        root.append(card);
+    });
+}
+
+async function loadDiscrepancies(expectedTabGeneration = inventoryTabGeneration) {
+    const requestGeneration = ++inventoryDifferenceGeneration;
+    const state = inventoryDifferenceState;
+    const query = inventoryElement('inventoryDifferenceSearch').value.trim();
+    const params = new URLSearchParams({state});
+    if (query) params.set('query', query);
+    setWorkspaceStatus('inventoryDifferencesStatus', '正在读取差异记录…');
+    try {
+        const data = await inventoryRequest(`/api/inventory/discrepancies?${params.toString()}`);
+        if (
+            expectedTabGeneration !== inventoryTabGeneration
+            || requestGeneration !== inventoryDifferenceGeneration
+            || inventoryActiveTab !== 'differences'
+            || state !== inventoryDifferenceState
+            || query !== inventoryElement('inventoryDifferenceSearch').value.trim()
+        ) return;
+        renderDiscrepancyRows(Array.isArray(data.discrepancies) ? data.discrepancies : [], state);
+        setWorkspaceStatus('inventoryDifferencesStatus', '');
+    } catch (error) {
+        if (expectedTabGeneration !== inventoryTabGeneration || requestGeneration !== inventoryDifferenceGeneration || inventoryActiveTab !== 'differences') return;
+        const root = inventoryElement(state === 'archived' ? 'inventoryDifferencesArchived' : 'inventoryDifferencesOpen');
+        root.replaceChildren();
+        setWorkspaceStatus('inventoryDifferencesStatus', error.message, 'error');
+    }
+}
+
+async function saveDiscrepancyNote(id, serial = null) {
+    const input = inventoryElement(discrepancyNoteInputId(id, serial));
+    const note = input.value.trim();
+    if (!note) {
+        input.focus();
+        return;
+    }
+    input.disabled = true;
+    const body = {note};
+    if (serial !== null && serial !== undefined && serial !== '') body.serial = serial;
+    try {
+        await inventoryPost(`/api/inventory/discrepancies/${encodeURIComponent(id)}/notes`, body);
+        input.value = '';
+        await loadDiscrepancies();
+    } catch (error) {
+        setWorkspaceStatus('inventoryDifferencesStatus', error.message, 'error');
+    } finally {
+        input.disabled = false;
+    }
+}
+
+async function archiveDiscrepancy(id) {
+    try {
+        await inventoryPost(`/api/inventory/discrepancies/${encodeURIComponent(id)}/archive`, {});
+        await loadDiscrepancies();
+    } catch (error) {
+        setWorkspaceStatus('inventoryDifferencesStatus', error.message, 'error');
+    }
+}
+
+async function restoreDiscrepancy(id) {
+    try {
+        await inventoryPost(`/api/inventory/discrepancies/${encodeURIComponent(id)}/restore`, {});
+        await loadDiscrepancies();
+    } catch (error) {
+        setWorkspaceStatus('inventoryDifferencesStatus', error.message, 'error');
+    }
+}
+
+function exportDiscrepancies() {
+    const params = new URLSearchParams({state: inventoryDifferenceState});
+    const query = inventoryElement('inventoryDifferenceSearch').value.trim();
+    if (query) params.set('query', query);
+    window.location.assign(`/api/inventory/discrepancies/export?${params.toString()}`);
+}
+
+function switchDifferenceState(state) {
+    inventoryDifferenceState = state === 'archived' ? 'archived' : 'open';
+    inventoryDifferenceGeneration += 1;
+    const open = inventoryDifferenceState === 'open';
+    inventoryElement('inventoryDifferencesOpen').hidden = !open;
+    inventoryElement('inventoryDifferencesArchived').hidden = open;
+    inventoryElement('inventoryDifferenceTabOpen').classList.toggle('is-active', open);
+    inventoryElement('inventoryDifferenceTabOpen').setAttribute('aria-selected', String(open));
+    inventoryElement('inventoryDifferenceTabArchived').classList.toggle('is-active', !open);
+    inventoryElement('inventoryDifferenceTabArchived').setAttribute('aria-selected', String(!open));
+    return loadDiscrepancies();
+}
+
+function handleDifferenceSearch() {
+    if (inventoryDifferenceSearchTimer) clearTimeout(inventoryDifferenceSearchTimer);
+    inventoryDifferenceSearchTimer = setTimeout(() => {
+        inventoryDifferenceSearchTimer = null;
+        loadDiscrepancies();
+    }, 250);
+}
+
+function switchInventoryTab(tab) {
+    const selected = ['current', 'history', 'differences'].includes(tab) ? tab : 'current';
+    inventoryActiveTab = selected;
+    const generation = ++inventoryTabGeneration;
+    if (selected !== 'current') closeSerialWorkspace();
+    const definitions = [
+        ['current', 'inventoryCurrentRoot', 'inventoryTabCurrent'],
+        ['history', 'inventoryHistoryRoot', 'inventoryTabHistory'],
+        ['differences', 'inventoryDiscrepanciesRoot', 'inventoryTabDifferences'],
+    ];
+    definitions.forEach(([name, panelId, tabId]) => {
+        const active = name === selected;
+        inventoryElement(panelId).hidden = !active;
+        inventoryElement(tabId).classList.toggle('is-active', active);
+        inventoryElement(tabId).setAttribute('aria-selected', String(active));
+    });
+    if (selected === 'history') return loadInventoryHistory(generation);
+    if (selected === 'differences') return loadDiscrepancies(generation);
+    lastInventoryVersion = null;
+    return pollInventoryTask({force: true});
+}
+
 function setGyjLoginMessage(message, kind = '') {
     const target = inventoryElement('inventoryGyjLoginMessage');
     target.textContent = message || '';
@@ -817,6 +1455,9 @@ function bindInventoryDialogBackdrop(dialog, close) {
 
 function initializeInventoryPage() {
     inventoryDeviceId = getInventoryDeviceId();
+    inventoryElement('inventoryTabCurrent').addEventListener('click', () => switchInventoryTab('current'));
+    inventoryElement('inventoryTabHistory').addEventListener('click', () => switchInventoryTab('history'));
+    inventoryElement('inventoryTabDifferences').addEventListener('click', () => switchInventoryTab('differences'));
     inventoryElement('inventoryCreateTask').addEventListener('click', startInventoryTask);
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
@@ -828,6 +1469,22 @@ function initializeInventoryPage() {
     inventoryElement('inventoryCountSubmit').addEventListener('click', submitCount);
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
+    inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
+    inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
+    inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);
+    inventoryElement('inventorySerialCancel').addEventListener('click', closeSerialWorkspace);
+    inventoryElement('inventoryDifferenceTabOpen').addEventListener('click', () => switchDifferenceState('open'));
+    inventoryElement('inventoryDifferenceTabArchived').addEventListener('click', () => switchDifferenceState('archived'));
+    inventoryElement('inventoryDifferenceSearch').addEventListener('input', handleDifferenceSearch);
+    inventoryElement('inventoryDifferenceSearch').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            if (inventoryDifferenceSearchTimer) clearTimeout(inventoryDifferenceSearchTimer);
+            inventoryDifferenceSearchTimer = null;
+            loadDiscrepancies();
+        }
+    });
+    inventoryElement('inventoryDifferenceExport').addEventListener('click', exportDiscrepancies);
     inventoryElement('inventoryGyjLoginButton').addEventListener('click', openGyjLogin);
     inventoryElement('inventoryGyjLoginClose').addEventListener('click', closeGyjLogin);
     inventoryElement('inventoryGyjLoginCancel').addEventListener('click', closeGyjLogin);
@@ -841,12 +1498,22 @@ function initializeInventoryPage() {
         if (event.key === 'Enter') submitGyjCaptcha();
     });
     bindInventoryDialogBackdrop(inventoryElement('inventoryCountDialog'), closeCountDialog);
+    bindInventoryDialogBackdrop(inventoryElement('inventorySerialWorkspace'), closeSerialWorkspace);
     bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
-        if (!document.hidden) pollInventoryTask({force: true});
+        if (document.hidden) {
+            stopSerialRefreshTimer();
+            return;
+        }
+        if (serialWorkspaceOpen && serialWorkspaceEditable) {
+            refreshSerialItem();
+            startSerialRefreshTimer();
+        }
+        if (inventoryActiveTab === 'current') pollInventoryTask({force: true});
     });
     window.addEventListener('beforeunload', () => {
         stopInventoryHeartbeat();
+        stopSerialRefreshTimer();
         stopGyjLoginPolling();
     });
     renderInventoryTask(null);

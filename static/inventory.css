@@ -9,6 +9,40 @@ body[data-aurora-page="inventory"] .status-bar {
     margin-top: 16px;
 }
 
+.inventory-workspace-tabs,
+.inventory-difference-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    overflow-x: auto;
+}
+
+.inventory-workspace-tab {
+    min-height: 44px;
+    padding: 10px 16px;
+    color: var(--aurora-muted);
+    white-space: nowrap;
+    border: 1px solid var(--aurora-line);
+    border-radius: 12px;
+    background: rgba(7, 19, 34, .66);
+    cursor: pointer;
+}
+
+.inventory-workspace-tab:hover,
+.inventory-workspace-tab:focus-visible,
+.inventory-workspace-tab.is-active {
+    color: var(--aurora-text);
+    border-color: var(--aurora-line-strong);
+    background: rgba(28, 72, 108, .72);
+    outline: none;
+}
+
+.inventory-current[hidden],
+.inventory-differences[hidden],
+.inventory-serial-queue[hidden] {
+    display: none !important;
+}
+
 .inventory-current {
     padding: 24px;
     overflow: hidden;
@@ -131,6 +165,17 @@ body[data-aurora-page="inventory"] .status-bar {
 .inventory-items {
     display: grid;
     gap: 10px;
+}
+
+.inventory-serial-queue {
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px solid var(--aurora-line);
+}
+
+.inventory-subhead h3 {
+    margin: 0 0 12px;
+    color: var(--aurora-text);
 }
 
 .inventory-item {
@@ -332,6 +377,169 @@ body[data-aurora-page="inventory"] .status-bar {
     margin-top: 14px;
 }
 
+.inventory-serial-dialog {
+    width: min(960px, calc(100vw - 32px));
+}
+
+.inventory-serial-counts {
+    grid-template-columns: repeat(5, minmax(108px, 1fr));
+}
+
+.inventory-serial-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.inventory-serial-group,
+.inventory-history-row,
+.inventory-discrepancy-card {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid var(--aurora-line);
+    border-radius: 14px;
+    background: rgba(4, 14, 26, .5);
+}
+
+.inventory-serial-group h3,
+.inventory-note-history h3 {
+    margin: 0 0 10px;
+    color: var(--aurora-text);
+    font-size: 14px;
+}
+
+.inventory-serial-list {
+    display: grid;
+    gap: 7px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.inventory-serial-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px;
+    border-radius: 10px;
+    background: rgba(11, 31, 51, .72);
+}
+
+.inventory-serial-copy {
+    min-width: 0;
+}
+
+.inventory-serial-copy strong,
+.inventory-serial-copy span {
+    display: block;
+    overflow-wrap: anywhere;
+}
+
+.inventory-serial-copy strong,
+.inventory-discrepancy-serial {
+    color: var(--aurora-cyan);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.inventory-serial-copy span {
+    margin-top: 3px;
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-serial-remove {
+    flex: 0 0 auto;
+    min-height: 36px;
+}
+
+.inventory-history,
+.inventory-differences {
+    display: grid;
+    gap: 12px;
+}
+
+.inventory-history-row {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(420px, 1.4fr) auto;
+    align-items: center;
+    gap: 14px;
+}
+
+.inventory-history-title {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.inventory-history-title strong {
+    overflow-wrap: anywhere;
+}
+
+.inventory-history-title span {
+    color: var(--aurora-muted);
+    font-size: 12px;
+}
+
+.inventory-history-metrics {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(90px, 1fr));
+    gap: 8px;
+}
+
+.inventory-difference-tabs {
+    margin-top: 18px;
+}
+
+.inventory-difference-search {
+    margin: 12px 0;
+}
+
+.inventory-difference-search input,
+.inventory-note-form input {
+    min-width: 0;
+    min-height: 44px;
+    color: var(--aurora-text) !important;
+    border: 1px solid var(--aurora-line-strong) !important;
+    border-radius: 11px;
+    background: var(--aurora-control-bg) !important;
+}
+
+.inventory-discrepancy-head,
+.inventory-note-form {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.inventory-note-history {
+    margin-top: 14px;
+}
+
+.inventory-note-entry {
+    padding: 9px 0;
+    border-top: 1px solid var(--aurora-line);
+}
+
+.inventory-note-entry p {
+    margin: 0 0 4px;
+    overflow-wrap: anywhere;
+}
+
+.inventory-note-entry span {
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-note-form {
+    margin-top: 12px;
+}
+
+.inventory-note-form input {
+    flex: 1;
+}
+
 .inventory-login-card {
     display: grid;
     gap: 11px;
@@ -367,6 +575,7 @@ body[data-aurora-page="inventory"] .status-bar {
 
 @media (max-width: 980px) {
     .inventory-summary { grid-template-columns: repeat(4, minmax(100px, 1fr)); }
+    .inventory-history-row { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
@@ -375,6 +584,7 @@ body[data-aurora-page="inventory"] .status-bar {
     .inventory-section-head { align-items: flex-start; }
     .inventory-section-head .btn { min-height: 44px; }
     .inventory-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .inventory-serial-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-toolbar { grid-template-columns: 1fr; }
     .inventory-item-top,
     .inventory-item-product,
@@ -384,6 +594,14 @@ body[data-aurora-page="inventory"] .status-bar {
     .inventory-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
     .inventory-dialog-card { max-height: calc(100vh - 16px); padding: 17px 14px; }
     .inventory-dialog-actions .btn { min-height: 44px; flex: 1; }
+    .inventory-serial-details { grid-template-columns: 1fr; }
+    .inventory-serial-row,
+    .inventory-discrepancy-head,
+    .inventory-note-form { align-items: stretch; flex-direction: column; }
+    .inventory-history-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .inventory-history-export,
+    .inventory-discrepancy-head .btn,
+    .inventory-note-form .btn { width: 100%; min-height: 44px; }
     .inventory-captcha-controls { align-items: stretch; flex-wrap: wrap; }
     .inventory-captcha-controls input { flex: 1 1 150px; }
 }

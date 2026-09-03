@@ -565,6 +565,52 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.archive_discrepancy.assert_not_called()
         self.store.restore_discrepancy.assert_not_called()
 
+    def test_history_and_discrepancy_route_json_contract_matches_store_rows(self):
+        history_row = {
+            "task_id": "task-history-1", "owner": "counter-id",
+            "created_by": "盘点员", "phase": "completed", "version": 8,
+            "started_at": "2026-09-01T08:00:00",
+            "completed_at": "2026-09-01T09:00:00", "last_sync_at": None,
+            "gyj_status": "synced", "sync_resume_phase": None,
+            "completed": True,
+        }
+        discrepancy_row = {
+            "id": 9, "task_id": "task-history-1", "barcode": "A/B",
+            "serial": "SN/1", "kind": "other_product_serial",
+            "book_quantity": None, "counted_quantity": None,
+            "difference": None, "state": "open", "archived_by": None,
+            "archived_at": None, "created_at": "2026-09-01T09:00:00",
+            "name": "滤芯", "spec": "S", "model": "M", "category": "耗材",
+            "unit": "支", "has_serial": True,
+            "completed_at": "2026-09-01T09:00:00", "scan_actor": "盘点员",
+            "scan_device": "device-a", "scanned_at": "2026-09-01T08:30:00",
+            "lookup_barcode": "OTHER", "lookup_name": "其他商品",
+            "warehouse": "南昌仓", "shipped": False,
+            "notes": [{
+                "id": 1, "task_id": "task-history-1", "barcode": "A/B",
+                "serial": "SN/1", "note": "已复核", "actor": "盘点员",
+                "created_at": "2026-09-01T09:10:00",
+            }],
+            "note": "已复核",
+        }
+        self.store.list_task_history.return_value = [history_row]
+        self.store.list_discrepancies.return_value = [discrepancy_row]
+        client = self.login_account("counter")
+
+        history = client.get("/api/inventory/tasks/history").get_json()
+        discrepancies = client.get(
+            "/api/inventory/discrepancies?state=open&query=SN%2F1"
+        ).get_json()
+
+        self.assertEqual(history, {"success": True, "tasks": [history_row]})
+        self.assertEqual(
+            discrepancies,
+            {"success": True, "discrepancies": [discrepancy_row]},
+        )
+        self.store.list_discrepancies.assert_called_with(
+            "counter-id", "open", query="SN/1"
+        )
+
     def test_export_routes_are_owner_scoped_filtered_and_price_free(self):
         self.store.get_task_snapshot.return_value = {
             "success": True,

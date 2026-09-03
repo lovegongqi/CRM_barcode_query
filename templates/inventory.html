@@ -34,7 +34,12 @@
     </div>
 
     <main id="inventoryRoot" class="inventory-shell">
-        <section id="inventoryCurrentRoot" class="inventory-current" aria-labelledby="inventoryCurrentTitle">
+        <div class="inventory-workspace-tabs" role="tablist" aria-label="库存盘点工作区">
+            <button id="inventoryTabCurrent" class="inventory-workspace-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="inventoryCurrentRoot" data-inventory-tab="current">当前盘点</button>
+            <button id="inventoryTabHistory" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryHistoryRoot" data-inventory-tab="history">历史任务</button>
+            <button id="inventoryTabDifferences" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryDiscrepanciesRoot" data-inventory-tab="differences">历史差异</button>
+        </div>
+        <section id="inventoryCurrentRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabCurrent">
             <div class="inventory-section-head">
                 <div>
                     <p class="inventory-eyebrow">CURRENT STOCKTAKE</p>
@@ -65,10 +70,46 @@
             </div>
 
             <div id="inventoryItems" class="inventory-items" aria-live="polite"></div>
+            <section id="inventorySerialQueueRoot" class="inventory-serial-queue" aria-labelledby="inventorySerialQueueTitle" hidden>
+                <div class="inventory-subhead">
+                    <div>
+                        <p class="inventory-eyebrow">SERIAL RECONCILIATION</p>
+                        <h3 id="inventorySerialQueueTitle">待序列号核对</h3>
+                    </div>
+                </div>
+                <div id="inventorySerialQueue" class="inventory-items" aria-live="polite"></div>
+            </section>
         </section>
-        <section id="inventoryHistoryRoot" hidden></section>
-        <section id="inventoryDiscrepanciesRoot" hidden></section>
-        <section id="inventoryAdminRoot" hidden></section>
+        <section id="inventoryHistoryRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabHistory" hidden>
+            <div class="inventory-section-head">
+                <div>
+                    <p class="inventory-eyebrow">COMPLETED STOCKTAKES</p>
+                    <h2 id="inventoryHistoryTitle">历史任务</h2>
+                </div>
+            </div>
+            <p id="inventoryHistoryStatus" class="inventory-notice" role="status" aria-live="polite"></p>
+            <div id="inventoryHistory" class="inventory-history" aria-live="polite"></div>
+        </section>
+        <section id="inventoryDiscrepanciesRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabDifferences" hidden>
+            <div class="inventory-section-head">
+                <div>
+                    <p class="inventory-eyebrow">DISCREPANCY HISTORY</p>
+                    <h2 id="inventoryDifferencesTitle">历史差异</h2>
+                </div>
+                <button id="inventoryDifferenceExport" class="btn btn-secondary" type="button">导出当前筛选 Excel</button>
+            </div>
+            <div class="inventory-difference-tabs" role="tablist" aria-label="差异状态">
+                <button id="inventoryDifferenceTabOpen" class="inventory-workspace-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="inventoryDifferencesOpen" data-difference-state="open">待处理</button>
+                <button id="inventoryDifferenceTabArchived" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryDifferencesArchived" data-difference-state="archived">已归档</button>
+            </div>
+            <label class="inventory-search-field inventory-difference-search" for="inventoryDifferenceSearch">
+                <span>搜索商品条码、名称或序列号</span>
+                <input id="inventoryDifferenceSearch" type="search" autocomplete="off" placeholder="输入关键词">
+            </label>
+            <p id="inventoryDifferencesStatus" class="inventory-notice" role="status" aria-live="polite"></p>
+            <div id="inventoryDifferencesOpen" class="inventory-differences" role="tabpanel" aria-labelledby="inventoryDifferenceTabOpen" aria-live="polite"></div>
+            <div id="inventoryDifferencesArchived" class="inventory-differences" role="tabpanel" aria-labelledby="inventoryDifferenceTabArchived" aria-live="polite" hidden></div>
+        </section>
     </main>
 </div>
 
@@ -99,6 +140,30 @@
         <div class="inventory-dialog-actions">
             <button class="btn btn-secondary" id="inventoryCountCancel" type="button">取消</button>
             <button class="btn btn-primary" id="inventoryCountSubmit" type="button">确认实盘数量</button>
+        </div>
+    </div>
+</dialog>
+
+<dialog id="inventorySerialWorkspace" aria-labelledby="inventorySerialTitle" aria-modal="true" class="inventory-dialog inventory-serial-dialog">
+    <div class="inventory-dialog-card inventory-serial-card">
+        <div class="inventory-dialog-head">
+            <div>
+                <p class="inventory-eyebrow">SERIAL RECONCILIATION</p>
+                <h2 id="inventorySerialTitle">序列号核对</h2>
+            </div>
+            <button class="inventory-icon-button" id="inventorySerialClose" type="button" aria-label="关闭序列号核对窗口">×</button>
+        </div>
+        <div id="inventorySerialProduct" class="inventory-count-product"></div>
+        <label class="inventory-count-field" for="inventorySerialInput">
+            <span>扫描序列号</span>
+            <input id="inventorySerialInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫描后按 Enter">
+        </label>
+        <p id="inventorySerialMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
+        <div id="inventorySerialCounts" class="inventory-summary inventory-serial-counts" aria-label="序列号核对摘要"></div>
+        <div id="inventorySerialDetails" class="inventory-serial-details" aria-live="polite"></div>
+        <div class="inventory-dialog-actions">
+            <button class="btn btn-secondary" id="inventorySerialCancel" type="button">关闭</button>
+            <button class="btn btn-primary" id="inventorySerialFinish" type="button">完成该商品核对</button>
         </div>
     </div>
 </dialog>

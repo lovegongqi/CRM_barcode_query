@@ -805,6 +805,44 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertIn("if (session !== gyjLoginSession || !dialog.open) return;", script)
 
+    def test_inventory_serial_and_history_contract(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for token in (
+            'role="tablist"', '当前盘点', '历史任务', '历史差异',
+            'id="inventorySerialWorkspace"', 'id="inventorySerialInput"',
+            'id="inventoryHistory"', 'id="inventoryDifferencesOpen"',
+            'id="inventoryDifferencesArchived"', "openSerialItem",
+            "scanSerial", "finishSerialItem", "loadInventoryHistory",
+            "loadDiscrepancies", "saveDiscrepancyNote",
+            "archiveDiscrepancy", "restoreDiscrepancy",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source + script)
+        for label in (
+            "匹配", "账面独有", "实物独有", "其他商品", "重复扫描",
+            "任务号", "开始时间", "完成时间", "参与人数", "商品总数",
+            "数量差异", "序列号差异", "Excel", "待处理", "已归档",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, source + script)
+        self.assertNotIn("innerHTML", script)
+
+    def test_inventory_serial_history_and_discrepancy_timing_contract(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for endpoint in (
+            "/serial/open", "/serial/refresh", "/serials", "/serial/finish",
+            "/api/inventory/tasks/history", "/api/inventory/discrepancies",
+            "/notes", "/archive", "/restore", "/export",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIn(endpoint, script)
+        self.assertRegex(script, r"setInterval\([^,]+,\s*60000\)")
+        self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
+        self.assertIn("CURRENT_ACCOUNT.is_admin", script)
+        self.assertIn("encodeURIComponent(serial)", script)
+        self.assertIn("method: 'DELETE'", script)
+
     def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
         self.assertIn("'/transfer': ['⇄', '移库']", aurora)
