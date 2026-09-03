@@ -308,3 +308,64 @@ class InventoryStoreTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_expired'",
                 (task["task_id"],),
             ).fetchone()[0], 1)
+
+    def test_record_count_is_atomic_releases_lock_and_gates_serial_phase(self):
+        store = InventoryStore(self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0))
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        store.claim_item(task["task_id"], "B2", "device-b", "乙", "counting")
+        store.set_open_book_quantity(
+            "admin", task["task_id"], "B2", "device-b", "乙", "0"
+        )
+        first = store.record_count(
+            "admin", task["task_id"], "B2", "device-b", "乙",
+            completed_book_qty="0", completed_actual_qty="1", diff_qty="1",
+            state="serial_pending",
+        )
+        self.assertEqual(first["state"], "serial_pending")
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["phase"], "counting")
+        with self.assertRaises(InventoryConflict):
+            store.assert_item_lock(task["task_id"], "B2", "device-b", "counting")
+
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        store.set_open_book_quantity(
+            "admin", task["task_id"], "A1", "device-a", "甲", "2"
+        )
+        store.record_count(
+            "admin", task["task_id"], "A1", "device-a", "甲",
+            completed_book_qty="2", completed_actual_qty="2", diff_qty="0",
+            state="matched",
+        )
+        self.assertEqual(store.get_task_snapshot("admin", task["task_id"])["phase"], "serial_check")
+
+    def test_bulk_completed_stock_update_rolls_back_when_one_total_is_invalid(self):
+        store = InventoryStore(self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0))
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        for barcode, device, book, actual, state in (
+            ("A1", "device-a", "2", "1", "variance"),
+            ("B2", "device-b", "0", "1", "serial_pending"),
+        ):
+            store.claim_item(task["task_id"], barcode, device, device, "counting")
+            store.set_open_book_quantity("admin", task["task_id"], barcode, device, device, book)
+            store.record_count(
+                "admin", task["task_id"], barcode, device, device,
+                completed_book_qty=book, completed_actual_qty=actual,
+                diff_qty="-1" if barcode == "A1" else "1", state=state,
+            )
+        before = store.get_task_snapshot("admin", task["task_id"])
+        with self.assertRaises(ValueError):
+            store.update_completed_stock(
+                "admin", task["task_id"], {"A1": "1", "B2": "not-a-number"},
+                synced_at=datetime(2026, 9, 1, 10, 1, 0),
+            )
+        after = store.get_task_snapshot("admin", task["task_id"])
+        self.assertEqual(
+            [row["latest_book_quantity"] for row in after["items"]],
+            [row["latest_book_quantity"] for row in before["items"]],
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_stock_movements WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0], 0)
