@@ -600,9 +600,10 @@ class InventoryServiceTests(unittest.TestCase):
             "admin", second["task_id"], "管理员"
         )
 
-        history = InventoryStore(
+        history_page = InventoryStore(
             self.db_path, now=self.now
         ).list_task_history("admin")
+        history = history_page["tasks"]
 
         self.assertEqual(
             [row["task_id"] for row in history],
@@ -612,8 +613,9 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(history[1]["version"], first_completed["version"])
         self.assertTrue(all(row["completed"] for row in history))
         self.assertEqual(
-            InventoryStore(self.db_path).list_task_history("other"), []
+            InventoryStore(self.db_path).list_task_history("other")["tasks"], []
         )
+        self.assertEqual(history_page["total"], 2)
 
     def test_submit_failure_keeps_lock_and_success_releases_it(self):
         task = self.create_task()

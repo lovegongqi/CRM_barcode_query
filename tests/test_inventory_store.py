@@ -797,3 +797,66 @@ class InventoryStoreTests(unittest.TestCase):
                 store.archive_discrepancy(
                     "admin", missing_id, "管理员", True
                 )
+
+    def test_history_page_aggregates_counts_and_distinct_participating_devices(self):
+        store = InventoryStore(self.db_path)
+        with store.connect() as connection:
+            tasks = [
+                ("older", "admin", "创建者", "2026-09-01T08:00:00", "2026-09-01T09:00:00"),
+                ("newer", "admin", "创建者", "2026-09-02T08:00:00", "2026-09-02T09:00:00"),
+                ("other", "other", "其他人", "2026-09-03T08:00:00", "2026-09-03T09:00:00"),
+            ]
+            connection.executemany(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, started_at, completed_at)
+                   VALUES (?, ?, ?, 'completed', ?, ?)""",
+                tasks,
+            )
+            items = [
+                ("newer", "A1", "商品一", "1"),
+                ("newer", "B2", "商品二", "0"),
+                ("older", "A1", "商品一", "1"),
+            ]
+            connection.executemany(
+                """INSERT INTO inventory_items
+                   (task_id, barcode, name, difference, updated_at)
+                   VALUES (?, ?, ?, ?, '2026-09-03T10:00:00')""",
+                items,
+            )
+            connection.executemany(
+                """INSERT INTO inventory_discrepancies
+                   (task_id, barcode, serial, kind, status, created_at)
+                   VALUES (?, ?, ?, 'system_only_serial', 'open', '2026-09-03T10:00:00')""",
+                [("newer", "A1", "SN-1"), ("newer", "A1", "SN-2")],
+            )
+            connection.executemany(
+                """INSERT INTO inventory_audit_events
+                   (task_id, event_type, actor, device_id, created_at)
+                   VALUES ('newer', 'item_counted', ?, ?, '2026-09-03T10:00:00')""",
+                [("甲", "device-a"), ("乙", "device-b"), ("丙", "device-a"), ("丁", "")],
+            )
+
+        first_page = store.list_task_history("admin", limit=1, offset=0)
+        second_page = store.list_task_history("admin", limit=1, offset=1)
+
+        self.assertEqual(first_page["total"], 2)
+        self.assertEqual(first_page["limit"], 1)
+        self.assertEqual(first_page["offset"], 0)
+        self.assertEqual([row["task_id"] for row in first_page["tasks"]], ["newer"])
+        self.assertEqual(
+            {
+                key: first_page["tasks"][0][key]
+                for key in (
+                    "product_total", "quantity_difference_count",
+                    "serial_difference_count", "participant_count",
+                )
+            },
+            {
+                "product_total": 2,
+                "quantity_difference_count": 1,
+                "serial_difference_count": 2,
+                "participant_count": 2,
+            },
+        )
+        self.assertEqual(second_page["tasks"][0]["participant_count"], 1)
+        self.assertEqual(store.list_task_history("other")["total"], 1)

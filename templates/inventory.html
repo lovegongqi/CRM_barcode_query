@@ -35,9 +35,9 @@
 
     <main id="inventoryRoot" class="inventory-shell">
         <div class="inventory-workspace-tabs" role="tablist" aria-label="库存盘点工作区">
-            <button id="inventoryTabCurrent" class="inventory-workspace-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="inventoryCurrentRoot" data-inventory-tab="current">当前盘点</button>
-            <button id="inventoryTabHistory" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryHistoryRoot" data-inventory-tab="history">历史任务</button>
-            <button id="inventoryTabDifferences" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryDiscrepanciesRoot" data-inventory-tab="differences">历史差异</button>
+            <button id="inventoryTabCurrent" class="inventory-workspace-tab is-active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="inventoryCurrentRoot" data-inventory-tab="current">当前盘点</button>
+            <button id="inventoryTabHistory" class="inventory-workspace-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="inventoryHistoryRoot" data-inventory-tab="history">历史任务</button>
+            <button id="inventoryTabDifferences" class="inventory-workspace-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="inventoryDiscrepanciesRoot" data-inventory-tab="differences">历史差异</button>
         </div>
         <section id="inventoryCurrentRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabCurrent">
             <div class="inventory-section-head">
@@ -89,6 +89,7 @@
             </div>
             <p id="inventoryHistoryStatus" class="inventory-notice" role="status" aria-live="polite"></p>
             <div id="inventoryHistory" class="inventory-history" aria-live="polite"></div>
+            <button id="inventoryHistoryLoadMore" class="btn btn-secondary inventory-history-load-more" type="button" hidden>加载更多</button>
         </section>
         <section id="inventoryDiscrepanciesRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabDifferences" hidden>
             <div class="inventory-section-head">
@@ -99,8 +100,8 @@
                 <button id="inventoryDifferenceExport" class="btn btn-secondary" type="button">导出当前筛选 Excel</button>
             </div>
             <div class="inventory-difference-tabs" role="tablist" aria-label="差异状态">
-                <button id="inventoryDifferenceTabOpen" class="inventory-workspace-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="inventoryDifferencesOpen" data-difference-state="open">待处理</button>
-                <button id="inventoryDifferenceTabArchived" class="inventory-workspace-tab" type="button" role="tab" aria-selected="false" aria-controls="inventoryDifferencesArchived" data-difference-state="archived">已归档</button>
+                <button id="inventoryDifferenceTabOpen" class="inventory-workspace-tab is-active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="inventoryDifferencesOpen" data-difference-state="open">待处理</button>
+                <button id="inventoryDifferenceTabArchived" class="inventory-workspace-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="inventoryDifferencesArchived" data-difference-state="archived">已归档</button>
             </div>
             <label class="inventory-search-field inventory-difference-search" for="inventoryDifferenceSearch">
                 <span>搜索商品条码、名称或序列号</span>

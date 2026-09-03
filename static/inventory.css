@@ -487,6 +487,10 @@ body[data-aurora-page="inventory"] .status-bar {
     gap: 8px;
 }
 
+.inventory-history-load-more {
+    justify-self: center;
+}
+
 .inventory-difference-tabs {
     margin-top: 18px;
 }

@@ -10695,12 +10695,29 @@ def api_inventory_create_task():
 @_inventory_api
 def api_inventory_task_history():
     owner, _actor = _inventory_identity()
+    try:
+        limit = int(request.args.get("limit", 20))
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        raise ValueError("历史任务分页参数不正确")
+    if not 1 <= limit <= 50 or offset < 0:
+        raise ValueError("历史任务分页参数不正确")
+    page = inventory_store.list_task_history(
+        owner, limit=limit, offset=offset
+    )
+    tasks = [
+        _inventory_public_task(task)
+        for task in page["tasks"]
+    ]
     return jsonify({
         "success": True,
-        "tasks": [
-            _inventory_public_task(task)
-            for task in inventory_store.list_task_history(owner)
-        ],
+        "tasks": tasks,
+        "pagination": {
+            "limit": page["limit"],
+            "offset": page["offset"],
+            "total": page["total"],
+            "has_more": page["offset"] + len(tasks) < page["total"],
+        },
     })
 
 

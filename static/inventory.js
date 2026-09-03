@@ -20,12 +20,18 @@ let inventoryTabGeneration = 0;
 let inventoryDifferenceState = 'open';
 let inventoryDifferenceGeneration = 0;
 let inventoryDifferenceSearchTimer = null;
+let inventoryHistoryTasks = [];
+let inventoryHistoryHasMore = false;
 let currentSerialBarcode = '';
 let currentSerialData = null;
 let serialWorkspaceOpen = false;
 let serialWorkspaceEditable = false;
 let serialWorkspaceRequestId = 0;
 let serialScanPending = false;
+let serialScanQueueLength = 0;
+let serialOperationQueue = Promise.resolve();
+let serialOperationGeneration = 0;
+let serialRenderedGeneration = 0;
 let serialRefreshTimer = null;
 
 function inventoryElement(id) {
@@ -697,6 +703,37 @@ function stopSerialRefreshTimer() {
     serialRefreshTimer = null;
 }
 
+function resetSerialOperations() {
+    serialOperationGeneration += 1;
+    serialRenderedGeneration = serialOperationGeneration;
+    serialOperationQueue = Promise.resolve();
+    serialScanQueueLength = 0;
+    serialScanPending = false;
+}
+
+function serialOperationIsOpen(requestId) {
+    return requestId === serialWorkspaceRequestId && serialWorkspaceOpen;
+}
+
+function queueSerialOperation(operation) {
+    const requestId = serialWorkspaceRequestId;
+    const generation = ++serialOperationGeneration;
+    const run = async () => {
+        if (!serialOperationIsOpen(requestId)) return null;
+        return operation(requestId, generation);
+    };
+    const pending = serialOperationQueue.then(run, run);
+    serialOperationQueue = pending.catch(() => null);
+    return pending;
+}
+
+function renderSerialOperation(value, requestId, generation) {
+    if (!serialOperationIsOpen(requestId) || generation < serialRenderedGeneration) return false;
+    serialRenderedGeneration = generation;
+    renderSerialReconciliation(value);
+    return true;
+}
+
 async function sendSerialHeartbeat() {
     if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
     try {
@@ -816,10 +853,10 @@ function renderSerialReconciliation(value) {
 
 function closeSerialWorkspace() {
     serialWorkspaceRequestId += 1;
+    resetSerialOperations();
     stopSerialRefreshTimer();
     serialWorkspaceOpen = false;
     serialWorkspaceEditable = false;
-    serialScanPending = false;
     currentSerialBarcode = '';
     currentSerialData = null;
     const dialog = inventoryElement('inventorySerialWorkspace');
@@ -831,6 +868,7 @@ async function openSerialItem(barcode) {
     const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
     if (!item || item.state !== 'serial_pending') return;
     const requestId = ++serialWorkspaceRequestId;
+    resetSerialOperations();
     const dialog = inventoryElement('inventorySerialWorkspace');
     currentSerialBarcode = barcode;
     currentSerialData = null;
@@ -870,19 +908,17 @@ async function openSerialItem(barcode) {
     }
 }
 
-async function refreshSerialItem(force = false) {
+async function performSerialRefresh(force, requestId, generation) {
     if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return null;
-    const requestId = serialWorkspaceRequestId;
     try {
         const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serial/refresh`,
             {device_id: inventoryDeviceId, force: force === true},
         );
-        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return null;
-        renderSerialReconciliation(data.serial);
+        if (!renderSerialOperation(data.serial, requestId, generation)) return null;
         return data.serial;
     } catch (error) {
-        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return null;
+        if (!serialOperationIsOpen(requestId)) return null;
         if (error.status === 409) {
             const owner = error.data && error.data.lock_owner;
             setSerialReadOnly(error.message, owner || '');
@@ -895,78 +931,104 @@ async function refreshSerialItem(force = false) {
     }
 }
 
+function refreshSerialItem(force = false) {
+    if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) {
+        return Promise.resolve(null);
+    }
+    return queueSerialOperation((requestId, generation) => (
+        performSerialRefresh(force, requestId, generation)
+    ));
+}
+
 async function scanSerial(event) {
     if (!event || event.key !== 'Enter') return;
     event.preventDefault();
     const input = inventoryElement('inventorySerialInput');
-    const serial = input.value.trim();
-    input.value = '';
-    if (!serial || serialScanPending || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) {
+    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) {
         input.focus();
         return;
     }
+    const serial = input.value.trim();
+    if (!serial) {
+        input.focus();
+        return;
+    }
+    input.value = '';
+    const taskId = inventoryTask.task_id;
+    const barcode = currentSerialBarcode;
+    serialScanQueueLength += 1;
     serialScanPending = true;
-    const requestId = serialWorkspaceRequestId;
-    try {
-        const data = await inventoryPost(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serials`,
-            {device_id: inventoryDeviceId, serial},
-        );
-        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
-        const scan = data.scan || {};
-        if (scan.classification === 'duplicate') {
-            const duplicates = Array.isArray(currentSerialData && currentSerialData.duplicates)
-                ? currentSerialData.duplicates.slice()
-                : [];
-            duplicates.push(scan);
-            renderSerialReconciliation({
-                ...currentSerialData,
-                duplicates,
-                counts: {...(currentSerialData.counts || {}), duplicates: duplicates.length},
-            });
-        } else {
-            await refreshSerialItem();
+    return queueSerialOperation(async (requestId, generation) => {
+        try {
+            if (!serialWorkspaceEditable) return;
+            const data = await inventoryPost(
+                `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials`,
+                {device_id: inventoryDeviceId, serial},
+            );
+            if (!serialOperationIsOpen(requestId)) return;
+            const scan = data.scan || {};
+            if (scan.classification === 'duplicate') {
+                const duplicates = Array.isArray(currentSerialData && currentSerialData.duplicates)
+                    ? currentSerialData.duplicates.slice()
+                    : [];
+                duplicates.push(scan);
+                renderSerialOperation({
+                    ...currentSerialData,
+                    duplicates,
+                    counts: {...(currentSerialData.counts || {}), duplicates: duplicates.length},
+                }, requestId, generation);
+            } else {
+                await performSerialRefresh(false, requestId, generation);
+            }
+            if (serialOperationIsOpen(requestId)) {
+                setSerialMessage(`${inventoryText(scan.serial, serial)}：${serialClassificationLabel(scan.classification)}`, scan.classification === 'matched' ? 'success' : '');
+            }
+        } catch (error) {
+            if (serialOperationIsOpen(requestId)) {
+                if (error.status === 409) {
+                    const owner = error.data && error.data.lock_owner;
+                    setSerialReadOnly(error.message, owner || '');
+                } else {
+                    setSerialMessage(error.message, 'error');
+                }
+            }
+        } finally {
+            if (requestId === serialWorkspaceRequestId) {
+                serialScanQueueLength = Math.max(0, serialScanQueueLength - 1);
+                serialScanPending = serialScanQueueLength > 0;
+            }
+            if (serialOperationIsOpen(requestId) && serialWorkspaceEditable) input.focus();
         }
-        setSerialMessage(`${inventoryText(scan.serial, serial)}：${serialClassificationLabel(scan.classification)}`, scan.classification === 'matched' ? 'success' : '');
-    } catch (error) {
-        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen) {
+    });
+}
+
+function deleteSerialScan(serial) {
+    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
+    const taskId = inventoryTask.task_id;
+    const barcode = currentSerialBarcode;
+    return queueSerialOperation(async (requestId, generation) => {
+        try {
+            if (!serialWorkspaceEditable) return;
+            const data = await inventoryDelete(
+                `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials/${encodeURIComponent(serial)}`,
+                {device_id: inventoryDeviceId},
+            );
+            if (!renderSerialOperation(data.serial, requestId, generation)) return;
+            setSerialMessage(`${serial} 已删除，操作已记录。`, 'success');
+        } catch (error) {
+            if (!serialOperationIsOpen(requestId)) return;
             if (error.status === 409) {
                 const owner = error.data && error.data.lock_owner;
                 setSerialReadOnly(error.message, owner || '');
             } else {
                 setSerialMessage(error.message, 'error');
             }
+        } finally {
+            if (serialOperationIsOpen(requestId) && serialWorkspaceEditable) {
+                inventoryElement('inventorySerialInput').focus();
+            }
         }
-    } finally {
-        serialScanPending = false;
-        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen && serialWorkspaceEditable) input.focus();
-    }
-}
-
-async function deleteSerialScan(serial) {
-    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
-    const requestId = serialWorkspaceRequestId;
-    try {
-        const data = await inventoryDelete(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serials/${encodeURIComponent(serial)}`,
-            {device_id: inventoryDeviceId},
-        );
-        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
-        renderSerialReconciliation(data.serial);
-        setSerialMessage(`${serial} 已删除，操作已记录。`, 'success');
-    } catch (error) {
-        if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen) return;
-        if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setSerialReadOnly(error.message, owner || '');
-        } else {
-            setSerialMessage(error.message, 'error');
-        }
-    } finally {
-        if (requestId === serialWorkspaceRequestId && serialWorkspaceOpen && serialWorkspaceEditable) {
-            inventoryElement('inventorySerialInput').focus();
-        }
-    }
+    });
 }
 
 async function finishSerialItem() {
@@ -1003,17 +1065,12 @@ function setWorkspaceStatus(id, message, kind = '') {
     target.className = 'inventory-notice' + (kind ? ` is-${kind}` : '');
 }
 
-function inventoryHistoryCounts(task, discrepancies) {
-    const items = Array.isArray(task.items) ? task.items : null;
-    const rows = discrepancies.filter((row) => row.task_id === task.task_id);
-    return {
-        products: items ? items.length : '加载失败',
-        quantity: items ? items.filter((item) => decimalDirection(item.diff_qty) !== 0).length : '加载失败',
-        serial: rows.filter((row) => row.serial !== null && row.serial !== undefined && row.serial !== '').length,
-    };
+function inventoryHistoryCount(value) {
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
-function renderInventoryHistory(tasks, discrepancies = []) {
+function renderInventoryHistory(tasks) {
     const root = inventoryElement('inventoryHistory');
     root.replaceChildren();
     if (!tasks.length) {
@@ -1021,7 +1078,6 @@ function renderInventoryHistory(tasks, discrepancies = []) {
         return;
     }
     tasks.forEach((task) => {
-        const counts = inventoryHistoryCounts(task, discrepancies);
         const row = inventoryNode('article', 'inventory-history-row');
         const title = inventoryNode('div', 'inventory-history-title');
         title.append(
@@ -1031,10 +1087,10 @@ function renderInventoryHistory(tasks, discrepancies = []) {
         );
         const metrics = inventoryNode('div', 'inventory-history-metrics');
         metrics.append(
-            inventoryMetric('参与人数', '接口未提供'),
-            inventoryMetric('商品总数', counts.products),
-            inventoryMetric('数量差异', counts.quantity),
-            inventoryMetric('序列号差异', counts.serial),
+            inventoryMetric('参与人数', inventoryHistoryCount(task.participant_count)),
+            inventoryMetric('商品总数', inventoryHistoryCount(task.product_total)),
+            inventoryMetric('数量差异', inventoryHistoryCount(task.quantity_difference_count)),
+            inventoryMetric('序列号差异', inventoryHistoryCount(task.serial_difference_count)),
         );
         const download = inventoryNode('a', 'btn btn-secondary inventory-history-export', '下载 Excel');
         download.href = `/api/inventory/tasks/${encodeURIComponent(task.task_id)}/export`;
@@ -1043,36 +1099,36 @@ function renderInventoryHistory(tasks, discrepancies = []) {
     });
 }
 
-async function loadInventoryHistory(expectedGeneration = inventoryTabGeneration) {
-    setWorkspaceStatus('inventoryHistoryStatus', '正在读取历史任务…');
+async function loadInventoryHistory(expectedGeneration = inventoryTabGeneration, reset = true) {
+    const button = inventoryElement('inventoryHistoryLoadMore');
+    const offset = reset ? 0 : inventoryHistoryTasks.length;
+    setWorkspaceStatus('inventoryHistoryStatus', reset ? '正在读取历史任务…' : '正在加载更多历史任务…');
+    button.disabled = true;
     try {
-        const data = await inventoryRequest('/api/inventory/tasks/history');
+        const data = await inventoryRequest(
+            `/api/inventory/tasks/history?limit=20&offset=${offset}`
+        );
         if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
         const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-        const detailRequests = tasks.map(async (task) => {
-            try {
-                const detail = await inventoryRequest(`/api/inventory/tasks/${encodeURIComponent(task.task_id)}`);
-                return {...task, items: Array.isArray(detail.task && detail.task.items) ? detail.task.items : []};
-            } catch (_error) {
-                return {...task, items: null};
-            }
-        });
-        const [details, open, archived] = await Promise.all([
-            Promise.all(detailRequests),
-            inventoryRequest('/api/inventory/discrepancies?state=open'),
-            inventoryRequest('/api/inventory/discrepancies?state=archived'),
-        ]);
-        if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
-        const discrepancies = [
-            ...(Array.isArray(open.discrepancies) ? open.discrepancies : []),
-            ...(Array.isArray(archived.discrepancies) ? archived.discrepancies : []),
-        ];
-        renderInventoryHistory(details, discrepancies);
+        inventoryHistoryTasks = reset ? tasks : inventoryHistoryTasks.concat(tasks);
+        const pagination = data.pagination || {};
+        inventoryHistoryHasMore = pagination.has_more === true;
+        renderInventoryHistory(inventoryHistoryTasks);
+        button.hidden = !inventoryHistoryHasMore;
         setWorkspaceStatus('inventoryHistoryStatus', '');
     } catch (error) {
         if (expectedGeneration !== inventoryTabGeneration || inventoryActiveTab !== 'history') return;
-        inventoryElement('inventoryHistory').replaceChildren();
+        if (reset) {
+            inventoryHistoryTasks = [];
+            inventoryHistoryHasMore = false;
+            inventoryElement('inventoryHistory').replaceChildren();
+            button.hidden = true;
+        }
         setWorkspaceStatus('inventoryHistoryStatus', error.message, 'error');
+    } finally {
+        if (expectedGeneration === inventoryTabGeneration && inventoryActiveTab === 'history') {
+            button.disabled = false;
+        }
     }
 }
 
@@ -1232,8 +1288,10 @@ function switchDifferenceState(state) {
     inventoryElement('inventoryDifferencesArchived').hidden = open;
     inventoryElement('inventoryDifferenceTabOpen').classList.toggle('is-active', open);
     inventoryElement('inventoryDifferenceTabOpen').setAttribute('aria-selected', String(open));
+    inventoryElement('inventoryDifferenceTabOpen').tabIndex = open ? 0 : -1;
     inventoryElement('inventoryDifferenceTabArchived').classList.toggle('is-active', !open);
     inventoryElement('inventoryDifferenceTabArchived').setAttribute('aria-selected', String(!open));
+    inventoryElement('inventoryDifferenceTabArchived').tabIndex = open ? -1 : 0;
     return loadDiscrepancies();
 }
 
@@ -1260,11 +1318,43 @@ function switchInventoryTab(tab) {
         inventoryElement(panelId).hidden = !active;
         inventoryElement(tabId).classList.toggle('is-active', active);
         inventoryElement(tabId).setAttribute('aria-selected', String(active));
+        inventoryElement(tabId).tabIndex = active ? 0 : -1;
     });
     if (selected === 'history') return loadInventoryHistory(generation);
     if (selected === 'differences') return loadDiscrepancies(generation);
     lastInventoryVersion = null;
     return pollInventoryTask({force: true});
+}
+
+function bindRovingTablist(definitions, activate) {
+    const tabs = definitions.map(([id]) => inventoryElement(id));
+    definitions.forEach(([, value], index) => {
+        const tab = tabs[index];
+        tab.addEventListener('click', () => activate(value));
+        tab.addEventListener('keydown', (event) => {
+            let targetIndex = null;
+            if (event.key === 'ArrowRight') targetIndex = (index + 1) % tabs.length;
+            if (event.key === 'ArrowLeft') targetIndex = (index - 1 + tabs.length) % tabs.length;
+            if (event.key === 'Home') targetIndex = 0;
+            if (event.key === 'End') targetIndex = tabs.length - 1;
+            if (targetIndex === null) return;
+            event.preventDefault();
+            activate(definitions[targetIndex][1]);
+            tabs[targetIndex].focus();
+        });
+    });
+}
+
+function bindInventoryTablists() {
+    bindRovingTablist([
+        ['inventoryTabCurrent', 'current'],
+        ['inventoryTabHistory', 'history'],
+        ['inventoryTabDifferences', 'differences'],
+    ], switchInventoryTab);
+    bindRovingTablist([
+        ['inventoryDifferenceTabOpen', 'open'],
+        ['inventoryDifferenceTabArchived', 'archived'],
+    ], switchDifferenceState);
 }
 
 function setGyjLoginMessage(message, kind = '') {
@@ -1455,9 +1545,10 @@ function bindInventoryDialogBackdrop(dialog, close) {
 
 function initializeInventoryPage() {
     inventoryDeviceId = getInventoryDeviceId();
-    inventoryElement('inventoryTabCurrent').addEventListener('click', () => switchInventoryTab('current'));
-    inventoryElement('inventoryTabHistory').addEventListener('click', () => switchInventoryTab('history'));
-    inventoryElement('inventoryTabDifferences').addEventListener('click', () => switchInventoryTab('differences'));
+    bindInventoryTablists();
+    inventoryElement('inventoryHistoryLoadMore').addEventListener('click', () => {
+        if (inventoryHistoryHasMore) loadInventoryHistory(inventoryTabGeneration, false);
+    });
     inventoryElement('inventoryCreateTask').addEventListener('click', startInventoryTask);
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
@@ -1473,8 +1564,6 @@ function initializeInventoryPage() {
     inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
     inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);
     inventoryElement('inventorySerialCancel').addEventListener('click', closeSerialWorkspace);
-    inventoryElement('inventoryDifferenceTabOpen').addEventListener('click', () => switchDifferenceState('open'));
-    inventoryElement('inventoryDifferenceTabArchived').addEventListener('click', () => switchDifferenceState('archived'));
     inventoryElement('inventoryDifferenceSearch').addEventListener('input', handleDifferenceSearch);
     inventoryElement('inventoryDifferenceSearch').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {

@@ -84,7 +84,9 @@ class InventoryRouteTest(unittest.TestCase):
             "items": [],
         }
         self.store.list_items.return_value = []
-        self.store.list_task_history.return_value = []
+        self.store.list_task_history.return_value = {
+            "tasks": [], "total": 0, "limit": 20, "offset": 0,
+        }
         self.store.list_discrepancies.return_value = []
         self.service.create_task.return_value = {"task_id": "task-1", "phase": "counting"}
         self.service.open_count_item.return_value = {"barcode": "A/B", "state": "pending"}
@@ -260,7 +262,10 @@ class InventoryRouteTest(unittest.TestCase):
             with self.subTest(method=method, path=path):
                 response = getattr(client, method)(path, json=body)
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(set(response.get_json()), {"success", key})
+                expected_keys = {"success", key}
+                if path == "/api/inventory/tasks/history":
+                    expected_keys.add("pagination")
+                self.assertEqual(set(response.get_json()), expected_keys)
                 self.assertTrue(response.get_json()["success"])
 
         self.service.open_count_item.assert_called_once_with(
@@ -573,6 +578,8 @@ class InventoryRouteTest(unittest.TestCase):
             "completed_at": "2026-09-01T09:00:00", "last_sync_at": None,
             "gyj_status": "synced", "sync_resume_phase": None,
             "completed": True,
+            "product_total": 4, "quantity_difference_count": 2,
+            "serial_difference_count": 3, "participant_count": 2,
         }
         discrepancy_row = {
             "id": 9, "task_id": "task-history-1", "barcode": "A/B",
@@ -593,16 +600,29 @@ class InventoryRouteTest(unittest.TestCase):
             }],
             "note": "已复核",
         }
-        self.store.list_task_history.return_value = [history_row]
+        self.store.list_task_history.return_value = {
+            "tasks": [history_row], "total": 21, "limit": 10, "offset": 10,
+        }
         self.store.list_discrepancies.return_value = [discrepancy_row]
         client = self.login_account("counter")
 
-        history = client.get("/api/inventory/tasks/history").get_json()
+        history = client.get(
+            "/api/inventory/tasks/history?limit=10&offset=10"
+        ).get_json()
         discrepancies = client.get(
             "/api/inventory/discrepancies?state=open&query=SN%2F1"
         ).get_json()
 
-        self.assertEqual(history, {"success": True, "tasks": [history_row]})
+        self.assertEqual(history, {
+            "success": True,
+            "tasks": [history_row],
+            "pagination": {
+                "limit": 10, "offset": 10, "total": 21, "has_more": True,
+            },
+        })
+        self.store.list_task_history.assert_called_with(
+            "counter-id", limit=10, offset=10
+        )
         self.assertEqual(
             discrepancies,
             {"success": True, "discrepancies": [discrepancy_row]},
@@ -610,6 +630,15 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.list_discrepancies.assert_called_with(
             "counter-id", "open", query="SN/1"
         )
+
+    def test_history_route_rejects_unbounded_or_invalid_pagination(self):
+        client = self.login_account("counter")
+        for query in ("limit=0", "limit=51", "limit=nope", "offset=-1", "offset=nope"):
+            with self.subTest(query=query):
+                response = client.get(f"/api/inventory/tasks/history?{query}")
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(response.get_json()["success"])
+        self.store.list_task_history.assert_not_called()
 
     def test_export_routes_are_owner_scoped_filtered_and_price_free(self):
         self.store.get_task_snapshot.return_value = {

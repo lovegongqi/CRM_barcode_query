@@ -744,6 +744,13 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(label, source + script)
         self.assertNotIn("innerHTML", script)
+        self.assertNotIn("接口未提供", script)
+        self.assertIn("task.participant_count", script)
+        self.assertIn("task.product_total", script)
+        self.assertIn("task.quantity_difference_count", script)
+        self.assertIn("task.serial_difference_count", script)
+        self.assertIn('tabindex="0"', source)
+        self.assertIn('tabindex="-1"', source)
         self.assertNotIn("insertAdjacentHTML", script)
         self.assertNotIn("JSON.stringify(data", script)
         self.assertNotIn("JSON.stringify(item", script)

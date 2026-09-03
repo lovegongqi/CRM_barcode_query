@@ -497,6 +497,177 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_two_rapid_serial_enters_are_queued_and_submitted_exactly_once(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            const firstScan = deferred();
+            const submitted = [];
+            const input = {value: 'FIRST', focus() {}};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventorySerialInput') return input;
+                        return {textContent: '', className: ''};
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    if (url.endsWith('/serials')) {
+                        const serial = JSON.parse(options.body).serial;
+                        submitted.push(serial);
+                        if (serial === 'FIRST') return firstScan.promise;
+                        return response({success: true, scan: {
+                            serial, classification: 'duplicate',
+                        }});
+                    }
+                    return response({success: true, serial: {
+                        barcode: 'A1', counts: {matched: 1},
+                        matched: [{serial: 'FIRST'}], system_only: [],
+                        physical_only: [], other_product: [], duplicates: [],
+                    }});
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                currentSerialData = {counts: {}, matched: [], system_only: [], physical_only: [], other_product: [], duplicates: []};
+                renderSerialReconciliation = value => { currentSerialData = value; };
+            `, context);
+            (async () => {
+                const first = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                input.value = 'SECOND';
+                const second = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                assert.equal(input.value, '');
+                await Promise.resolve();
+                assert.deepEqual(submitted, ['FIRST']);
+                firstScan.resolve(response({success: true, scan: {
+                    serial: 'FIRST', classification: 'matched',
+                }}));
+                await Promise.all([first, second]);
+                assert.deepEqual(submitted, ['FIRST', 'SECOND']);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_refresh_started_before_scan_cannot_replace_newer_scan_result(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            const oldRefresh = deferred();
+            const requests = [];
+            const rendered = [];
+            const input = {value: 'NEW', focus() {}};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventorySerialInput') return input;
+                        return {textContent: '', className: ''};
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    requests.push(url);
+                    if (requests.length === 1) return oldRefresh.promise;
+                    if (url.endsWith('/serials')) return response({success: true, scan: {
+                        serial: 'NEW', classification: 'matched',
+                    }});
+                    return response({success: true, serial: {marker: 'NEW'}});
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, rendered,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+                renderSerialReconciliation = value => rendered.push(value.marker);
+            `, context);
+            (async () => {
+                const refresh = vm.runInContext('refreshSerialItem()', context);
+                const scan = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                oldRefresh.resolve(response({success: true, serial: {marker: 'OLD'}}));
+                await Promise.all([refresh, scan]);
+                assert.deepEqual(rendered, ['OLD', 'NEW']);
+                assert.equal(rendered.at(-1), 'NEW');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_refresh_started_before_delete_cannot_replace_delete_result(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            const oldRefresh = deferred();
+            const requests = [];
+            const rendered = [];
+            const input = {focus() {}};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventorySerialInput') return input;
+                        return {textContent: '', className: ''};
+                    },
+                },
+                fetch: async (url) => {
+                    requests.push(url);
+                    if (requests.length === 1) return oldRefresh.promise;
+                    return response({success: true, serial: {marker: 'DELETED'}});
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, rendered,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+                renderSerialReconciliation = value => rendered.push(value.marker);
+            `, context);
+            (async () => {
+                const refresh = vm.runInContext('refreshSerialItem()', context);
+                const deletion = vm.runInContext("deleteSerialScan('OLD')", context);
+                oldRefresh.resolve(response({success: true, serial: {marker: 'OLD'}}));
+                await Promise.all([refresh, deletion]);
+                assert.deepEqual(rendered, ['OLD', 'DELETED']);
+                assert.equal(rendered.at(-1), 'DELETED');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_serial_check_poll_fetches_full_task_for_complete_pending_queue(self):
         self.run_node(
             r"""
@@ -679,7 +850,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 CURRENT_ACCOUNT: {is_admin: false},
                 document: {hidden: false, addEventListener() {}, getElementById: element},
-                fetch: url => url === '/api/inventory/tasks/history' ? pending.promise : Promise.resolve({
+                fetch: url => url.startsWith('/api/inventory/tasks/history?') ? pending.promise : Promise.resolve({
                     ok: true, status: 200, json: async () => ({success: true, discrepancies: []}),
                 }),
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
@@ -696,6 +867,180 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 await history;
                 assert.deepEqual(rendered, []);
             })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_history_uses_paginated_summary_without_detail_or_discrepancy_fanout(self):
+        self.run_node(
+            r"""
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            const urls = [];
+            const rendered = [];
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, {
+                    hidden: false, disabled: false, textContent: '', className: '',
+                    replaceChildren() {}, append() {},
+                });
+                return elements.get(id);
+            }
+            const pages = [
+                {success: true, tasks: [{
+                    task_id: 'T2', participant_count: 2, product_total: 8,
+                    quantity_difference_count: 1, serial_difference_count: 3,
+                }], pagination: {limit: 1, offset: 0, total: 2, has_more: true}},
+                {success: true, tasks: [{
+                    task_id: 'T1', participant_count: 1, product_total: 4,
+                    quantity_difference_count: 0, serial_difference_count: 0,
+                }], pagination: {limit: 1, offset: 1, total: 2, has_more: false}},
+            ];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                fetch: async url => { urls.push(url); return response(pages.shift()); },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, rendered,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryActiveTab = 'history';
+                renderInventoryHistory = tasks => rendered.push(tasks.map(task => ({
+                    id: task.task_id, participants: task.participant_count,
+                    products: task.product_total, quantity: task.quantity_difference_count,
+                    serials: task.serial_difference_count,
+                })));
+            `, context);
+            (async () => {
+                const generation = vm.runInContext('inventoryTabGeneration', context);
+                await vm.runInContext(`loadInventoryHistory(${generation}, true)`, context);
+                assert.deepEqual(urls, ['/api/inventory/tasks/history?limit=20&offset=0']);
+                assert.deepEqual(rendered[0], [{id: 'T2', participants: 2, products: 8, quantity: 1, serials: 3}]);
+                assert.equal(element('inventoryHistoryLoadMore').hidden, false);
+                await vm.runInContext(`loadInventoryHistory(${generation}, false)`, context);
+                assert.deepEqual(urls, [
+                    '/api/inventory/tasks/history?limit=20&offset=0',
+                    '/api/inventory/tasks/history?limit=20&offset=1',
+                ]);
+                assert.deepEqual(rendered[1].map(row => row.id), ['T2', 'T1']);
+                assert.equal(element('inventoryHistoryLoadMore').hidden, true);
+                assert.equal(urls.some(url => url.includes('/discrepancies')), false);
+                assert.equal(urls.some(url => /\/tasks\/T[12]$/.test(url)), false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_history_renders_numeric_server_summary(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [], href: '',
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {},
+                };
+            }
+            const root = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryHistory') return root;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryHistory([{
+                task_id: 'T2', started_at: 'START', completed_at: 'DONE',
+                participant_count: 2, product_total: 8,
+                quantity_difference_count: 1, serial_difference_count: 3,
+            }])`, context);
+            const metrics = root.children[0].children[1].children;
+            assert.deepEqual(
+                metrics.map(metric => [metric.children[0].textContent, metric.children[1].textContent]),
+                [['参与人数', '2'], ['商品总数', '8'], ['数量差异', '1'], ['序列号差异', '3']],
+            );
+            """
+        )
+
+    def test_both_tab_groups_support_roving_keyboard_navigation(self):
+        self.run_node(
+            r"""
+            function makeTab(id, dataset) {
+                return {
+                    id, dataset, tabIndex: -1, listeners: {}, focused: 0,
+                    classList: {toggle() {}},
+                    setAttribute(name, value) { this[name] = value; },
+                    addEventListener(name, handler) { this.listeners[name] = handler; },
+                    focus() { this.focused += 1; },
+                };
+            }
+            const elements = new Map();
+            for (const [id, value] of [
+                ['inventoryTabCurrent', {inventoryTab: 'current'}],
+                ['inventoryTabHistory', {inventoryTab: 'history'}],
+                ['inventoryTabDifferences', {inventoryTab: 'differences'}],
+                ['inventoryDifferenceTabOpen', {differenceState: 'open'}],
+                ['inventoryDifferenceTabArchived', {differenceState: 'archived'}],
+            ]) elements.set(id, makeTab(id, value));
+            for (const id of [
+                'inventoryCurrentRoot', 'inventoryHistoryRoot', 'inventoryDiscrepanciesRoot',
+                'inventoryDifferencesOpen', 'inventoryDifferencesArchived',
+            ]) elements.set(id, {hidden: false});
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {hidden: false, addEventListener() {}, getElementById: id => elements.get(id)},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                loadInventoryHistory = async () => {};
+                loadDiscrepancies = async () => {};
+                pollInventoryTask = async () => {};
+                closeSerialWorkspace = () => {};
+                bindInventoryTablists();
+                switchInventoryTab('current');
+                switchDifferenceState('open');
+            `, context);
+            function press(id, key) {
+                const tab = elements.get(id);
+                let prevented = false;
+                tab.listeners.keydown({key, currentTarget: tab, preventDefault() { prevented = true; }});
+                assert.equal(prevented, true);
+            }
+            press('inventoryTabCurrent', 'ArrowRight');
+            assert.equal(elements.get('inventoryTabHistory').focused, 1);
+            assert.equal(elements.get('inventoryTabHistory').tabIndex, 0);
+            press('inventoryTabHistory', 'ArrowLeft');
+            assert.equal(elements.get('inventoryTabCurrent').focused, 1);
+            press('inventoryTabCurrent', 'ArrowLeft');
+            assert.equal(elements.get('inventoryTabDifferences').focused, 1);
+            assert.equal(elements.get('inventoryTabDifferences').tabIndex, 0);
+            assert.equal(elements.get('inventoryTabCurrent').tabIndex, -1);
+            assert.equal(elements.get('inventoryDiscrepanciesRoot').hidden, false);
+            press('inventoryTabDifferences', 'Home');
+            assert.equal(elements.get('inventoryTabCurrent').focused, 2);
+            assert.equal(elements.get('inventoryTabCurrent')['aria-selected'], 'true');
+            press('inventoryTabCurrent', 'End');
+            assert.equal(elements.get('inventoryTabDifferences').focused, 2);
+
+            press('inventoryDifferenceTabOpen', 'ArrowLeft');
+            assert.equal(elements.get('inventoryDifferenceTabArchived').focused, 1);
+            assert.equal(elements.get('inventoryDifferenceTabArchived').tabIndex, 0);
+            assert.equal(elements.get('inventoryDifferencesArchived').hidden, false);
+            press('inventoryDifferenceTabArchived', 'Home');
+            assert.equal(elements.get('inventoryDifferenceTabOpen').focused, 1);
+            assert.equal(elements.get('inventoryDifferenceTabOpen')['aria-selected'], 'true');
             """
         )
 

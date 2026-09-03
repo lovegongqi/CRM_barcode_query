@@ -1523,18 +1523,102 @@ class InventoryStore:
         finally:
             connection.close()
 
-    def list_task_history(self, owner):
+    def list_task_history(self, owner, limit=20, offset=0):
+        """Return one completed-task page with server-side summary counts.
+
+        ``participant_count`` is the number of distinct non-empty device IDs
+        recorded in the task audit trail.  For legacy tasks without any such
+        device record, a non-empty task creator counts as one participant.
+        """
+        limit = int(limit)
+        offset = int(offset)
+        if not 1 <= limit <= 50 or offset < 0:
+            raise ValueError("历史任务分页参数不正确")
         with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT * FROM inventory_tasks
-                   WHERE owner = ? AND phase = 'completed'
-                   ORDER BY completed_at DESC, rowid DESC""",
+            total = connection.execute(
+                """SELECT COUNT(*) FROM inventory_tasks
+                   WHERE owner = ? AND phase = 'completed'""",
                 (owner,),
+            ).fetchone()[0]
+            rows = connection.execute(
+                """WITH history_page AS (
+                       SELECT tasks.*, tasks.rowid AS history_rowid
+                       FROM inventory_tasks AS tasks
+                       WHERE tasks.owner = ? AND tasks.phase = 'completed'
+                       ORDER BY tasks.completed_at DESC, tasks.rowid DESC
+                       LIMIT ? OFFSET ?
+                   ), item_counts AS (
+                       SELECT items.task_id,
+                              COUNT(*) AS product_total,
+                              SUM(CASE
+                                  WHEN items.difference IS NOT NULL
+                                       AND items.difference <> '0'
+                                  THEN 1 ELSE 0
+                              END) AS quantity_difference_count
+                       FROM inventory_items AS items
+                       JOIN history_page USING (task_id)
+                       GROUP BY items.task_id
+                   ), discrepancy_counts AS (
+                       SELECT discrepancies.task_id,
+                              SUM(CASE
+                                  WHEN discrepancies.serial IS NOT NULL
+                                       AND TRIM(discrepancies.serial) <> ''
+                                  THEN 1 ELSE 0
+                              END) AS serial_difference_count
+                       FROM inventory_discrepancies AS discrepancies
+                       JOIN history_page USING (task_id)
+                       GROUP BY discrepancies.task_id
+                   ), participant_counts AS (
+                       SELECT audit_events.task_id,
+                              COUNT(DISTINCT NULLIF(
+                                  TRIM(audit_events.device_id), ''
+                              )) AS device_count
+                       FROM inventory_audit_events AS audit_events
+                       JOIN history_page USING (task_id)
+                       GROUP BY audit_events.task_id
+                   )
+                   SELECT history_page.*,
+                          COALESCE(item_counts.product_total, 0) AS product_total,
+                          COALESCE(
+                              item_counts.quantity_difference_count, 0
+                          ) AS quantity_difference_count,
+                          COALESCE(
+                              discrepancy_counts.serial_difference_count, 0
+                          ) AS serial_difference_count,
+                          CASE
+                              WHEN COALESCE(
+                                  participant_counts.device_count, 0
+                              ) > 0
+                              THEN participant_counts.device_count
+                              WHEN TRIM(COALESCE(
+                                  history_page.created_by, ''
+                              )) <> ''
+                              THEN 1
+                              ELSE 0
+                          END AS participant_count
+                   FROM history_page
+                   LEFT JOIN item_counts USING (task_id)
+                   LEFT JOIN discrepancy_counts USING (task_id)
+                   LEFT JOIN participant_counts USING (task_id)
+                   ORDER BY history_page.completed_at DESC,
+                            history_page.history_rowid DESC""",
+                (owner, limit, offset),
             ).fetchall()
         result = [self._row_dict(row) for row in rows]
         for task in result:
             task["completed"] = True
-        return result
+            task.pop("history_rowid", None)
+            for key in (
+                "product_total", "quantity_difference_count",
+                "serial_difference_count", "participant_count",
+            ):
+                task[key] = int(task.get(key) or 0)
+        return {
+            "tasks": result,
+            "total": int(total),
+            "limit": limit,
+            "offset": offset,
+        }
 
     def list_discrepancies(self, owner, state, query=""):
         if state not in {"open", "archived"}:
