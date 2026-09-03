@@ -163,6 +163,27 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(store.release_expired_locks(task["task_id"]), 1)
         self.assertEqual(store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")["device_id"], "device-b")
 
+    def test_lock_conflict_carries_only_the_current_replacement_owner(self):
+        current = [datetime(2026, 9, 1, 10, 0, 0)]
+        store = InventoryStore(self.db_path, now=lambda: current[0])
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.claim_item(task["task_id"], "A1", "device-a", "甲", "counting")
+        current[0] += timedelta(seconds=121)
+        store.claim_item(task["task_id"], "A1", "device-b", "乙", "counting")
+
+        with self.assertRaises(InventoryConflict) as heartbeat_conflict:
+            store.heartbeat_lock(task["task_id"], "A1", "device-a")
+        self.assertEqual(heartbeat_conflict.exception.lock_owner, "乙")
+
+        with self.assertRaises(InventoryConflict) as count_conflict:
+            store.assert_item_lock(task["task_id"], "A1", "device-a", "counting")
+        self.assertEqual(count_conflict.exception.lock_owner, "乙")
+
+        current[0] += timedelta(seconds=121)
+        with self.assertRaises(InventoryConflict) as expired_conflict:
+            store.heartbeat_lock(task["task_id"], "A1", "device-b")
+        self.assertIsNone(expired_conflict.exception.lock_owner)
+
     def test_claim_reclaim_heartbeat_and_assertion_use_second_precision(self):
         current = [datetime(2026, 9, 1, 10, 0, 0, 500000)]
         store = InventoryStore(self.db_path, now=lambda: current[0])

@@ -61,7 +61,9 @@ _DISCREPANCY_SELECT = """
 
 
 class InventoryConflict(RuntimeError):
-    pass
+    def __init__(self, message, *, lock_owner=None):
+        super().__init__(message)
+        self.lock_owner = lock_owner
 
 
 class InventoryNotFound(RuntimeError):
@@ -530,7 +532,9 @@ class InventoryStore:
                     details="owned_by=" + existing["device_id"], created_at=now,
                 )
                 connection.commit()
-                raise InventoryConflict("商品已被其他设备锁定")
+                raise InventoryConflict(
+                    "商品已被其他设备锁定", lock_owner=existing["actor"]
+                )
             if existing is None:
                 connection.execute(
                     """INSERT INTO inventory_item_locks
@@ -574,7 +578,10 @@ class InventoryStore:
             if lock is None or lock["device_id"] != device_id:
                 self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "heartbeat_owner_mismatch", now)
                 connection.commit()
-                raise InventoryConflict("设备未持有商品锁")
+                raise InventoryConflict(
+                    "设备未持有商品锁",
+                    lock_owner=lock["actor"] if lock is not None else None,
+                )
             connection.execute(
                 "UPDATE inventory_item_locks SET heartbeat_at = ?, expires_at = ? WHERE task_id = ? AND barcode = ?",
                 (now, expires, task_id, barcode),
@@ -602,7 +609,14 @@ class InventoryStore:
             if lock is None or lock["device_id"] != device_id or lock["phase"] != phase:
                 self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "assertion_failed", now)
                 connection.commit()
-                raise InventoryConflict("设备未持有当前阶段的商品锁")
+                raise InventoryConflict(
+                    "设备未持有当前阶段的商品锁",
+                    lock_owner=(
+                        lock["actor"]
+                        if lock is not None and lock["device_id"] != device_id
+                        else None
+                    ),
+                )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -720,7 +734,14 @@ class InventoryStore:
                     "open_book_owner_mismatch", timestamp,
                 )
                 connection.commit()
-                raise InventoryConflict("设备未持有数量盘点锁")
+                raise InventoryConflict(
+                    "设备未持有数量盘点锁",
+                    lock_owner=(
+                        lock["actor"]
+                        if lock is not None and lock["device_id"] != device_id
+                        else None
+                    ),
+                )
             item = connection.execute(
                 "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
@@ -779,7 +800,14 @@ class InventoryStore:
                     "count_submit_owner_mismatch", timestamp,
                 )
                 connection.commit()
-                raise InventoryConflict("设备未持有数量盘点锁")
+                raise InventoryConflict(
+                    "设备未持有数量盘点锁",
+                    lock_owner=(
+                        lock["actor"]
+                        if lock is not None and lock["device_id"] != device_id
+                        else None
+                    ),
+                )
             item = connection.execute(
                 "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),

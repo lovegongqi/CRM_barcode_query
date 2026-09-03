@@ -10480,6 +10480,14 @@ def _inventory_device_id(data):
     return _inventory_path_value(data.get("device_id"), "设备标识")
 
 
+def _inventory_lock_owner_label(value):
+    label = "".join(
+        character for character in str(value or "")
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip()
+    return label[:80]
+
+
 def _inventory_api(handler):
     @wraps(handler)
     def wrapped(*args, **kwargs):
@@ -10490,7 +10498,13 @@ def _inventory_api(handler):
         except InventoryNotFound as exc:
             return jsonify({"success": False, "error": str(exc)}), 404
         except InventoryConflict as exc:
-            return jsonify({"success": False, "error": str(exc)}), 409
+            payload = {"success": False, "error": str(exc)}
+            lock_owner = _inventory_lock_owner_label(
+                getattr(exc, "lock_owner", None)
+            )
+            if lock_owner:
+                payload["lock_owner"] = lock_owner
+            return jsonify(payload), 409
         except (ValueError, TypeError) as exc:
             return jsonify({"success": False, "error": str(exc) or "请求参数不正确"}), 400
         except InventoryServiceError:
@@ -10629,7 +10643,10 @@ def _inventory_attach_lock_owners(task_id, items):
                    WHERE task_id = ? AND expires_at > ?""",
                 (task_id, datetime.now().isoformat()),
             )
-            lock_owners = {row["barcode"]: row["actor"] for row in rows}
+            lock_owners = {
+                row["barcode"]: _inventory_lock_owner_label(row["actor"])
+                for row in rows
+            }
     except Exception:
         # Lock labels are supplementary; the task snapshot remains usable if
         # an older store implementation cannot expose them.
@@ -10702,17 +10719,9 @@ def api_inventory_claim_item(task_id, barcode):
     data = _inventory_json_body()
     task_id = _inventory_path_value(task_id, "任务标识")
     barcode = _inventory_path_value(barcode, "商品条码")
-    try:
-        item = inventory_service.open_count_item(
-            owner, task_id, barcode, _inventory_device_id(data), actor,
-        )
-    except InventoryConflict as exc:
-        locked = _inventory_attach_lock_owners(task_id, [{"barcode": barcode}])[0]
-        return jsonify({
-            "success": False,
-            "error": str(exc),
-            "lock_owner": locked.get("lock_actor") or "其他设备",
-        }), 409
+    item = inventory_service.open_count_item(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+    )
     return jsonify({"success": True, "item": item})
 
 

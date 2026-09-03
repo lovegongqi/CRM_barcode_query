@@ -4,7 +4,9 @@ const INVENTORY_DEVICE_KEY = 'inventory_device_id';
 let inventoryDeviceId = '';
 let inventoryTask = null;
 let lastInventoryVersion = null;
-let inventoryPollInFlight = false;
+let inventoryPollPromise = null;
+let inventoryPollQueuedForce = false;
+let inventoryQueryGeneration = 0;
 let inventoryPollTimer = null;
 let inventorySearchTimer = null;
 let currentCountItem = null;
@@ -38,6 +40,8 @@ function setInventoryNotice(message, kind = '') {
 
 async function inventoryRequest(url, options = {}) {
     const requestOptions = {...options};
+    const acceptFailureState = requestOptions.acceptFailureState === true;
+    delete requestOptions.acceptFailureState;
     requestOptions.headers = {...(options.headers || {})};
     if (requestOptions.body && !requestOptions.headers['Content-Type']) {
         requestOptions.headers['Content-Type'] = 'application/json';
@@ -49,7 +53,7 @@ async function inventoryRequest(url, options = {}) {
     } catch (_error) {
         data = {};
     }
-    if (!response.ok || data.success === false) {
+    if (!response.ok || (!acceptFailureState && data.success === false)) {
         const error = new Error(data.error || data.message || '请求失败，请稍后重试');
         error.status = response.status;
         error.data = data;
@@ -63,12 +67,45 @@ function inventoryPost(url, body) {
 }
 
 function getInventoryDeviceId() {
-    let deviceId = localStorage.getItem(INVENTORY_DEVICE_KEY);
-    if (!deviceId) {
-        deviceId = crypto.randomUUID();
-        localStorage.setItem(INVENTORY_DEVICE_KEY, deviceId);
+    if (inventoryDeviceId) return inventoryDeviceId;
+    try {
+        inventoryDeviceId = localStorage.getItem(INVENTORY_DEVICE_KEY) || '';
+    } catch (_error) {
+        inventoryDeviceId = '';
     }
-    return deviceId;
+    if (!inventoryDeviceId) {
+        try {
+            if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+                inventoryDeviceId = crypto.randomUUID();
+            }
+        } catch (_error) {
+            inventoryDeviceId = '';
+        }
+        try {
+            if (!inventoryDeviceId && globalThis.crypto && typeof globalThis.crypto.getRandomValues === 'function') {
+                const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0'));
+                inventoryDeviceId = [
+                    hex.slice(0, 4).join(''), hex.slice(4, 6).join(''),
+                    hex.slice(6, 8).join(''), hex.slice(8, 10).join(''),
+                    hex.slice(10, 16).join(''),
+                ].join('-');
+            }
+        } catch (_error) {
+            inventoryDeviceId = '';
+        }
+        if (!inventoryDeviceId) {
+            inventoryDeviceId = `inventory-page-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+        }
+        try {
+            localStorage.setItem(INVENTORY_DEVICE_KEY, inventoryDeviceId);
+        } catch (_error) {
+            // The in-memory id remains stable for this page when storage is denied.
+        }
+    }
+    return inventoryDeviceId;
 }
 
 function decimalParts(value) {
@@ -284,19 +321,29 @@ function inventoryServerState(filter) {
     return '';
 }
 
-async function pollInventoryTask(options = {}) {
-    if (inventoryPollInFlight || document.hidden) return;
-    inventoryPollInFlight = true;
-    const force = options && options.force === true;
+function currentInventoryQuery() {
+    return {
+        query: inventoryElement('inventorySearch').value.trim(),
+        state: inventoryServerState(inventoryElement('inventoryFilters').value),
+    };
+}
+
+function inventoryQueryKey(query) {
+    return `${query.query}\n${query.state}`;
+}
+
+async function performInventoryPoll(force) {
+    const generation = inventoryQueryGeneration;
+    const queryState = currentInventoryQuery();
+    const queryKey = inventoryQueryKey(queryState);
     const params = new URLSearchParams();
-    const query = inventoryElement('inventorySearch').value.trim();
-    const state = inventoryServerState(inventoryElement('inventoryFilters').value);
     if (!force && lastInventoryVersion !== null) params.set('version', String(lastInventoryVersion));
-    if (query) params.set('query', query);
-    if (state) params.set('state', state);
+    if (queryState.query) params.set('query', queryState.query);
+    if (queryState.state) params.set('state', queryState.state);
     const url = '/api/inventory/tasks/active' + (params.size ? `?${params.toString()}` : '');
     try {
         const data = await inventoryRequest(url);
+        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
         if (!data.task) {
             inventoryTask = null;
             lastInventoryVersion = null;
@@ -309,10 +356,28 @@ async function pollInventoryTask(options = {}) {
         renderInventoryTask(inventoryTask);
         if (!data.task.gyj_status || data.task.gyj_status === 'synced') setInventoryNotice('');
     } catch (error) {
+        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
         setInventoryNotice(error.message, 'error');
-    } finally {
-        inventoryPollInFlight = false;
     }
+}
+
+function pollInventoryTask(options = {}) {
+    if (document.hidden) return Promise.resolve();
+    if ((!options || options.force !== true) && inventorySearchTimer) {
+        return inventoryPollPromise || Promise.resolve();
+    }
+    if (options && options.force === true) inventoryPollQueuedForce = true;
+    if (inventoryPollPromise) return inventoryPollPromise;
+    inventoryPollPromise = (async () => {
+        do {
+            const force = inventoryPollQueuedForce;
+            inventoryPollQueuedForce = false;
+            await performInventoryPoll(force);
+        } while (inventoryPollQueuedForce);
+    })().finally(() => {
+        inventoryPollPromise = null;
+    });
+    return inventoryPollPromise;
 }
 
 async function startInventoryTask() {
@@ -451,8 +516,8 @@ async function openCountItem(barcode) {
         if (requestId !== countDialogRequestId || !dialog.open) return;
         submit.textContent = '确认实盘数量';
         if (error.status === 409) {
-            const owner = (error.data && error.data.lock_owner) || inventoryLockOwner(item);
-            setCountReadOnly(error.message, owner || '其他设备');
+            const owner = error.data && error.data.lock_owner;
+            setCountReadOnly(error.message, owner || '');
             lastInventoryVersion = null;
             await pollInventoryTask({force: true});
         } else {
@@ -470,8 +535,8 @@ async function sendInventoryHeartbeat() {
         );
     } catch (error) {
         if (error.status === 409) {
-            const owner = (error.data && error.data.lock_owner) || inventoryLockOwner(currentCountItem);
-            setCountReadOnly(error.message, owner || '其他设备');
+            const owner = error.data && error.data.lock_owner;
+            setCountReadOnly(error.message, owner || '');
             lastInventoryVersion = null;
             await pollInventoryTask({force: true});
         } else {
@@ -510,8 +575,8 @@ async function submitCount() {
     } catch (error) {
         submit.textContent = '确认实盘数量';
         if (error.status === 409) {
-            const owner = (error.data && error.data.lock_owner) || inventoryLockOwner(currentCountItem);
-            setCountReadOnly(error.message, owner || '其他设备');
+            const owner = error.data && error.data.lock_owner;
+            setCountReadOnly(error.message, owner || '');
             lastInventoryVersion = null;
             await pollInventoryTask({force: true});
         } else {
@@ -524,24 +589,37 @@ async function submitCount() {
 }
 
 function runInventorySearch() {
+    if (inventorySearchTimer) clearTimeout(inventorySearchTimer);
+    inventorySearchTimer = null;
+    inventoryQueryGeneration += 1;
     lastInventoryVersion = null;
-    pollInventoryTask({force: true});
+    return pollInventoryTask({force: true});
+}
+
+function pollInventorySearch() {
+    inventorySearchTimer = null;
+    return pollInventoryTask({force: true});
 }
 
 function handleInventorySearchInput() {
     if (inventorySearchTimer) clearTimeout(inventorySearchTimer);
+    inventorySearchTimer = null;
     const query = inventoryElement('inventorySearch').value.trim();
+    inventoryQueryGeneration += 1;
+    lastInventoryVersion = null;
     if (!query) {
-        runInventorySearch();
+        pollInventoryTask({force: true});
         return;
     }
-    inventorySearchTimer = setTimeout(runInventorySearch, 250);
+    inventorySearchTimer = setTimeout(pollInventorySearch, 250);
 }
 
 async function handleInventorySearchEnter(event) {
     if (event.key === 'Enter') {
         event.preventDefault();
         if (inventorySearchTimer) clearTimeout(inventorySearchTimer);
+        inventorySearchTimer = null;
+        inventoryQueryGeneration += 1;
         lastInventoryVersion = null;
         await pollInventoryTask({force: true});
         const query = inventoryElement('inventorySearch').value.trim();
@@ -618,7 +696,7 @@ async function pollGyjLoginStatus() {
     }
     const session = gyjLoginSession;
     try {
-        const data = await inventoryRequest('/api/gyj/login-status');
+        const data = await inventoryRequest('/api/gyj/login-status', {acceptFailureState: true});
         if (session !== gyjLoginSession || !dialog.open) return;
         if (renderGyjLoginState(data)) {
             setTimeout(() => {
@@ -628,6 +706,9 @@ async function pollGyjLoginStatus() {
             pollInventoryTask({force: true});
         }
     } catch (error) {
+        if (error.data && ('logged_in' in error.data || 'waiting_captcha' in error.data)) {
+            renderGyjLoginState(error.data);
+        }
         setGyjLoginMessage(error.message, 'error');
     }
 }

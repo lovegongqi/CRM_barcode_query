@@ -348,6 +348,64 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertNotIn("secret", body)
         self.assertNotIn("html", body.lower())
 
+    def test_lock_owner_is_returned_only_for_real_owner_conflicts(self):
+        client = self.login_account("counter")
+        owned = InventoryConflict(
+            "商品已被其他设备锁定", lock_owner="\x00乙\n操作员\t"
+        )
+
+        self.service.open_count_item.side_effect = owned
+        claim = client.post(
+            "/api/inventory/tasks/task-1/items/A/claim",
+            json={"device_id": "device-a"},
+        )
+        self.assertEqual(claim.status_code, 409)
+        self.assertEqual(claim.get_json()["lock_owner"], "乙操作员")
+
+        self.store.heartbeat_lock.side_effect = owned
+        heartbeat = client.post(
+            "/api/inventory/tasks/task-1/items/A/heartbeat",
+            json={"device_id": "device-a"},
+        )
+        self.assertEqual(heartbeat.status_code, 409)
+        self.assertEqual(heartbeat.get_json()["lock_owner"], "乙操作员")
+
+        self.service.submit_count.side_effect = owned
+        count = client.post(
+            "/api/inventory/tasks/task-1/items/A/count",
+            json={"device_id": "device-a", "actual_qty": "1"},
+        )
+        self.assertEqual(count.status_code, 409)
+        self.assertEqual(count.get_json()["lock_owner"], "乙操作员")
+
+        for route, target in (
+            ("/api/inventory/tasks/task-1/items/A/claim", self.service.open_count_item),
+            ("/api/inventory/tasks/task-1/items/A/count", self.service.submit_count),
+        ):
+            target.side_effect = InventoryConflict("当前阶段不允许此操作")
+            body = {"device_id": "device-a", "actual_qty": "1"}
+            response = client.post(route, json=body)
+            self.assertEqual(response.status_code, 409)
+            self.assertNotIn("lock_owner", response.get_json())
+
+        self.service.open_count_item.side_effect = InventoryConflict(
+            "商品数量盘点已完成"
+        )
+        completed = client.post(
+            "/api/inventory/tasks/task-1/items/A/claim",
+            json={"device_id": "device-a"},
+        )
+        self.assertEqual(completed.status_code, 409)
+        self.assertNotIn("lock_owner", completed.get_json())
+
+        self.store.heartbeat_lock.side_effect = InventoryConflict("设备未持有商品锁")
+        expired = client.post(
+            "/api/inventory/tasks/task-1/items/A/heartbeat",
+            json={"device_id": "device-a"},
+        )
+        self.assertEqual(expired.status_code, 409)
+        self.assertNotIn("lock_owner", expired.get_json())
+
     def test_real_service_maps_raised_worker_error_to_redacted_502(self):
         secret = "cost=999; password=secret; <html>private page</html>"
 
