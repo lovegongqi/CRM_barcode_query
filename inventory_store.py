@@ -122,6 +122,7 @@ class InventoryStore:
                     expected_current_quantity TEXT,
                     difference TEXT,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    serial_synced_at TEXT,
                     completed_at TEXT,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (task_id, barcode),
@@ -162,6 +163,11 @@ class InventoryStore:
                     barcode TEXT NOT NULL,
                     serial TEXT NOT NULL,
                     classification TEXT NOT NULL,
+                    source_classification TEXT NOT NULL DEFAULT '',
+                    lookup_barcode TEXT NOT NULL DEFAULT '',
+                    lookup_name TEXT NOT NULL DEFAULT '',
+                    warehouse TEXT NOT NULL DEFAULT '',
+                    is_checked_out INTEGER NOT NULL DEFAULT 0,
                     device_id TEXT NOT NULL,
                     actor TEXT NOT NULL,
                     scanned_at TEXT NOT NULL,
@@ -230,6 +236,9 @@ class InventoryStore:
                     ON inventory_items(task_id, status);
                 CREATE INDEX IF NOT EXISTS idx_inventory_serial_scans_item
                     ON inventory_serial_scans(task_id, barcode, serial);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_active
+                    ON inventory_serial_scans(task_id, barcode, serial)
+                    WHERE active = 1;
                 CREATE INDEX IF NOT EXISTS idx_inventory_discrepancies_status
                     ON inventory_discrepancies(status);
                 """
@@ -248,6 +257,26 @@ class InventoryStore:
                 connection.execute(
                     "ALTER TABLE inventory_items ADD COLUMN expected_current_quantity TEXT"
                 )
+            if "serial_synced_at" not in item_columns:
+                connection.execute(
+                    "ALTER TABLE inventory_items ADD COLUMN serial_synced_at TEXT"
+                )
+            scan_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(inventory_serial_scans)"
+                )
+            }
+            for name, definition in (
+                ("source_classification", "TEXT NOT NULL DEFAULT ''"),
+                ("lookup_barcode", "TEXT NOT NULL DEFAULT ''"),
+                ("lookup_name", "TEXT NOT NULL DEFAULT ''"),
+                ("warehouse", "TEXT NOT NULL DEFAULT ''"),
+                ("is_checked_out", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in scan_columns:
+                    connection.execute(
+                        f"ALTER TABLE inventory_serial_scans ADD COLUMN {name} {definition}"
+                    )
 
     def _now_text(self):
         return self._timestamp_text(self.now())
@@ -855,3 +884,437 @@ class InventoryStore:
             raise
         finally:
             connection.close()
+
+    def _serial_write_context(
+        self, connection, owner, task_id, barcode, device_id, actor, operation
+    ):
+        timestamp = self._now_text()
+        task = self._task_for_owner(connection, owner, task_id)
+        if task["phase"] != "serial_check":
+            raise InventoryConflict("当前任务不在序列号核对阶段")
+        item = connection.execute(
+            "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+            (task_id, barcode),
+        ).fetchone()
+        if item is None:
+            raise InventoryNotFound("商品不存在")
+        if item["status"] != "serial_pending":
+            raise InventoryConflict("商品不在待核对序列号状态")
+        self._expire_locks(connection, task_id, timestamp)
+        lock = connection.execute(
+            "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+            (task_id, barcode),
+        ).fetchone()
+        if (
+            lock is None
+            or lock["device_id"] != device_id
+            or lock["phase"] != "serial_check"
+        ):
+            self._audit(
+                connection, task_id, "lock_conflict", actor,
+                barcode=barcode, device_id=device_id,
+                details=f"{operation}_owner_mismatch", created_at=timestamp,
+            )
+            connection.commit()
+            raise InventoryConflict("设备未持有序列号核对锁")
+        return task, item, timestamp
+
+    @staticmethod
+    def _serial_scan_dict(row):
+        result = dict(row)
+        result["shipped"] = bool(result.pop("is_checked_out", 0))
+        return result
+
+    def release_item_lock(
+        self, owner, task_id, barcode, device_id, actor, phase, reason
+    ):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._task_for_owner(connection, owner, task_id)
+            lock = connection.execute(
+                "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if (
+                lock is None
+                or lock["device_id"] != device_id
+                or lock["phase"] != phase
+            ):
+                connection.commit()
+                return False
+            timestamp = self._now_text()
+            connection.execute(
+                "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "lock_released", actor,
+                barcode=barcode, device_id=device_id,
+                details=reason, created_at=timestamp,
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def replace_expected_serials(
+        self, owner, task_id, barcode, device_id, actor, rows, *, synced_at=None
+    ):
+        if not isinstance(rows, list):
+            raise ValueError("序列号库存结果格式不正确")
+        prepared = []
+        seen = set()
+        allowed_keys = {"serial", "barcode", "name", "warehouse", "shipped"}
+        for row in rows:
+            if not isinstance(row, dict) or set(row) != allowed_keys:
+                raise ValueError("序列号库存字段不正确")
+            serial = str(row["serial"] or "").strip()
+            row_barcode = str(row["barcode"] or "").strip()
+            if not serial or row_barcode != barcode or row["shipped"] is not False:
+                raise ValueError("序列号库存内容不正确")
+            if serial in seen:
+                raise ValueError("序列号库存存在重复")
+            seen.add(serial)
+            prepared.append((
+                serial,
+                str(row["name"] or ""),
+                str(row["warehouse"] or ""),
+            ))
+
+        timestamp = self._timestamp_text(synced_at or self.now())
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._serial_write_context(
+                connection, owner, task_id, barcode, device_id, actor,
+                "serial_refresh",
+            )
+            connection.execute(
+                "UPDATE inventory_serial_expected SET sync_status = 'inactive' "
+                "WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            )
+            for serial, name, warehouse in prepared:
+                connection.execute(
+                    """INSERT INTO inventory_serial_expected
+                       (task_id, barcode, serial, name, warehouse,
+                        is_checked_out, sync_status, synced_at)
+                       VALUES (?, ?, ?, ?, ?, 0, 'active', ?)
+                       ON CONFLICT(task_id, barcode, serial) DO UPDATE SET
+                           name = excluded.name,
+                           warehouse = excluded.warehouse,
+                           is_checked_out = 0,
+                           sync_status = 'active',
+                           synced_at = excluded.synced_at""",
+                    (task_id, barcode, serial, name, warehouse, timestamp),
+                )
+            connection.execute(
+                """UPDATE inventory_serial_scans AS scans
+                   SET classification = CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM inventory_serial_expected AS expected
+                           WHERE expected.task_id = scans.task_id
+                             AND expected.barcode = scans.barcode
+                             AND expected.serial = scans.serial
+                             AND expected.sync_status = 'active'
+                       ) THEN 'matched'
+                       WHEN scans.source_classification = 'matched' THEN 'unknown'
+                       ELSE scans.source_classification
+                   END
+                   WHERE scans.task_id = ? AND scans.barcode = ? AND scans.active = 1""",
+                (task_id, barcode),
+            )
+            connection.execute(
+                "UPDATE inventory_items SET serial_synced_at = ?, updated_at = ? "
+                "WHERE task_id = ? AND barcode = ?",
+                (timestamp, timestamp, task_id, barcode),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_expected_refreshed", actor,
+                barcode=barcode, device_id=device_id,
+                details=f"expected={len(prepared)}", created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
+
+    def add_serial_scan(
+        self, owner, task_id, barcode, device_id, actor, serial,
+        classification, lookup=None,
+    ):
+        serial = str(serial or "").strip()
+        if not serial:
+            raise ValueError("序列号不能为空")
+        if classification not in {"matched", "other_product", "already_shipped", "unknown"}:
+            raise ValueError("序列号分类不正确")
+        lookup = lookup or {}
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, _, timestamp = self._serial_write_context(
+                connection, owner, task_id, barcode, device_id, actor,
+                "serial_scan",
+            )
+            existing = connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND serial = ? AND active = 1""",
+                (task_id, barcode, serial),
+            ).fetchone()
+            if existing is not None:
+                self._audit(
+                    connection, task_id, "serial_scan_duplicate", actor,
+                    barcode=barcode, device_id=device_id,
+                    details=serial, created_at=timestamp,
+                )
+                connection.commit()
+                result = self._serial_scan_dict(existing)
+                result["classification"] = "duplicate"
+                return result
+
+            expected = connection.execute(
+                """SELECT * FROM inventory_serial_expected
+                   WHERE task_id = ? AND barcode = ? AND serial = ?
+                     AND sync_status = 'active'""",
+                (task_id, barcode, serial),
+            ).fetchone()
+            if expected is not None:
+                classification = "matched"
+                source_classification = "matched"
+                lookup_barcode = barcode
+                lookup_name = expected["name"]
+                warehouse = expected["warehouse"]
+                is_checked_out = 0
+            else:
+                if classification == "matched":
+                    raise ValueError("序列号不在当前商品账面集合中")
+                source_classification = classification
+                lookup_barcode = str(lookup.get("barcode") or "")
+                lookup_name = str(lookup.get("name") or "")
+                warehouse = str(lookup.get("warehouse") or "")
+                is_checked_out = 1 if lookup.get("shipped") is True else 0
+            cursor = connection.execute(
+                """INSERT INTO inventory_serial_scans
+                   (task_id, barcode, serial, classification,
+                    source_classification, lookup_barcode, lookup_name,
+                    warehouse, is_checked_out, device_id, actor, scanned_at, active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                (
+                    task_id, barcode, serial, classification,
+                    source_classification, lookup_barcode, lookup_name,
+                    warehouse, is_checked_out, device_id, actor, timestamp,
+                ),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_scanned", actor,
+                barcode=barcode, device_id=device_id,
+                details=f"serial={serial};classification={classification}",
+                created_at=timestamp,
+            )
+            connection.commit()
+            row = connection.execute(
+                "SELECT * FROM inventory_serial_scans WHERE scan_id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+            return self._serial_scan_dict(row)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def remove_serial_scan(
+        self, owner, task_id, barcode, device_id, actor, serial
+    ):
+        serial = str(serial or "").strip()
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, _, timestamp = self._serial_write_context(
+                connection, owner, task_id, barcode, device_id, actor,
+                "serial_delete",
+            )
+            scan = connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND serial = ? AND active = 1""",
+                (task_id, barcode, serial),
+            ).fetchone()
+            if scan is None:
+                raise InventoryNotFound("扫描序列号不存在")
+            connection.execute(
+                "UPDATE inventory_serial_scans SET active = 0 WHERE scan_id = ?",
+                (scan["scan_id"],),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_scan_removed", actor,
+                barcode=barcode, device_id=device_id,
+                details=serial, created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        result = self.serial_reconciliation(owner, task_id, barcode)
+        result["removed"] = serial
+        return result
+
+    def serial_reconciliation(self, owner, task_id, barcode):
+        connection = self.connect()
+        try:
+            task = self._task_for_owner(connection, owner, task_id)
+            item = connection.execute(
+                "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            expected_rows = [dict(row) for row in connection.execute(
+                """SELECT serial, barcode, name, warehouse, is_checked_out,
+                          sync_status, synced_at
+                   FROM inventory_serial_expected
+                   WHERE task_id = ? AND barcode = ? AND sync_status = 'active'
+                   ORDER BY serial""",
+                (task_id, barcode),
+            )]
+            active_scans = [self._serial_scan_dict(row) for row in connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                   ORDER BY scan_id""",
+                (task_id, barcode),
+            )]
+            matched_serials = {
+                row["serial"] for row in active_scans
+                if row["classification"] == "matched"
+            }
+            system_only = []
+            for row in expected_rows:
+                row["shipped"] = bool(row.pop("is_checked_out"))
+                row["classification"] = "system_only"
+                if row["serial"] not in matched_serials:
+                    system_only.append(row)
+            result = {
+                "task_id": task_id,
+                "barcode": barcode,
+                "phase": task["phase"],
+                "item": self._item_dict(item),
+                "expected": expected_rows,
+                "matched": [
+                    row for row in active_scans
+                    if row["classification"] == "matched"
+                ],
+                "system_only": [
+                    row for row in active_scans
+                    if row["classification"] == "system_only"
+                ] or system_only,
+                "physical_only": [
+                    row for row in active_scans
+                    if row["classification"] in {"unknown", "already_shipped"}
+                ],
+                "other_product": [
+                    row for row in active_scans
+                    if row["classification"] == "other_product"
+                ],
+                "duplicates": [],
+            }
+            result["counts"] = {
+                key: len(result[key])
+                for key in (
+                    "matched", "system_only", "physical_only",
+                    "other_product", "duplicates",
+                )
+            }
+            return result
+        finally:
+            connection.close()
+
+    def complete_serial_item(
+        self, owner, task_id, barcode, device_id, actor
+    ):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, _, timestamp = self._serial_write_context(
+                connection, owner, task_id, barcode, device_id, actor,
+                "serial_finish",
+            )
+            connection.execute(
+                """UPDATE inventory_serial_scans AS scans
+                   SET classification = CASE
+                       WHEN EXISTS (
+                           SELECT 1 FROM inventory_serial_expected AS expected
+                           WHERE expected.task_id = scans.task_id
+                             AND expected.barcode = scans.barcode
+                             AND expected.serial = scans.serial
+                             AND expected.sync_status = 'active'
+                       ) THEN 'matched'
+                       WHEN scans.source_classification = 'matched' THEN 'unknown'
+                       ELSE scans.source_classification
+                   END
+                   WHERE scans.task_id = ? AND scans.barcode = ? AND scans.active = 1""",
+                (task_id, barcode),
+            )
+            missing = connection.execute(
+                """SELECT expected.* FROM inventory_serial_expected AS expected
+                   WHERE expected.task_id = ? AND expected.barcode = ?
+                     AND expected.sync_status = 'active'
+                     AND NOT EXISTS (
+                         SELECT 1 FROM inventory_serial_scans AS scans
+                         WHERE scans.task_id = expected.task_id
+                           AND scans.barcode = expected.barcode
+                           AND scans.serial = expected.serial
+                           AND scans.classification = 'matched'
+                           AND scans.active = 1
+                     )
+                   ORDER BY expected.serial""",
+                (task_id, barcode),
+            ).fetchall()
+            for expected in missing:
+                connection.execute(
+                    """INSERT INTO inventory_serial_scans
+                       (task_id, barcode, serial, classification,
+                        source_classification, lookup_barcode, lookup_name,
+                        warehouse, is_checked_out, device_id, actor, scanned_at, active)
+                       VALUES (?, ?, ?, 'system_only', 'system_only', ?, ?, ?, 0,
+                               ?, ?, ?, 1)""",
+                    (
+                        task_id, barcode, expected["serial"], barcode,
+                        expected["name"], expected["warehouse"],
+                        device_id, actor, timestamp,
+                    ),
+                )
+            connection.execute(
+                """UPDATE inventory_items
+                   SET status = 'serial_complete', completed_at = ?, updated_at = ?
+                   WHERE task_id = ? AND barcode = ?""",
+                (timestamp, timestamp, task_id, barcode),
+            )
+            connection.execute(
+                "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_item_completed", actor,
+                barcode=barcode, device_id=device_id,
+                details=f"system_only={len(missing)}", created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)

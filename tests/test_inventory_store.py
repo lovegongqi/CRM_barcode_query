@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from inventory_store import (
     InventoryConflict,
+    InventoryNotFound,
     InventoryPermissionDenied,
     InventoryStore,
     normalize_quantity,
@@ -27,6 +28,30 @@ class InventoryStoreTests(unittest.TestCase):
             {"barcode": "A1", "name": "有库存商品", "spec": "", "model": "", "category": "配件", "unit": "个", "has_serial": False, "initial_stock": "2"},
             {"barcode": "B2", "name": "零库存商品", "spec": "", "model": "", "category": "配件", "unit": "个", "has_serial": True, "initial_stock": "0"},
         ]
+
+    def serial_ready_store(self, catalog=None):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        task = store.create_task("admin", "管理员", catalog or self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        for index, product in enumerate(catalog or self.catalog()):
+            device = f"count-device-{index}"
+            store.claim_item(
+                task["task_id"], product["barcode"], device, device, "counting"
+            )
+            book = product["initial_stock"]
+            actual = str(int(book) + 1) if product["has_serial"] else book
+            state = "serial_pending" if product["has_serial"] else "matched"
+            store.set_open_book_quantity(
+                "admin", task["task_id"], product["barcode"], device, device, book
+            )
+            store.record_count(
+                "admin", task["task_id"], product["barcode"], device, device,
+                completed_book_qty=book, completed_actual_qty=actual,
+                diff_qty="1" if product["has_serial"] else "0", state=state,
+            )
+        return store, task
 
     def test_one_active_task_per_owner_and_restart_persistence(self):
         store = InventoryStore(self.db_path)
@@ -369,3 +394,160 @@ class InventoryStoreTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inventory_stock_movements WHERE task_id = ?",
                 (task["task_id"],),
             ).fetchone()[0], 0)
+
+    def test_serial_store_guards_owner_phase_lock_and_expected_refresh_transaction(self):
+        store = InventoryStore(
+            os.path.join(self.tempdir.name, "phase.sqlite3"),
+            now=lambda: datetime(2026, 9, 1, 10, 0, 0),
+        )
+        task = store.create_task("admin", "管理员", self.catalog())
+        with self.assertRaises(InventoryConflict):
+            store.replace_expected_serials(
+                "admin", task["task_id"], "B2", "device-a", "甲", []
+            )
+
+        store, task = self.serial_ready_store()
+        store.claim_item(
+            task["task_id"], "B2", "device-a", "甲", "serial_check"
+        )
+        expected = [
+            {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
+            {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
+        ]
+        refreshed = store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "device-a", "甲", expected
+        )
+        self.assertEqual(
+            [(row["serial"], row["warehouse"]) for row in refreshed["system_only"]],
+            [("B-1", "沈桥仓"), ("B-2", "其他仓")],
+        )
+        version = store.get_task_snapshot("admin", task["task_id"])["version"]
+        invalid = [dict(expected[0], cost_price="100")]
+        with self.assertRaisesRegex(ValueError, "字段"):
+            store.replace_expected_serials(
+                "admin", task["task_id"], "B2", "device-a", "甲", invalid
+            )
+        self.assertEqual(
+            store.get_task_snapshot("admin", task["task_id"])["version"], version
+        )
+        with self.assertRaises(InventoryNotFound):
+            store.add_serial_scan(
+                "other", task["task_id"], "B2", "device-a", "乙",
+                "UNKNOWN-1", "unknown",
+            )
+        with self.assertRaises(InventoryConflict):
+            store.add_serial_scan(
+                "admin", task["task_id"], "B2", "device-b", "乙",
+                "UNKNOWN-1", "unknown",
+            )
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT serial, warehouse, sync_status FROM inventory_serial_expected "
+                "WHERE task_id = ? ORDER BY serial",
+                (task["task_id"],),
+            ).fetchall()
+            scan_count = connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_scans WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(
+            rows,
+            [("B-1", "沈桥仓", "active"), ("B-2", "其他仓", "active")],
+        )
+        self.assertEqual(scan_count, 0)
+
+    def test_serial_store_delete_rescan_completion_is_versioned_audited_and_immutable(self):
+        store, task = self.serial_ready_store()
+        store.claim_item(
+            task["task_id"], "B2", "device-a", "甲", "serial_check"
+        )
+        version_before = store.get_task_snapshot("admin", task["task_id"])["version"]
+        store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "device-a", "甲", [
+                {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
+                {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
+            ],
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-1", "matched"
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "OTHER-1",
+            "other_product",
+            {"barcode": "C3", "name": "其他商品", "warehouse": "其他商品仓", "shipped": False},
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "UNKNOWN-1", "unknown"
+        )
+        store.remove_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "UNKNOWN-1"
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "UNKNOWN-1", "unknown"
+        )
+        finished = store.complete_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        self.assertEqual(finished["item"]["state"], "serial_complete")
+        self.assertEqual([row["serial"] for row in finished["matched"]], ["B-1"])
+        self.assertEqual([row["serial"] for row in finished["system_only"]], ["B-2"])
+        self.assertEqual([row["serial"] for row in finished["physical_only"]], ["UNKNOWN-1"])
+        self.assertEqual([row["serial"] for row in finished["other_product"]], ["OTHER-1"])
+        self.assertEqual(
+            store.get_task_snapshot("admin", task["task_id"])["version"],
+            version_before + 7,
+        )
+        with self.assertRaises(InventoryConflict):
+            store.remove_serial_scan(
+                "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
+            )
+        with self.assertRaises(InventoryConflict):
+            store.replace_expected_serials(
+                "admin", task["task_id"], "B2", "device-a", "甲", []
+            )
+        self.assertEqual(
+            store.serial_reconciliation("admin", task["task_id"], "B2")["counts"],
+            finished["counts"],
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            active_counts = connection.execute(
+                "SELECT serial, COUNT(*) FROM inventory_serial_scans "
+                "WHERE task_id = ? AND active = 1 GROUP BY serial ORDER BY serial",
+                (task["task_id"],),
+            ).fetchall()
+            events = {row[0] for row in connection.execute(
+                "SELECT event_type FROM inventory_audit_events WHERE task_id = ?",
+                (task["task_id"],),
+            )}
+            lock = connection.execute(
+                "SELECT 1 FROM inventory_item_locks WHERE task_id = ? AND barcode = 'B2'",
+                (task["task_id"],),
+            ).fetchone()
+        self.assertTrue(all(count == 1 for _, count in active_counts))
+        self.assertTrue({
+            "serial_expected_refreshed", "serial_scanned",
+            "serial_scan_removed", "serial_item_completed",
+        }.issubset(events))
+        self.assertIsNone(lock)
+
+    def test_completing_one_serial_item_keeps_task_open_while_another_is_pending(self):
+        catalog = self.catalog() + [{
+            "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
+            "category": "整机", "unit": "台", "has_serial": True,
+            "initial_stock": "0",
+        }]
+        store, task = self.serial_ready_store(catalog)
+        store.claim_item(
+            task["task_id"], "B2", "device-a", "甲", "serial_check"
+        )
+        store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "device-a", "甲", []
+        )
+        store.complete_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        snapshot = store.get_task_snapshot("admin", task["task_id"])
+        states = {row["barcode"]: row["state"] for row in snapshot["items"]}
+        self.assertEqual(snapshot["phase"], "serial_check")
+        self.assertEqual(states["B2"], "serial_complete")
+        self.assertEqual(states["C3"], "serial_pending")

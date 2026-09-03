@@ -25,8 +25,7 @@ class InventoryService:
         self._sync_guards = {}
 
     @contextmanager
-    def _completed_sync_guard(self, owner, task_id):
-        key = (owner, task_id)
+    def _operation_guard(self, key):
         with self._sync_guards_lock:
             entry = self._sync_guards.get(key)
             if entry is None:
@@ -42,6 +41,16 @@ class InventoryService:
                 entry[1] -= 1
                 if entry[1] == 0:
                     del self._sync_guards[key]
+
+    @contextmanager
+    def _completed_sync_guard(self, owner, task_id):
+        with self._operation_guard(("completed_stock", owner, task_id)):
+            yield
+
+    @contextmanager
+    def _serial_guard(self, owner, task_id, barcode):
+        with self._operation_guard(("serial", owner, task_id, barcode)):
+            yield
 
     @staticmethod
     def _worker_value(result):
@@ -168,3 +177,183 @@ class InventoryService:
             )
         except ValueError as exc:
             self._mark_sync_error(owner, task_id, str(exc), self.now())
+
+    @staticmethod
+    def _validated_expected_serials(value, barcode):
+        if not isinstance(value, list):
+            raise InventoryServiceError("GYJ 序列号库存结果格式不正确")
+        allowed_keys = {"serial", "barcode", "name", "warehouse", "shipped"}
+        rows = []
+        seen = set()
+        for raw in value:
+            if not isinstance(raw, dict) or set(raw) != allowed_keys:
+                raise InventoryServiceError("GYJ 序列号库存字段不正确")
+            serial = str(raw["serial"] or "").strip()
+            row_barcode = str(raw["barcode"] or "").strip()
+            if (
+                not serial
+                or row_barcode != barcode
+                or raw["shipped"] is not False
+                or serial in seen
+            ):
+                raise InventoryServiceError("GYJ 序列号库存内容不正确")
+            seen.add(serial)
+            rows.append({
+                "serial": serial,
+                "barcode": row_barcode,
+                "name": str(raw["name"] or ""),
+                "warehouse": str(raw["warehouse"] or ""),
+                "shipped": False,
+            })
+        return rows
+
+    @staticmethod
+    def _validated_serial_lookup(value, serial):
+        if value is None:
+            return None
+        allowed_keys = {"serial", "barcode", "name", "warehouse", "shipped"}
+        if not isinstance(value, dict) or set(value) != allowed_keys:
+            raise InventoryServiceError("GYJ 序列号查询结果格式不正确")
+        result_serial = str(value["serial"] or "").strip()
+        result_barcode = str(value["barcode"] or "").strip()
+        if (
+            result_serial != serial
+            or not result_barcode
+            or not isinstance(value["shipped"], bool)
+        ):
+            raise InventoryServiceError("GYJ 序列号查询结果内容不正确")
+        return {
+            "serial": result_serial,
+            "barcode": result_barcode,
+            "name": str(value["name"] or ""),
+            "warehouse": str(value["warehouse"] or ""),
+            "shipped": value["shipped"],
+        }
+
+    def _serial_item(self, owner, task_id, barcode):
+        snapshot = self._snapshot(owner, task_id, {"serial_check"})
+        item = self._item(snapshot, barcode)
+        if item["state"] != "serial_pending":
+            raise InventoryConflict("商品不在待核对序列号状态")
+        return item
+
+    def _refresh_serial_item_locked(
+        self, owner, task_id, barcode, device_id, actor, force
+    ):
+        self._serial_item(owner, task_id, barcode)
+        self.store.assert_item_lock(task_id, barcode, device_id, "serial_check")
+        current = self.store.serial_reconciliation(owner, task_id, barcode)
+        check_time = self.now()
+        last_sync_at = current["item"].get("serial_synced_at")
+        if not force and last_sync_at:
+            last_sync = datetime.fromisoformat(last_sync_at)
+            if (check_time - last_sync).total_seconds() < 60:
+                current["skipped"] = True
+                return current
+
+        worker = self.worker_provider(owner)
+        value = self._worker_value(worker.read_inventory_serials(barcode))
+        rows = self._validated_expected_serials(value, barcode)
+        result = self.store.replace_expected_serials(
+            owner, task_id, barcode, device_id, actor, rows,
+            synced_at=self.now(),
+        )
+        result["skipped"] = False
+        return result
+
+    def open_serial_item(self, owner, task_id, barcode, device_id, actor):
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            self.store.claim_item(
+                task_id, barcode, device_id, actor, "serial_check"
+            )
+            try:
+                return self._refresh_serial_item_locked(
+                    owner, task_id, barcode, device_id, actor, True
+                )
+            except Exception:
+                self.store.release_item_lock(
+                    owner, task_id, barcode, device_id, actor,
+                    "serial_check", "serial_open_failed",
+                )
+                raise
+
+    def refresh_serial_item(
+        self, owner, task_id, barcode, device_id, actor, force=False
+    ):
+        with self._serial_guard(owner, task_id, barcode):
+            return self._refresh_serial_item_locked(
+                owner, task_id, barcode, device_id, actor, force
+            )
+
+    def scan_serial(
+        self, owner, task_id, barcode, device_id, actor, serial
+    ):
+        serial = str(serial or "").strip()
+        if not serial:
+            raise ValueError("序列号不能为空")
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            self.store.assert_item_lock(
+                task_id, barcode, device_id, "serial_check"
+            )
+            current = self.store.serial_reconciliation(owner, task_id, barcode)
+            active = (
+                current["matched"]
+                + current["physical_only"]
+                + current["other_product"]
+            )
+            for row in active:
+                if row["serial"] == serial:
+                    return self.store.add_serial_scan(
+                        owner, task_id, barcode, device_id, actor, serial,
+                        row["classification"],
+                    )
+
+            expected = {
+                row["serial"] for row in current["expected"]
+            }
+            lookup = None
+            if serial in expected:
+                classification = "matched"
+            else:
+                worker = self.worker_provider(owner)
+                value = self._worker_value(
+                    worker.lookup_inventory_serial(serial)
+                )
+                lookup = self._validated_serial_lookup(value, serial)
+                if lookup is None:
+                    classification = "unknown"
+                elif lookup["barcode"] != barcode:
+                    classification = "other_product"
+                elif lookup["shipped"]:
+                    classification = "already_shipped"
+                else:
+                    classification = "unknown"
+            return self.store.add_serial_scan(
+                owner, task_id, barcode, device_id, actor, serial,
+                classification, lookup,
+            )
+
+    def delete_serial_scan(
+        self, owner, task_id, barcode, device_id, actor, serial
+    ):
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            self.store.assert_item_lock(
+                task_id, barcode, device_id, "serial_check"
+            )
+            return self.store.remove_serial_scan(
+                owner, task_id, barcode, device_id, actor, serial
+            )
+
+    def finish_serial_item(
+        self, owner, task_id, barcode, device_id, actor
+    ):
+        with self._serial_guard(owner, task_id, barcode):
+            self._refresh_serial_item_locked(
+                owner, task_id, barcode, device_id, actor, True
+            )
+            return self.store.complete_serial_item(
+                owner, task_id, barcode, device_id, actor
+            )
