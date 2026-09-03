@@ -6,7 +6,9 @@
     <title>库存盘点</title>
     <link rel="stylesheet" href="/static/app_layout.css">
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
+    <link rel="stylesheet" href="/static/inventory.css{{ inventory_css_v }}">
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+    <script defer src="/static/inventory.js{{ inventory_js_v }}"></script>
 </head>
 <body data-aurora-page="inventory">
 <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
@@ -31,13 +33,106 @@
         <button class="btn btn-primary" id="inventoryGyjLoginButton" type="button">登录 GYJ</button>
     </div>
 
-    <main id="inventoryRoot">
-        <section id="inventoryCurrentRoot"></section>
-        <section id="inventoryHistoryRoot"></section>
-        <section id="inventoryDiscrepanciesRoot"></section>
-        <section id="inventoryAdminRoot"></section>
+    <main id="inventoryRoot" class="inventory-shell">
+        <section id="inventoryCurrentRoot" class="inventory-current" aria-labelledby="inventoryCurrentTitle">
+            <div class="inventory-section-head">
+                <div>
+                    <p class="inventory-eyebrow">CURRENT STOCKTAKE</p>
+                    <h2 id="inventoryCurrentTitle">当前盘点</h2>
+                    <p id="inventoryTaskMeta" class="muted">正在读取盘点任务…</p>
+                </div>
+                <button class="btn btn-primary" id="inventoryCreateTask" type="button">开始新盘点</button>
+            </div>
+
+            <div id="inventoryNotice" class="inventory-notice" role="status" aria-live="polite"></div>
+            <div id="inventoryTaskSummary" class="inventory-summary" aria-label="盘点进度摘要"></div>
+
+            <div class="inventory-toolbar">
+                <label class="inventory-search-field" for="inventorySearch">
+                    <span>搜索或扫描商品</span>
+                    <input id="inventorySearch" type="search" autocomplete="off" placeholder="输入商品条码或名称，扫描后按 Enter">
+                </label>
+                <label class="inventory-filter-field" for="inventoryFilters">
+                    <span>查看范围</span>
+                    <select id="inventoryFilters">
+                        <option value="">全部商品</option>
+                        <option value="pending">待盘点</option>
+                        <option value="completed">已完成</option>
+                        <option value="variance">数量差异</option>
+                        <option value="serial_pending">待序列号</option>
+                    </select>
+                </label>
+            </div>
+
+            <div id="inventoryItems" class="inventory-items" aria-live="polite"></div>
+        </section>
+        <section id="inventoryHistoryRoot" hidden></section>
+        <section id="inventoryDiscrepanciesRoot" hidden></section>
+        <section id="inventoryAdminRoot" hidden></section>
     </main>
 </div>
+
+<dialog id="inventoryCountDialog" aria-labelledby="inventoryCountDialogTitle" aria-modal="true" class="inventory-dialog">
+    <div class="inventory-dialog-card">
+        <div class="inventory-dialog-head">
+            <div>
+                <p class="inventory-eyebrow">LIVE GYJ STOCK</p>
+                <h2 id="inventoryCountDialogTitle">盘点商品</h2>
+            </div>
+            <button class="inventory-icon-button" id="inventoryCountClose" type="button" aria-label="关闭盘点窗口">×</button>
+        </div>
+        <div id="inventoryCountProduct" class="inventory-count-product"></div>
+        <div class="inventory-book-panel">
+            <span>GYJ 当前账面</span>
+            <strong id="inventoryCountBook">—</strong>
+        </div>
+        <label class="inventory-count-field" for="inventoryActualQuantity">
+            <span>实盘数量</span>
+            <input id="inventoryActualQuantity" type="number" inputmode="decimal" min="0" step="any" autocomplete="off">
+        </label>
+        <div class="inventory-live-difference" aria-live="polite">
+            <span>实时差异</span>
+            <strong id="inventoryCountDifference">—</strong>
+            <span id="inventoryCountDifferenceState">等待填写</span>
+        </div>
+        <p id="inventoryCountMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
+        <div class="inventory-dialog-actions">
+            <button class="btn btn-secondary" id="inventoryCountCancel" type="button">取消</button>
+            <button class="btn btn-primary" id="inventoryCountSubmit" type="button">确认实盘数量</button>
+        </div>
+    </div>
+</dialog>
+
+<dialog id="inventoryGyjLoginDialog" aria-labelledby="inventoryGyjLoginDialogTitle" aria-modal="true" class="inventory-dialog">
+    <div class="inventory-dialog-card inventory-login-card">
+        <div class="inventory-dialog-head">
+            <div>
+                <p class="inventory-eyebrow">ACCOUNT CONNECTION</p>
+                <h2 id="inventoryGyjLoginDialogTitle">登录 GYJ</h2>
+            </div>
+            <button class="inventory-icon-button" id="inventoryGyjLoginClose" type="button" aria-label="关闭 GYJ 登录窗口">×</button>
+        </div>
+        <label for="inventoryGyjUsername">GYJ 账号</label>
+        <input id="inventoryGyjUsername" autocomplete="username" placeholder="请输入 GYJ 账号">
+        <label for="inventoryGyjPassword">GYJ 密码</label>
+        <input id="inventoryGyjPassword" type="password" autocomplete="current-password" placeholder="请输入 GYJ 密码">
+        <label class="inventory-remember"><input id="inventoryGyjRemember" type="checkbox">记住账号密码</label>
+        <div id="inventoryGyjCaptchaRow" class="inventory-captcha" hidden>
+            <label for="inventoryGyjCaptcha">验证码</label>
+            <div class="inventory-captcha-controls">
+                <input id="inventoryGyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入验证码">
+                <img id="inventoryGyjCaptchaImage" alt="GYJ 验证码">
+                <button class="btn btn-secondary" id="inventoryGyjCaptchaRefresh" type="button">刷新</button>
+            </div>
+            <button class="btn btn-primary" id="inventoryGyjCaptchaSubmit" type="button">提交验证码</button>
+        </div>
+        <p id="inventoryGyjLoginMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
+        <div class="inventory-dialog-actions">
+            <button class="btn btn-secondary" id="inventoryGyjLoginCancel" type="button">取消</button>
+            <button class="btn btn-primary" id="inventoryGyjLoginSubmit" type="button">登录 GYJ</button>
+        </div>
+    </div>
+</dialog>
 <script>
 const CURRENT_ACCOUNT = {{ account|tojson }};
 const INVENTORY_IS_ADMIN = Boolean(CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin);

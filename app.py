@@ -8956,6 +8956,8 @@ def _aurora_asset_versions():
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),
+        "inventory_css_v": _stamp("inventory.css"),
+        "inventory_js_v": _stamp("inventory.js"),
         "log_modal_css_v": _stamp("log_modal.css") if os.path.exists(os.path.join(app.static_folder, "log_modal.css")) else "",
         "log_modal_js_v": _stamp("log_modal.js") if os.path.exists(os.path.join(app.static_folder, "log_modal.js")) else "",
     }
@@ -10591,6 +10593,52 @@ def _inventory_public_task(task):
     return public
 
 
+def _inventory_task_summary(items):
+    summary = {
+        "total": len(items),
+        "completed": 0,
+        "pending": 0,
+        "matched": 0,
+        "surplus": 0,
+        "deficit": 0,
+        "serial_pending": 0,
+    }
+    for item in items:
+        if item.get("completed_actual_qty") is None:
+            summary["pending"] += 1
+        else:
+            summary["completed"] += 1
+        if item.get("state") == "matched":
+            summary["matched"] += 1
+        difference = str(item.get("diff_qty") or "0")
+        if difference.startswith("-"):
+            summary["deficit"] += 1
+        elif difference.strip("0."):
+            summary["surplus"] += 1
+        if item.get("state") == "serial_pending":
+            summary["serial_pending"] += 1
+    return summary
+
+
+def _inventory_attach_lock_owners(task_id, items):
+    lock_owners = {}
+    try:
+        with inventory_store.connect() as connection:
+            rows = connection.execute(
+                """SELECT barcode, actor FROM inventory_item_locks
+                   WHERE task_id = ? AND expires_at > ?""",
+                (task_id, datetime.now().isoformat()),
+            )
+            lock_owners = {row["barcode"]: row["actor"] for row in rows}
+    except Exception:
+        # Lock labels are supplementary; the task snapshot remains usable if
+        # an older store implementation cannot expose them.
+        pass
+    for item in items:
+        item["lock_actor"] = lock_owners.get(item.get("barcode"), "")
+    return items
+
+
 @app.route("/api/inventory/tasks/active", methods=["GET"])
 @_inventory_api
 def api_inventory_active_task():
@@ -10604,6 +10652,7 @@ def api_inventory_active_task():
         owner, task_id, known_version=known_version
     )
     if not snapshot.get("unchanged"):
+        snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])
         query = str(request.args.get("query") or "").strip()
         state = str(request.args.get("state") or "").strip()
         snapshot["items"] = inventory_store.list_items(
@@ -10612,6 +10661,7 @@ def api_inventory_active_task():
             state=state,
             include_zero=bool(query),
         )
+        _inventory_attach_lock_owners(task_id, snapshot["items"])
     _ensure_inventory_sync(owner, task_id)
     return jsonify({"success": True, "task": _inventory_public_task(snapshot)})
 
@@ -10650,13 +10700,19 @@ def api_inventory_task(task_id):
 def api_inventory_claim_item(task_id, barcode):
     owner, actor = _inventory_identity()
     data = _inventory_json_body()
-    item = inventory_service.open_count_item(
-        owner,
-        _inventory_path_value(task_id, "任务标识"),
-        _inventory_path_value(barcode, "商品条码"),
-        _inventory_device_id(data),
-        actor,
-    )
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    try:
+        item = inventory_service.open_count_item(
+            owner, task_id, barcode, _inventory_device_id(data), actor,
+        )
+    except InventoryConflict as exc:
+        locked = _inventory_attach_lock_owners(task_id, [{"barcode": barcode}])[0]
+        return jsonify({
+            "success": False,
+            "error": str(exc),
+            "lock_owner": locked.get("lock_actor") or "其他设备",
+        }), 409
     return jsonify({"success": True, "item": item})
 
 
