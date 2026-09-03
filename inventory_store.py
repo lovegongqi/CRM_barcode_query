@@ -11,6 +11,54 @@ _CATALOG_KEYS = frozenset(
     {"barcode", "name", "spec", "model", "category", "unit", "has_serial", "initial_stock"}
 )
 
+_SERIAL_DISCREPANCY_KINDS = {
+    "system_only": "system_only_serial",
+    "physical_only": "physical_only_serial",
+    "other_product": "other_product_serial",
+    "already_shipped": "already_shipped_serial",
+    "unknown": "unknown_serial",
+}
+
+_DISCREPANCY_SELECT = """
+    SELECT discrepancies.discrepancy_id AS id,
+           discrepancies.task_id,
+           discrepancies.barcode,
+           discrepancies.serial,
+           discrepancies.kind,
+           discrepancies.book_quantity,
+           discrepancies.counted_quantity,
+           discrepancies.difference,
+           discrepancies.status AS state,
+           discrepancies.archived_by,
+           discrepancies.archived_at,
+           discrepancies.created_at,
+           items.name,
+           items.spec,
+           items.model,
+           items.category,
+           items.unit,
+           items.has_serial,
+           tasks.completed_at,
+           scans.actor AS scan_actor,
+           scans.device_id AS scan_device,
+           scans.scanned_at,
+           scans.lookup_barcode,
+           scans.lookup_name,
+           scans.warehouse,
+           scans.is_checked_out
+      FROM inventory_discrepancies AS discrepancies
+      JOIN inventory_tasks AS tasks
+        ON tasks.task_id = discrepancies.task_id
+      JOIN inventory_items AS items
+        ON items.task_id = discrepancies.task_id
+       AND items.barcode = discrepancies.barcode
+ LEFT JOIN inventory_serial_scans AS scans
+        ON scans.task_id = discrepancies.task_id
+       AND scans.barcode = discrepancies.barcode
+       AND scans.serial = discrepancies.serial
+       AND scans.active = 1
+"""
+
 
 class InventoryConflict(RuntimeError):
     pass
@@ -1318,3 +1366,301 @@ class InventoryStore:
         finally:
             connection.close()
         return self.serial_reconciliation(owner, task_id, barcode)
+
+    @classmethod
+    def _discrepancy_dict(cls, connection, row):
+        result = dict(row)
+        result["has_serial"] = bool(result["has_serial"])
+        result["shipped"] = bool(result.pop("is_checked_out", 0))
+        notes = [dict(note) for note in connection.execute(
+            """SELECT note_id AS id, task_id, barcode, serial, note, actor,
+                      created_at
+                 FROM inventory_notes
+                WHERE task_id = ? AND barcode = ? AND serial IS ?
+                ORDER BY note_id""",
+            (result["task_id"], result["barcode"], result["serial"]),
+        )]
+        result["notes"] = notes
+        result["note"] = notes[-1]["note"] if notes else None
+        return result
+
+    @classmethod
+    def _discrepancy_for_owner(cls, connection, owner, discrepancy_id):
+        row = connection.execute(
+            _DISCREPANCY_SELECT
+            + " WHERE tasks.owner = ? AND discrepancies.discrepancy_id = ?",
+            (owner, discrepancy_id),
+        ).fetchone()
+        if row is None:
+            raise InventoryNotFound("差异记录不存在")
+        return cls._discrepancy_dict(connection, row)
+
+    def complete_task(self, owner, task_id, actor):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] == "completed":
+                connection.commit()
+                result = self._row_dict(task)
+                result["completed"] = True
+                return result
+            if task["phase"] not in {"counting", "serial_check"}:
+                raise InventoryConflict("当前任务不能完成")
+
+            unfinished = connection.execute(
+                """SELECT COUNT(*) FROM inventory_items
+                   WHERE task_id = ? AND completed_counted_quantity IS NULL""",
+                (task_id,),
+            ).fetchone()[0]
+            if unfinished:
+                raise InventoryConflict("仍有商品未完成数量盘点")
+            serial_pending = connection.execute(
+                """SELECT COUNT(*) FROM inventory_items
+                   WHERE task_id = ? AND status = 'serial_pending'""",
+                (task_id,),
+            ).fetchone()[0]
+            if serial_pending:
+                raise InventoryConflict("仍有商品未完成序列号核对")
+
+            timestamp = self._now_text()
+            discrepancy_count = 0
+            items = connection.execute(
+                """SELECT * FROM inventory_items
+                   WHERE task_id = ? ORDER BY barcode""",
+                (task_id,),
+            ).fetchall()
+            for item in items:
+                if item["difference"] != "0":
+                    connection.execute(
+                        """INSERT INTO inventory_discrepancies
+                           (task_id, barcode, serial, kind, book_quantity,
+                            counted_quantity, difference, status, created_at)
+                           VALUES (?, ?, NULL, 'product_quantity', ?, ?, ?,
+                                   'open', ?)""",
+                        (
+                            task_id, item["barcode"],
+                            item["completed_book_quantity"],
+                            item["completed_counted_quantity"],
+                            item["difference"], timestamp,
+                        ),
+                    )
+                    discrepancy_count += 1
+
+            scans = connection.execute(
+                """SELECT barcode, serial, classification
+                   FROM inventory_serial_scans
+                   WHERE task_id = ? AND active = 1
+                   ORDER BY scan_id""",
+                (task_id,),
+            ).fetchall()
+            for scan in scans:
+                if scan["classification"] == "matched":
+                    continue
+                kind = _SERIAL_DISCREPANCY_KINDS.get(scan["classification"])
+                if kind is None:
+                    raise InventoryConflict("存在未完成的序列号分类")
+                connection.execute(
+                    """INSERT INTO inventory_discrepancies
+                       (task_id, barcode, serial, kind, status, created_at)
+                       VALUES (?, ?, ?, ?, 'open', ?)""",
+                    (
+                        task_id, scan["barcode"], scan["serial"], kind,
+                        timestamp,
+                    ),
+                )
+                discrepancy_count += 1
+
+            connection.execute(
+                """UPDATE inventory_tasks
+                   SET phase = 'completed', completed_at = ?
+                   WHERE task_id = ?""",
+                (timestamp, task_id),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "task_completed", actor,
+                details=f"discrepancies={discrepancy_count}",
+                created_at=timestamp,
+            )
+            connection.commit()
+            result = self._row_dict(connection.execute(
+                "SELECT * FROM inventory_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone())
+            result["completed"] = True
+            return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def list_task_history(self, owner):
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM inventory_tasks
+                   WHERE owner = ? AND phase = 'completed'
+                   ORDER BY completed_at DESC, rowid DESC""",
+                (owner,),
+            ).fetchall()
+        result = [self._row_dict(row) for row in rows]
+        for task in result:
+            task["completed"] = True
+        return result
+
+    def list_discrepancies(self, owner, state, query=""):
+        if state not in {"open", "archived"}:
+            raise ValueError("差异状态不正确")
+        query = str(query or "").strip()
+        sql = _DISCREPANCY_SELECT + """
+            WHERE tasks.owner = ? AND discrepancies.status = ?
+        """
+        params = [owner, state]
+        if query:
+            sql += """
+                AND (
+                    LOWER(discrepancies.barcode) LIKE LOWER(?)
+                    OR LOWER(items.name) LIKE LOWER(?)
+                    OR LOWER(COALESCE(discrepancies.serial, '')) LIKE LOWER(?)
+                )
+            """
+            pattern = f"%{query}%"
+            params.extend((pattern, pattern, pattern))
+        sql += " ORDER BY discrepancies.created_at DESC, discrepancies.discrepancy_id DESC"
+        with self.connect() as connection:
+            return [
+                self._discrepancy_dict(connection, row)
+                for row in connection.execute(sql, params)
+            ]
+
+    def add_discrepancy_note(
+        self, owner, discrepancy_id, actor, note, serial=None
+    ):
+        note = str(note or "").strip()
+        if not note:
+            raise ValueError("备注不能为空")
+        if serial is not None:
+            serial = str(serial).strip()
+            if not serial:
+                raise ValueError("序列号不能为空")
+
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            discrepancy = self._discrepancy_for_owner(
+                connection, owner, discrepancy_id
+            )
+            if serial is not None:
+                known = connection.execute(
+                    """SELECT 1 FROM inventory_discrepancies
+                       WHERE task_id = ? AND barcode = ? AND serial = ?""",
+                    (discrepancy["task_id"], discrepancy["barcode"], serial),
+                ).fetchone()
+                if known is None:
+                    raise InventoryNotFound("差异序列号不存在")
+            timestamp = self._now_text()
+            cursor = connection.execute(
+                """INSERT INTO inventory_notes
+                   (task_id, barcode, serial, note, actor, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    discrepancy["task_id"], discrepancy["barcode"], serial,
+                    note, actor, timestamp,
+                ),
+            )
+            self._bump_version(connection, discrepancy["task_id"])
+            self._audit(
+                connection, discrepancy["task_id"], "discrepancy_note_added",
+                actor, barcode=discrepancy["barcode"],
+                details=(
+                    f"discrepancy={discrepancy_id};serial={serial or ''};"
+                    f"note={note}"
+                ),
+                created_at=timestamp,
+            )
+            connection.commit()
+            return self._row_dict(connection.execute(
+                """SELECT note_id AS id, task_id, barcode, serial, note,
+                          actor, created_at
+                   FROM inventory_notes WHERE note_id = ?""",
+                (cursor.lastrowid,),
+            ).fetchone())
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def archive_discrepancy(
+        self, owner, discrepancy_id, actor, is_admin
+    ):
+        if not is_admin:
+            raise InventoryPermissionDenied("只有管理员可以归档差异")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            discrepancy = self._discrepancy_for_owner(
+                connection, owner, discrepancy_id
+            )
+            if discrepancy["state"] == "archived":
+                connection.commit()
+                return discrepancy
+            timestamp = self._now_text()
+            connection.execute(
+                """UPDATE inventory_discrepancies
+                   SET status = 'archived', archived_by = ?, archived_at = ?
+                   WHERE discrepancy_id = ?""",
+                (actor, timestamp, discrepancy_id),
+            )
+            self._bump_version(connection, discrepancy["task_id"])
+            self._audit(
+                connection, discrepancy["task_id"], "discrepancy_archived",
+                actor, barcode=discrepancy["barcode"],
+                details=f"discrepancy={discrepancy_id}", created_at=timestamp,
+            )
+            connection.commit()
+            return self._discrepancy_for_owner(
+                connection, owner, discrepancy_id
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def restore_discrepancy(
+        self, owner, discrepancy_id, actor, is_admin
+    ):
+        if not is_admin:
+            raise InventoryPermissionDenied("只有管理员可以恢复差异")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            discrepancy = self._discrepancy_for_owner(
+                connection, owner, discrepancy_id
+            )
+            if discrepancy["state"] == "open":
+                connection.commit()
+                return discrepancy
+            timestamp = self._now_text()
+            connection.execute(
+                """UPDATE inventory_discrepancies
+                   SET status = 'open', archived_by = NULL, archived_at = NULL
+                   WHERE discrepancy_id = ?""",
+                (discrepancy_id,),
+            )
+            self._bump_version(connection, discrepancy["task_id"])
+            self._audit(
+                connection, discrepancy["task_id"], "discrepancy_restored",
+                actor, barcode=discrepancy["barcode"],
+                details=f"discrepancy={discrepancy_id}", created_at=timestamp,
+            )
+            connection.commit()
+            return self._discrepancy_for_owner(
+                connection, owner, discrepancy_id
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()

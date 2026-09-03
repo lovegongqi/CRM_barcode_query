@@ -514,6 +514,107 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual([row["state"] for row in snapshot["items"]], ["matched", "matched"])
         self.assertEqual(snapshot["phase"], "counting")
 
+    def test_complete_task_allows_counting_without_serial_pending_and_is_idempotent(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "A1", "2")
+        self.submit(task["task_id"], "B2", "0", device_id="device-b")
+        before = self.store.get_task_snapshot("admin", task["task_id"])
+
+        completed = self.service.complete_task(
+            "admin", task["task_id"], "管理员"
+        )
+        repeated = self.service.complete_task(
+            "admin", task["task_id"], "管理员"
+        )
+
+        self.assertTrue(completed["completed"])
+        self.assertEqual(completed["phase"], "completed")
+        self.assertEqual(completed["version"], before["version"] + 1)
+        self.assertEqual(repeated["version"], completed["version"])
+        self.assertEqual(self.store.list_discrepancies("admin", "open"), [])
+        self.assertIsNone(self.store.get_active_task("admin"))
+
+    def test_complete_task_rejects_unfinished_quantity_or_serial_work(self):
+        task = self.create_task()
+        with self.assertRaises(InventoryConflict):
+            self.service.complete_task("admin", task["task_id"], "管理员")
+        self.submit(task["task_id"], "B2", "1", device_id="device-b")
+        with self.assertRaises(InventoryConflict):
+            self.service.complete_task("admin", task["task_id"], "管理员")
+        self.submit(task["task_id"], "A1", "2")
+        with self.assertRaises(InventoryConflict):
+            self.service.complete_task("admin", task["task_id"], "管理员")
+        self.assertEqual(
+            self.store.get_task_snapshot("admin", task["task_id"])["phase"],
+            "serial_check",
+        )
+        self.assertEqual(self.store.list_discrepancies("admin", "open"), [])
+
+    def test_completion_preserves_service_serial_classifications(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "SYSTEM-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.worker.lookup = {
+            "OTHER-1": {
+                "serial": "OTHER-1", "barcode": "C3", "name": "其他商品",
+                "warehouse": "其他仓", "shipped": False,
+            },
+            "SHIPPED-1": {
+                "serial": "SHIPPED-1", "barcode": "B2", "name": "序列商品",
+                "warehouse": "沈桥仓", "shipped": True,
+            },
+        }
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        for serial in ("OTHER-1", "SHIPPED-1", "UNKNOWN-1"):
+            self.service.scan_serial(
+                "admin", task["task_id"], "B2", "device-a", "甲", serial
+            )
+        self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+
+        self.service.complete_task("admin", task["task_id"], "管理员")
+        rows = self.store.list_discrepancies("admin", "open")
+
+        self.assertTrue({
+            "product_quantity", "system_only_serial", "other_product_serial",
+            "already_shipped_serial", "unknown_serial",
+        }.issubset({row["kind"] for row in rows}))
+
+    def test_history_is_owner_scoped_newest_first_and_survives_restart(self):
+        first = self.create_task()
+        self.submit(first["task_id"], "A1", "2")
+        self.submit(first["task_id"], "B2", "0", device_id="device-b")
+        first_completed = self.service.complete_task(
+            "admin", first["task_id"], "管理员"
+        )
+        self.current[0] += timedelta(seconds=1)
+        second = self.create_task()
+        self.submit(second["task_id"], "A1", "2")
+        self.submit(second["task_id"], "B2", "0", device_id="device-b")
+        second_completed = self.service.complete_task(
+            "admin", second["task_id"], "管理员"
+        )
+
+        history = InventoryStore(
+            self.db_path, now=self.now
+        ).list_task_history("admin")
+
+        self.assertEqual(
+            [row["task_id"] for row in history],
+            [second["task_id"], first["task_id"]],
+        )
+        self.assertEqual(history[0]["version"], second_completed["version"])
+        self.assertEqual(history[1]["version"], first_completed["version"])
+        self.assertTrue(all(row["completed"] for row in history))
+        self.assertEqual(
+            InventoryStore(self.db_path).list_task_history("other"), []
+        )
+
     def test_submit_failure_keeps_lock_and_success_releases_it(self):
         task = self.create_task()
         self.service.open_count_item("admin", task["task_id"], "A1", "device-a", "甲")

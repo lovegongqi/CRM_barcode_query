@@ -357,3 +357,6 @@ class InventoryService:
             return self.store.complete_serial_item(
                 owner, task_id, barcode, device_id, actor
             )
+
+    def complete_task(self, owner, task_id, actor):
+        return self.store.complete_task(owner, task_id, actor)

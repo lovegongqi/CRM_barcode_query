@@ -551,3 +551,228 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["phase"], "serial_check")
         self.assertEqual(states["B2"], "serial_complete")
         self.assertEqual(states["C3"], "serial_pending")
+
+    def completed_difference_store(self):
+        store, task = self.serial_ready_store()
+        task_id = task["task_id"]
+        store.claim_item(task_id, "B2", "device-a", "甲", "serial_check")
+        store.replace_expected_serials(
+            "admin", task_id, "B2", "device-a", "甲", [{
+                "serial": "SYSTEM-1", "barcode": "B2", "name": "零库存商品",
+                "warehouse": "沈桥仓", "shipped": False,
+            }]
+        )
+        for serial, classification, lookup in (
+            (
+                "OTHER-1", "other_product",
+                {"barcode": "C3", "name": "其他商品", "warehouse": "其他仓", "shipped": False},
+            ),
+            (
+                "SHIPPED-1", "already_shipped",
+                {"barcode": "B2", "name": "零库存商品", "warehouse": "沈桥仓", "shipped": True},
+            ),
+            ("UNKNOWN-1", "unknown", None),
+        ):
+            store.add_serial_scan(
+                "admin", task_id, "B2", "device-a", "甲", serial,
+                classification, lookup,
+            )
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_serial_scans
+                   (task_id, barcode, serial, classification,
+                    source_classification, device_id, actor, scanned_at, active)
+                   VALUES (?, 'B2', 'PHYSICAL-1', 'physical_only',
+                           'physical_only', 'device-a', '甲', ?, 1)""",
+                (task_id, "2026-09-01T10:00:00"),
+            )
+        store.complete_serial_item(
+            "admin", task_id, "B2", "device-a", "甲"
+        )
+        return store, task
+
+    def test_completion_materializes_every_final_kind_once_and_omits_zero_rows(self):
+        store, task = self.completed_difference_store()
+
+        completed = store.complete_task("admin", task["task_id"], "管理员")
+        first_rows = store.list_discrepancies("admin", "open")
+        repeated = store.complete_task("admin", task["task_id"], "管理员")
+        second_rows = store.list_discrepancies("admin", "open")
+
+        self.assertTrue(completed["completed"])
+        self.assertEqual(repeated["version"], completed["version"])
+        self.assertEqual(
+            {row["kind"] for row in first_rows},
+            {
+                "product_quantity", "system_only_serial",
+                "physical_only_serial", "other_product_serial",
+                "already_shipped_serial", "unknown_serial",
+            },
+        )
+        self.assertEqual(
+            [row["id"] for row in second_rows],
+            [row["id"] for row in first_rows],
+        )
+        product_rows = [
+            row for row in first_rows if row["kind"] == "product_quantity"
+        ]
+        self.assertEqual(len(product_rows), 1)
+        self.assertEqual(
+            (
+                product_rows[0]["barcode"], product_rows[0]["book_quantity"],
+                product_rows[0]["counted_quantity"], product_rows[0]["difference"],
+            ),
+            ("B2", "0", "1", "1"),
+        )
+        self.assertNotIn("price", "|".join(
+            key.lower() for row in first_rows for key in row
+        ))
+
+    def test_notes_are_append_only_and_archive_restore_only_change_metadata(self):
+        store, task = self.completed_difference_store()
+        completed = store.complete_task("admin", task["task_id"], "管理员")
+        rows = store.list_discrepancies("admin", "open")
+        product = next(row for row in rows if row["kind"] == "product_quantity")
+        serial_row = next(
+            row for row in rows if row["kind"] == "system_only_serial"
+        )
+        original = {
+            key: serial_row[key]
+            for key in (
+                "task_id", "barcode", "serial", "kind", "book_quantity",
+                "counted_quantity", "difference", "created_at",
+            )
+        }
+
+        product_note = store.add_discrepancy_note(
+            "admin", product["id"], "仓管员", "商品位置待核对"
+        )
+        serial_note = store.add_discrepancy_note(
+            "admin", product["id"], "仓管员", "已找到，放错仓位",
+            serial="SYSTEM-1",
+        )
+        store.add_discrepancy_note(
+            "admin", serial_row["id"], "仓管员", "等待管理员确认",
+            serial="SYSTEM-1",
+        )
+        version_after_notes = store.get_task_snapshot(
+            "admin", task["task_id"]
+        )["version"]
+        with self.assertRaises(InventoryPermissionDenied):
+            store.archive_discrepancy(
+                "admin", serial_row["id"], "仓管员", False
+            )
+        before_archive = store.get_task_snapshot(
+            "admin", task["task_id"]
+        )["version"]
+        archived = store.archive_discrepancy(
+            "admin", serial_row["id"], "管理员", True
+        )
+        repeated_archive = store.archive_discrepancy(
+            "admin", serial_row["id"], "管理员", True
+        )
+        with self.assertRaises(InventoryPermissionDenied):
+            store.restore_discrepancy(
+                "admin", serial_row["id"], "仓管员", False
+            )
+        restored = store.restore_discrepancy(
+            "admin", serial_row["id"], "管理员", True
+        )
+        repeated_restore = store.restore_discrepancy(
+            "admin", serial_row["id"], "管理员", True
+        )
+
+        self.assertEqual(product_note["serial"], None)
+        self.assertEqual(serial_note["serial"], "SYSTEM-1")
+        self.assertEqual(serial_note["note"], "已找到，放错仓位")
+        self.assertEqual(version_after_notes, completed["version"] + 3)
+        self.assertEqual(before_archive, version_after_notes)
+        self.assertEqual(archived["state"], "archived")
+        self.assertEqual(repeated_archive, archived)
+        self.assertEqual(restored["state"], "open")
+        self.assertEqual(repeated_restore, restored)
+        self.assertEqual(restored["archived_by"], None)
+        self.assertEqual(restored["archived_at"], None)
+        self.assertEqual(
+            store.get_task_snapshot("admin", task["task_id"])["version"],
+            before_archive + 2,
+        )
+        reloaded = InventoryStore(self.db_path, now=store.now)
+        reloaded_serial = next(
+            row for row in reloaded.list_discrepancies("admin", "open")
+            if row["id"] == serial_row["id"]
+        )
+        self.assertEqual(
+            {key: reloaded_serial[key] for key in original}, original
+        )
+        self.assertEqual(
+            [note["note"] for note in reloaded_serial["notes"]],
+            ["已找到，放错仓位", "等待管理员确认"],
+        )
+        reloaded_product = next(
+            row for row in reloaded.list_discrepancies("admin", "open")
+            if row["id"] == product["id"]
+        )
+        self.assertEqual(
+            [note["note"] for note in reloaded_product["notes"]],
+            ["商品位置待核对"],
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            events = connection.execute(
+                """SELECT event_type FROM inventory_audit_events
+                   WHERE task_id = ? AND event_type IN (
+                       'discrepancy_archived', 'discrepancy_restored')
+                   ORDER BY event_id""",
+                (task["task_id"],),
+            ).fetchall()
+        self.assertEqual(
+            events, [("discrepancy_archived",), ("discrepancy_restored",)]
+        )
+
+    def test_discrepancy_inputs_queries_and_owner_boundaries_are_strict(self):
+        store, task = self.completed_difference_store()
+        store.complete_task("admin", task["task_id"], "管理员")
+        rows = store.list_discrepancies("admin", "open")
+        product = next(row for row in rows if row["kind"] == "product_quantity")
+
+        self.assertEqual(store.list_discrepancies("other", "open"), [])
+        self.assertEqual(
+            [row["serial"] for row in store.list_discrepancies(
+                "admin", "open", " system-1 "
+            )],
+            ["SYSTEM-1"],
+        )
+        self.assertEqual(
+            {row["barcode"] for row in store.list_discrepancies(
+                "admin", "open", "零库存"
+            )},
+            {"B2"},
+        )
+        with self.assertRaisesRegex(ValueError, "差异状态"):
+            store.list_discrepancies("admin", "pending")
+        with self.assertRaisesRegex(ValueError, "备注不能为空"):
+            store.add_discrepancy_note(
+                "admin", product["id"], "仓管员", "   "
+            )
+        with self.assertRaises(InventoryNotFound):
+            store.add_discrepancy_note(
+                "admin", product["id"], "仓管员", "找到了",
+                serial="MISSING",
+            )
+        with self.assertRaises(InventoryNotFound):
+            store.add_discrepancy_note(
+                "other", product["id"], "其他用户", "越权备注"
+            )
+        with self.assertRaises(InventoryNotFound):
+            store.archive_discrepancy(
+                "other", product["id"], "其他管理员", True
+            )
+        for missing_id in (0, 999999):
+            with self.assertRaises(InventoryNotFound):
+                store.add_discrepancy_note(
+                    "admin", missing_id, "仓管员", "不存在"
+                )
+            with self.assertRaises(InventoryNotFound):
+                store.archive_discrepancy(
+                    "admin", missing_id, "管理员", True
+                )
