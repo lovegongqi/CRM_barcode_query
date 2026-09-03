@@ -96,7 +96,7 @@ def parse_material_rows(rows):
     return materials
 
 
-def parse_serial_rows(headers, rows):
+def parse_serial_rows(headers, rows, include_shipped=False):
     indexes = _header_indexes(headers)
     fields = {
         "serial": "序列号",
@@ -114,9 +114,15 @@ def parse_serial_rows(headers, rows):
         shipped = _cell(row, indexes, "已出库")
         if not any(values.values()) or any(value == "合计" for value in values.values()):
             continue
-        if not values["serial"] or shipped != "否":
+        if not values["serial"]:
             continue
-        values["shipped"] = False
+        if shipped not in {"否", "是"}:
+            raise GYJInventoryReadError(
+                f"GYJ 序列号出库状态无效：{values['serial']}"
+            )
+        values["shipped"] = shipped == "是"
+        if values["shipped"] and not include_shipped:
+            continue
         parsed.append(values)
     return parsed
 
@@ -473,31 +479,40 @@ class GYJInventoryReader:
     def read_stock_totals(self):
         return self._stock_totals(self._read_stock_rows())
 
-    def _read_serials(self, field, value):
+    def _read_serials(self, field, value, shipped):
         value = _text(value)
         if not value:
             raise GYJInventoryReadError(f"GYJ 序列号查询缺少{field}")
         self._goto(GYJ_SERIAL_URL)
         self._expand_filters()
         self._fill_field(field, value)
-        self._select_label("已出库", "否")
+        self._select_label("已出库", "是" if shipped else "否")
         self._click_query()
         headers, rows, _badges = self._collect_pages("serial")
-        return parse_serial_rows(headers, rows)
+        parsed = parse_serial_rows(headers, rows, include_shipped=True)
+        result_key = "serial" if field == "序列号" else "barcode"
+        if any(row[result_key] != value for row in parsed):
+            raise GYJInventoryReadError(f"GYJ 序列号查询条件未生效：{value}")
+        return [
+            row for row in parsed
+            if row["shipped"] is shipped
+        ]
 
     def read_unshipped_serials(self, barcode):
         barcode = _text(barcode)
         return [
-            row for row in self._read_serials("商品", barcode)
+            row for row in self._read_serials("商品", barcode, False)
             if row["barcode"] == barcode
         ]
 
     def lookup_serial(self, serial):
         serial = _text(serial)
-        matches = [
-            row for row in self._read_serials("序列号", serial)
-            if row["serial"] == serial
-        ]
+        rows = []
+        for shipped in (False, True):
+            rows.extend(self._read_serials("序列号", serial, shipped))
+        if any(row["serial"] != serial for row in rows):
+            raise GYJInventoryReadError(f"GYJ 序列号查询条件未生效：{serial}")
+        matches = [row for row in rows if row["serial"] == serial]
         if len(matches) > 1:
             raise GYJInventoryReadError(f"GYJ 序列号结果不唯一：{serial}")
         return matches[0] if matches else None

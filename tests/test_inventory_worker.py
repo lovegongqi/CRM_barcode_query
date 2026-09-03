@@ -3,6 +3,7 @@ import os
 import tempfile
 import threading
 import unittest
+from datetime import datetime
 from unittest import mock
 
 
@@ -13,6 +14,8 @@ os.environ["CRM_DESKTOP_APP"] = "0"
 
 import app as app_module
 from gyj_inventory import GYJInventoryReadError
+from inventory_service import InventoryService
+from inventory_store import InventoryStore
 
 
 class _TrackingLock:
@@ -27,7 +30,103 @@ class _TrackingLock:
         self.held = False
 
 
+class _SerialLookupPage:
+    def __init__(self):
+        self.filled = []
+        self.selected = []
+        self.serial_state = None
+
+    def goto(self, _url, **_kwargs):
+        pass
+
+    def expand_filters(self):
+        pass
+
+    def fill_field(self, label, value):
+        self.filled.append((label, value))
+
+    def select_label(self, label, value):
+        self.selected.append((label, value))
+        if label == "已出库":
+            self.serial_state = value
+
+    def click_query(self):
+        pass
+
+    def read_table_page(self, _report):
+        rows = []
+        if self.serial_state == "是":
+            rows = [["SHIPPED-1", "B2", "序列商品", "已出库仓", "999", "是"]]
+        return {
+            "headers": ["序列号", "条码", "名称", "仓库", "入库单价", "已出库"],
+            "rows": rows,
+            "total": len(rows),
+            "has_next": False,
+        }
+
+
 class InventoryWorkerTests(unittest.TestCase):
+    def test_shipped_lookup_flows_through_worker_session_to_serial_service(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = InventoryStore(
+                os.path.join(tempdir, "inventory.sqlite3"),
+                now=lambda: datetime(2026, 9, 1, 10, 0, 0),
+            )
+            task = store.create_task("admin", "管理员", [{
+                "barcode": "B2", "name": "序列商品", "spec": "", "model": "",
+                "category": "整机", "unit": "台", "has_serial": True,
+                "initial_stock": "0",
+            }])
+            store.advance_count_phase_if_ready("admin", task["task_id"])
+            store.claim_item(
+                task["task_id"], "B2", "count-device", "甲", "counting"
+            )
+            store.set_open_book_quantity(
+                "admin", task["task_id"], "B2", "count-device", "甲", "0"
+            )
+            store.record_count(
+                "admin", task["task_id"], "B2", "count-device", "甲",
+                completed_book_qty="0", completed_actual_qty="1",
+                diff_qty="1", state="serial_pending",
+            )
+
+            page = _SerialLookupPage()
+            session = object.__new__(app_module.GYJSession)
+            session.lock = threading.RLock()
+            session.page = object()
+            session.check_login_status = mock.Mock(
+                return_value=(True, "GYJ 已登录")
+            )
+            worker = object.__new__(app_module.GYJWorker)
+            worker._call = lambda method, *args: getattr(session, method)(*args)
+            service = InventoryService(
+                store, lambda _owner: worker,
+                now=lambda: datetime(2026, 9, 1, 10, 0, 0),
+            )
+
+            with mock.patch.object(
+                app_module, "GYJPlaywrightPage", return_value=page
+            ):
+                service.open_serial_item(
+                    "admin", task["task_id"], "B2", "device-a", "甲"
+                )
+                result = service.scan_serial(
+                    "admin", task["task_id"], "B2", "device-a", "甲",
+                    "SHIPPED-1",
+                )
+
+            self.assertEqual(result["classification"], "already_shipped")
+            self.assertEqual(result["warehouse"], "已出库仓")
+            self.assertTrue(result["shipped"])
+            self.assertEqual(
+                page.selected,
+                [("已出库", "否"), ("已出库", "否"), ("已出库", "是")],
+            )
+            self.assertFalse(
+                any(label == "仓库" for label, _value in page.filled + page.selected)
+            )
+            self.assertNotIn("999", repr(result))
+
     def test_worker_delegates_every_inventory_read_to_its_single_thread(self):
         cases = [
             ("load_inventory_catalog", (), "load_inventory_catalog", ()),

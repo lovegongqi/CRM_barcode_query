@@ -47,6 +47,18 @@ class GYJInventoryParserTests(unittest.TestCase):
             "warehouse": "沈桥仓", "shipped": False,
         }])
 
+    def test_serial_parser_can_preserve_shipped_rows_without_price(self):
+        headers = ["序列号", "条码", "名称", "仓库", "入库单价", "已出库"]
+        rows = [["SN-2", "10000398", "雷哲V200", "沈桥仓", "3110", "是"]]
+
+        result = parse_serial_rows(headers, rows, include_shipped=True)
+
+        self.assertEqual(result, [{
+            "serial": "SN-2", "barcode": "10000398", "name": "雷哲V200",
+            "warehouse": "沈桥仓", "shipped": True,
+        }])
+        self.assertNotIn("3110", repr(result))
+
     def test_stock_parser_normalizes_whitespace_in_headers(self):
         result = parse_stock_rows(
             [" 条 \n 码 ", "名 称", "规格", "型号", "类别", "单位", "库 \t 存"],
@@ -77,6 +89,7 @@ class FakeInventoryPage:
         self.page_index = 0
         self.pending_page = False
         self.pending_phase = 0
+        self.serial_state = None
 
     def goto(self, url, **_kwargs):
         self.visited.append(url)
@@ -88,6 +101,8 @@ class FakeInventoryPage:
 
     def select_label(self, label, value):
         self.selected.append((label, value))
+        if label == "已出库":
+            self.serial_state = value
 
     def expand_filters(self):
         self.expanded += 1
@@ -96,7 +111,10 @@ class FakeInventoryPage:
         self.queries += 1
 
     def read_table_page(self, _report):
-        snapshot = dict(self.reports[self.current_url][self.page_index])
+        pages = self.reports.get(
+            (self.current_url, self.serial_state), self.reports.get(self.current_url)
+        )
+        snapshot = dict(pages[self.page_index])
         snapshot.setdefault("page_number", self.page_index + 1)
         snapshot["loading"] = self.pending_page and self.pending_phase == 0
         return snapshot
@@ -307,15 +325,54 @@ class GYJInventoryReaderTests(unittest.TestCase):
 
     def test_lookup_serial_filters_by_serial_and_returns_none_or_one_row(self):
         page = FakeInventoryPage({
-            GYJ_SERIAL_URL: [serial_page([["SN-1", "A1", "甲", "一仓", "10", "否"]], 1)]
+            (GYJ_SERIAL_URL, "否"): [
+                serial_page([["SN-1", "A1", "甲", "一仓", "10", "否"]], 1)
+            ],
+            (GYJ_SERIAL_URL, "是"): [serial_page([], 0)],
         })
         reader = GYJInventoryReader(page)
 
         self.assertEqual(reader.lookup_serial("SN-1")["barcode"], "A1")
         self.assertIn(("序列号", "SN-1"), page.filled)
 
-        empty = FakeInventoryPage({GYJ_SERIAL_URL: [serial_page([], 0)]})
+        empty = FakeInventoryPage({
+            (GYJ_SERIAL_URL, "否"): [serial_page([], 0)],
+            (GYJ_SERIAL_URL, "是"): [serial_page([], 0)],
+        })
         self.assertIsNone(GYJInventoryReader(empty).lookup_serial("MISSING"))
+
+    def test_lookup_serial_queries_both_states_and_preserves_shipped_row(self):
+        page = FakeInventoryPage({
+            (GYJ_SERIAL_URL, "否"): [serial_page([], 0)],
+            (GYJ_SERIAL_URL, "是"): [
+                serial_page([], 1, True),
+                serial_page([["SHIPPED-1", "B2", "序列商品", "其他仓", "999", "是"]], 1),
+            ],
+        })
+
+        result = GYJInventoryReader(page).lookup_serial("SHIPPED-1")
+
+        self.assertEqual(result, {
+            "serial": "SHIPPED-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "其他仓", "shipped": True,
+        })
+        self.assertEqual(page.selected, [("已出库", "否"), ("已出库", "是")])
+        self.assertEqual(page.filled, [("序列号", "SHIPPED-1"), ("序列号", "SHIPPED-1")])
+        self.assertEqual(page.queries, 2)
+        self.assertFalse(any(label == "仓库" for label, _value in page.filled))
+        self.assertFalse(any(label == "仓库" for label, _value in page.selected))
+        self.assertNotIn("999", repr(result))
+
+    def test_lookup_serial_rejects_non_exact_filtered_rows(self):
+        page = FakeInventoryPage({
+            (GYJ_SERIAL_URL, "否"): [
+                serial_page([["OTHER-1", "B2", "序列商品", "沈桥仓", "10", "是"]], 1)
+            ],
+            (GYJ_SERIAL_URL, "是"): [serial_page([], 0)],
+        })
+
+        with self.assertRaisesRegex(GYJInventoryReadError, "查询条件"):
+            GYJInventoryReader(page).lookup_serial("SHIPPED-1")
 
     def test_rejects_pagination_total_mismatch(self):
         page = FakeInventoryPage({
