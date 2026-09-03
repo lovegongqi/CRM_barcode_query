@@ -5,6 +5,7 @@
         '/results': ['▤', '结果'],
         '/transfer': ['⇄', '移库'],
         '/inbound': ['⇅', '入库'],
+        '/inventory': ['⌁', '盘点'],
         '/product-library': ['≋', '匹配'],
         '/accounts': ['⚙', '设置']
     };

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>库存盘点</title>
+    <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
+    <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+</head>
+<body data-aurora-page="inventory">
+<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+<div class="container">
+    <div class="header">
+        <div>
+            <h1>库存盘点</h1>
+            <p class="muted">读取 GYJ 实时库存，协同完成数量与序列号核对。</p>
+        </div>
+        <div class="page-nav">
+            {% for link in nav_links %}
+            <a href="{{ link.href }}" class="{{ 'active' if link.href == '/inventory' else '' }}">{{ link.label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="status-bar wrap aurora-account-status">
+        <div class="aurora-account-session">
+            <span class="aurora-account-name">{{ account.display_name or account.username }}</span>
+            {% if not is_desktop_app %}<a class="aurora-account-logout" href="/logout">退出工具账号</a>{% endif %}
+        </div>
+        <button class="btn btn-primary" id="inventoryGyjLoginButton" type="button">登录 GYJ</button>
+    </div>
+
+    <main id="inventoryRoot">
+        <section id="inventoryCurrentRoot"></section>
+        <section id="inventoryHistoryRoot"></section>
+        <section id="inventoryDiscrepanciesRoot"></section>
+        <section id="inventoryAdminRoot"></section>
+    </main>
+</div>
+<script>
+const CURRENT_ACCOUNT = {{ account|tojson }};
+const INVENTORY_IS_ADMIN = Boolean(CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin);
+</script>
+</body>
+</html>

@@ -14,6 +14,7 @@ class FrontendContractTest(unittest.TestCase):
         "results": "index.html",
         "transfer": "transfer.html",
         "inbound": "inbound.html",
+        "inventory": "inventory.html",
         "product-library": "product_library.html",
         "settings": "accounts.html",
         "login": "login.html",
@@ -511,6 +512,7 @@ class FrontendContractTest(unittest.TestCase):
             source.index("'permission': 'results'"),
             source.index("'permission': 'transfer'"),
             source.index("'permission': 'inbound'"),
+            source.index("'permission': 'inventory'"),
             source.index("'permission': 'product-library'"),
             source.index("'permission': 'accounts'"),
         ]
@@ -647,13 +649,15 @@ class FrontendContractTest(unittest.TestCase):
             r"if \(preferLatest && !data\.job_id\)\s*\{[\s\S]*?clearInterval\(inboundPollTimer\)[\s\S]*?inboundPollTimer = null;[\s\S]*?return;",
         )
 
-    def test_shared_navigation_has_six_columns_and_inbound_permission(self):
+    def test_shared_navigation_has_inventory_permission_and_responsive_columns(self):
         settings = self.source("accounts.html")
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
         layout_css = (STATIC / "app_layout.css").read_text(encoding="utf-8")
         aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(settings, r'<input type="checkbox" value="inbound">\s*入库')
+        self.assertRegex(settings, r'<input type="checkbox" value="inventory">\s*盘点')
         self.assertIn("'/inbound':", aurora)
+        self.assertIn("'/inventory':", aurora)
         self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)")
         # aurora.css declares .page-nav twice (desktop + mobile media query).
         # Both must use auto-fit so limited-permission accounts don’t end up
@@ -1088,10 +1092,10 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'label': '{label}'", app_source)
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'{label}'", aurora)
         self.assertIn("aurora-nav-label", aurora)
         self.assertNotIn("anchor.textContent =", aurora)

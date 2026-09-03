@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/inbound", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/inventory", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
@@ -112,7 +112,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         # user on the page through long GYJ login flows, so a logout link
         # competing for the same screen real estate is hidden there. Every
         # other work page still surfaces the logout button.
-        for route in ("/", "/crm", "/transfer", "/product-library", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inventory", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
@@ -129,6 +129,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
             "/crm": "query",
             "/transfer": "transfer",
             "/inbound": "inbound",
+            "/inventory": "inventory",
             "/product-library": "product-library",
             "/accounts": "settings",
         }
