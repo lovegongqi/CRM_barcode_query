@@ -12,7 +12,6 @@ let inventorySearchTimer = null;
 let currentCountItem = null;
 let countDialogEditable = false;
 let countDialogRequestId = 0;
-let inventoryHeartbeatTimer = null;
 let gyjLoginPollTimer = null;
 let gyjLoginSession = 0;
 let inventoryActiveTab = 'current';
@@ -229,14 +228,13 @@ function inventoryBookQuantity(item) {
 
 function inventoryActualQuantity(item) {
     if (!item) return null;
+    if (item.count_total !== null && item.count_total !== undefined) {
+        return item.count_total;
+    }
     if (item.completed_actual_qty !== null && item.completed_actual_qty !== undefined) {
         return item.completed_actual_qty;
     }
     return item.counted_quantity;
-}
-
-function inventoryLockOwner(item) {
-    return item && (item.lock_actor || item.lock_owner || item.locked_by || '');
 }
 
 function inventoryIsCompleted(item) {
@@ -339,7 +337,7 @@ function renderInventoryItems(items) {
         const row = inventoryNode('button', 'inventory-item');
         row.type = 'button';
         row.dataset.barcode = inventoryText(item.barcode, '');
-        row.disabled = completed || Boolean(item.data_error);
+        row.disabled = Boolean(item.data_error);
         row.setAttribute('aria-label', `${inventoryText(item.name, '未命名商品')}，${inventoryStateLabel(item)}`);
         row.addEventListener('click', () => openCountItem(item.barcode));
 
@@ -365,9 +363,8 @@ function renderInventoryItems(items) {
         );
 
         const foot = inventoryNode('div', 'inventory-item-foot');
-        const owner = inventoryLockOwner(item);
         foot.append(
-            inventoryNode('span', '', owner ? `锁定者：${owner}` : '锁定者：无'),
+            inventoryNode('span', '', completed ? '可继续追加或修改分次数量' : '尚未记录实盘数量'),
             inventoryNode('span', '', `更新时间：${inventoryText(item.updated_at)}`),
         );
         row.append(
@@ -433,6 +430,18 @@ function renderInventoryTask(task) {
     renderInventorySummary(task);
     renderInventoryItems(task.items || []);
     renderSerialQueue(task);
+    if (currentCountItem && inventoryElement('inventoryCountDialog').open) {
+        const draft = inventoryElement('inventoryCountNewQuantity').value;
+        const refreshed = (task.items || []).find(
+            (item) => item.barcode === currentCountItem.barcode
+        );
+        if (refreshed) {
+            currentCountItem = refreshed;
+            renderCountEntries(refreshed);
+            updateCountBook(refreshed);
+            inventoryElement('inventoryCountNewQuantity').value = draft;
+        }
+    }
     if (serialWorkspaceOpen && task.phase !== 'serial_check') closeSerialWorkspace();
     if (task.gyj_status && task.gyj_status !== 'synced') setInventoryNotice(task.gyj_status, 'error');
 }
@@ -546,7 +555,9 @@ function renderCountProduct(item) {
 
 function renderLiveDifference() {
     const panel = inventoryElement('inventoryCountDifference').parentElement;
-    const actual = inventoryElement('inventoryActualQuantity').value.trim();
+    const actual = currentCountItem && currentCountItem.count_total !== null
+        && currentCountItem.count_total !== undefined
+        ? String(currentCountItem.count_total) : '';
     const book = inventoryElement('inventoryCountBook').dataset.quantity || '';
     const difference = decimalDifferenceText(actual, book);
     const value = inventoryElement('inventoryCountDifference');
@@ -554,7 +565,7 @@ function renderLiveDifference() {
     panel.className = 'inventory-live-difference';
     if (difference === null) {
         value.textContent = '—';
-        state.textContent = actual ? '请输入有效数量' : '等待填写';
+        state.textContent = actual ? '数量无效' : '尚未记录';
         return;
     }
     value.textContent = decimalDirection(difference) > 0 ? `+${difference}` : difference;
@@ -578,26 +589,96 @@ function updateCountBook(item) {
     renderLiveDifference();
 }
 
-function stopInventoryHeartbeat() {
-    if (inventoryHeartbeatTimer) clearInterval(inventoryHeartbeatTimer);
-    inventoryHeartbeatTimer = null;
-}
-
-function setCountReadOnly(message, owner = '') {
-    countDialogEditable = false;
-    stopInventoryHeartbeat();
-    inventoryElement('inventoryActualQuantity').disabled = true;
-    inventoryElement('inventoryCountSubmit').disabled = true;
-    setCountMessage(owner ? `${message} 当前锁定者：${owner}` : message, 'error');
-}
-
 function closeCountDialog() {
     countDialogRequestId += 1;
-    stopInventoryHeartbeat();
     countDialogEditable = false;
     currentCountItem = null;
     const dialog = inventoryElement('inventoryCountDialog');
     if (dialog.open) dialog.close();
+}
+
+function renderCountEntries(item) {
+    const entriesRoot = inventoryElement('inventoryCountEntries');
+    const expression = inventoryElement('inventoryCountExpression');
+    const entries = Array.isArray(item && item.count_entries) ? item.count_entries : [];
+    entriesRoot.replaceChildren();
+    expression.textContent = item && item.count_expression
+        ? item.count_expression : '尚未记录';
+    if (!entries.length) {
+        entriesRoot.append(inventoryNode('div', 'inventory-count-entry-empty', '还没有分次盘点数量。'));
+        return;
+    }
+    entries.forEach((entry, index) => {
+        const row = inventoryNode('div', 'inventory-count-entry');
+        const copy = inventoryNode('div', 'inventory-count-entry-copy');
+        copy.append(
+            inventoryNode('strong', '', `第 ${index + 1} 笔`),
+            inventoryNode(
+                'span', '',
+                `${inventoryText(entry.updated_by || entry.created_by, '未知')} · ${inventoryText(entry.updated_at || entry.created_at, '时间未知')}`,
+            ),
+        );
+        const input = inventoryNode('input', 'inventory-count-entry-input');
+        input.type = 'number';
+        input.inputMode = 'decimal';
+        input.min = '0';
+        input.step = 'any';
+        input.value = inventoryText(entry.quantity, '');
+        input.disabled = !countDialogEditable;
+        const save = inventoryNode('button', 'btn btn-secondary', '保存');
+        save.type = 'button';
+        save.disabled = !countDialogEditable;
+        save.addEventListener('click', () => updateCountEntry(entry, input.value));
+        input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') updateCountEntry(entry, input.value);
+        });
+        const remove = inventoryNode('button', 'btn btn-danger', '删除');
+        remove.type = 'button';
+        remove.disabled = !countDialogEditable;
+        remove.addEventListener('click', () => deleteCountEntry(entry));
+        const actions = inventoryNode('div', 'inventory-count-entry-actions');
+        actions.append(input, save, remove);
+        row.append(copy, actions);
+        entriesRoot.append(row);
+    });
+}
+
+function applyCountEntryResult(data, message) {
+    acceptInventoryMutationVersion(data);
+    currentCountItem = data.item;
+    replaceInventoryItem(data.item);
+    renderCountEntries(data.item);
+    updateCountBook(data.item);
+    renderInventorySummary(inventoryTask);
+    renderInventoryItems(inventoryTask.items || []);
+    setCountMessage(message, 'success');
+}
+
+async function reloadOpenCountItem(draft = '') {
+    if (!currentCountItem || !inventoryTask) return;
+    const data = await inventoryRequest(
+        `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries`,
+    );
+    acceptInventoryMutationVersion(data);
+    currentCountItem = data.item;
+    replaceInventoryItem(data.item);
+    renderCountEntries(data.item);
+    updateCountBook(data.item);
+    inventoryElement('inventoryCountNewQuantity').value = draft;
+}
+
+async function handleCountEntryError(error, draft = '') {
+    if (inventoryIsVersionConflict(error) || error.status === 404) {
+        try {
+            await reloadOpenCountItem(draft);
+            setCountMessage('该笔数量已被其他设备修改，已刷新，请核对后重试。', 'error');
+            return;
+        } catch (refreshError) {
+            setCountMessage(refreshError.message, 'error');
+            return;
+        }
+    }
+    setCountMessage(error.message, 'error');
 }
 
 async function openCountItem(barcode) {
@@ -608,136 +689,101 @@ async function openCountItem(barcode) {
         setInventoryNotice(`资料异常，不可盘：${item.data_error}`, 'error');
         return;
     }
-    if (inventoryIsCompleted(item)) {
-        setInventoryNotice('该商品已经完成数量盘点。');
-        return;
-    }
     const requestId = ++countDialogRequestId;
     currentCountItem = item;
     countDialogEditable = false;
     renderCountProduct(item);
     updateCountBook(item);
-    const input = inventoryElement('inventoryActualQuantity');
+    renderCountEntries(item);
+    const input = inventoryElement('inventoryCountNewQuantity');
     input.value = '';
     input.disabled = true;
-    const submit = inventoryElement('inventoryCountSubmit');
-    submit.disabled = true;
-    submit.textContent = '正在读取 GYJ…';
-    setCountMessage('正在锁定商品并读取 GYJ 当前账面数量。');
+    inventoryElement('inventoryCountAdd').disabled = true;
+    setCountMessage('正在读取 GYJ 当前账面数量。');
     const dialog = inventoryElement('inventoryCountDialog');
     if (!dialog.open) dialog.showModal();
     try {
-        const data = await inventoryMutationPost(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(barcode)}/claim`,
-            {device_id: inventoryDeviceId},
+        const data = await inventoryRequest(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(barcode)}/count-entries`,
         );
         if (requestId !== countDialogRequestId || !dialog.open) return;
+        acceptInventoryMutationVersion(data);
         currentCountItem = data.item;
         replaceInventoryItem(data.item);
         renderCountProduct(data.item);
         updateCountBook(data.item);
-        input.value = inventoryText(inventoryActualQuantity(data.item), '');
+        renderCountEntries(data.item);
         input.disabled = false;
-        submit.disabled = false;
-        submit.textContent = '确认实盘数量';
+        inventoryElement('inventoryCountAdd').disabled = false;
         countDialogEditable = true;
-        setCountMessage('已读取最新账面数量，请填写现场实盘数量。', 'success');
-        stopInventoryHeartbeat();
-        inventoryHeartbeatTimer = setInterval(sendInventoryHeartbeat, 20000);
+        renderCountEntries(data.item);
+        setCountMessage('已读取最新账面数量，可新增或修改任意一笔。', 'success');
         input.focus();
         renderLiveDifference();
     } catch (error) {
         if (requestId !== countDialogRequestId || !dialog.open) return;
-        submit.textContent = '确认实盘数量';
-        if (inventoryIsVersionConflict(error)) {
-            setCountReadOnly(`${error.message}，请关闭后重新打开商品。`);
-            await refreshInventoryAfterVersionConflict();
-        } else if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setCountReadOnly(error.message, owner || '');
-            lastInventoryVersion = null;
-            await pollInventoryTask({force: true});
-        } else {
-            setCountReadOnly(error.message);
-        }
+        input.disabled = true;
+        inventoryElement('inventoryCountAdd').disabled = true;
+        setCountMessage(error.message, 'error');
     }
 }
 
-async function sendInventoryHeartbeat() {
+async function addCountEntry() {
     if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
-    try {
-        await inventoryMutationPost(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/heartbeat`,
-            {device_id: inventoryDeviceId},
-        );
-    } catch (error) {
-        if (inventoryIsVersionConflict(error)) {
-            await refreshInventoryAfterVersionConflict();
-            setCountMessage('盘点任务已更新，已刷新到最新版本。', 'error');
-        } else if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setCountReadOnly(error.message, owner || '');
-            lastInventoryVersion = null;
-            await pollInventoryTask({force: true});
-        } else {
-            setCountMessage('锁定心跳暂时失败，请检查网络后尽快提交。', 'error');
-        }
-    }
-}
-
-async function submitCount() {
-    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
-    const requestId = countDialogRequestId;
-    const dialog = inventoryElement('inventoryCountDialog');
-    const input = inventoryElement('inventoryActualQuantity');
-    const actualQty = input.value.trim();
-    if (!decimalParts(actualQty)) {
+    const input = inventoryElement('inventoryCountNewQuantity');
+    const quantity = input.value.trim();
+    if (!decimalParts(quantity)) {
         setCountMessage('请输入大于或等于 0 的有效数量。', 'error');
         input.focus();
         return;
     }
-    const submit = inventoryElement('inventoryCountSubmit');
     input.disabled = true;
-    submit.disabled = true;
-    submit.textContent = '正在二次读取 GYJ…';
-    setCountMessage('正在从 GYJ 二次读取账面数量并核对差异，请稍候。');
+    inventoryElement('inventoryCountAdd').disabled = true;
+    setCountMessage('正在保存这一笔数量并读取 GYJ 最新库存。');
     try {
-        const data = await inventoryMutationPost(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count`,
-            {device_id: inventoryDeviceId, actual_qty: actualQty},
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries`,
+            {device_id: inventoryDeviceId, quantity},
         );
-        currentCountItem = data.item;
-        replaceInventoryItem(data.item);
-        renderInventorySummary(inventoryTask);
-        renderInventoryItems(inventoryTask.items || []);
-        lastInventoryVersion = null;
-        closeCountDialog();
-        setInventoryNotice(`${inventoryText(data.item.name, data.item.barcode)} 已完成盘点，差异 ${inventoryText(data.item.diff_qty, '0')}。`, 'success');
-        await pollInventoryTask({force: true});
+        input.value = '';
+        applyCountEntryResult(data, '已加入这一笔数量。');
     } catch (error) {
-        submit.textContent = '确认实盘数量';
-        if (inventoryIsVersionConflict(error)) {
-            await refreshInventoryAfterVersionConflict();
-            if (requestId !== countDialogRequestId || !dialog.open) return;
-            currentCountItem = (inventoryTask && inventoryTask.items || []).find(
-                (item) => item.barcode === currentCountItem.barcode
-            ) || currentCountItem;
-            input.disabled = false;
-            submit.disabled = false;
-            countDialogEditable = true;
-            setCountMessage('盘点任务已更新，请确认数量后重试。', 'error');
-            input.focus();
-        } else if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setCountReadOnly(error.message, owner || '');
-            lastInventoryVersion = null;
-            await pollInventoryTask({force: true});
-        } else {
-            input.disabled = false;
-            submit.disabled = false;
-            setCountMessage(error.message, 'error');
-            input.focus();
-        }
+        await handleCountEntryError(error, quantity);
+    } finally {
+        input.disabled = false;
+        inventoryElement('inventoryCountAdd').disabled = false;
+        input.focus();
+    }
+}
+
+async function updateCountEntry(entry, rawQuantity) {
+    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
+    const quantity = String(rawQuantity || '').trim();
+    if (!decimalParts(quantity)) {
+        setCountMessage('请输入大于或等于 0 的有效数量。', 'error');
+        return;
+    }
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
+            {device_id: inventoryDeviceId, quantity, entry_version: entry.version},
+        );
+        applyCountEntryResult(data, '该笔数量已更新。');
+    } catch (error) {
+        await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
+    }
+}
+
+async function deleteCountEntry(entry) {
+    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
+    try {
+        const data = await inventoryDelete(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
+            {device_id: inventoryDeviceId, entry_version: entry.version},
+        );
+        applyCountEntryResult(data, '该笔数量已删除。');
+    } catch (error) {
+        await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
     }
 }
 
@@ -1765,11 +1811,10 @@ function initializeInventoryPage() {
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
     inventoryElement('inventoryFilters').addEventListener('change', runInventorySearch);
-    inventoryElement('inventoryActualQuantity').addEventListener('input', renderLiveDifference);
-    inventoryElement('inventoryActualQuantity').addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') submitCount();
+    inventoryElement('inventoryCountNewQuantity').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') addCountEntry();
     });
-    inventoryElement('inventoryCountSubmit').addEventListener('click', submitCount);
+    inventoryElement('inventoryCountAdd').addEventListener('click', addCountEntry);
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
@@ -1815,7 +1860,6 @@ function initializeInventoryPage() {
         if (inventoryActiveTab === 'current') pollInventoryTask({force: true});
     });
     window.addEventListener('beforeunload', () => {
-        stopInventoryHeartbeat();
         stopSerialRefreshTimer();
         stopGyjLoginPolling();
     });

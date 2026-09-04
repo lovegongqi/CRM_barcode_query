@@ -61,29 +61,199 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_stale_count_refreshes_version_and_keeps_form_retryable(self):
+    def test_partial_count_rows_render_and_add_without_a_lock(self):
         self.run_node(
             r"""
-            const input = {value: '2', disabled: false, focusCount: 0, focus() { this.focusCount += 1; }};
-            const submit = {disabled: false, textContent: ''};
-            const message = {textContent: '', className: ''};
-            const dialog = {open: true};
+            class FakeNode {
+                constructor(tag = 'div') {
+                    this.tagName = tag; this.children = []; this.textContent = '';
+                    this.value = ''; this.disabled = false; this.dataset = {};
+                    this.className = ''; this.listeners = {};
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener(type, handler) { this.listeners[type] = handler; }
+                focus() {}
+            }
             const elements = new Map([
-                ['inventoryActualQuantity', input], ['inventoryCountSubmit', submit],
-                ['inventoryCountMessage', message], ['inventoryCountDialog', dialog],
+                ['inventoryCountEntries', new FakeNode()],
+                ['inventoryCountExpression', new FakeNode()],
+                ['inventoryCountNewQuantity', new FakeNode('input')],
+                ['inventoryCountAdd', new FakeNode('button')],
+                ['inventoryCountMessage', new FakeNode()],
             ]);
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement(tag) { return new FakeNode(tag); },
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, new FakeNode());
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 5, item: {
+                            barcode: 'A1', name: '商品', count_total: '25',
+                            count_expression: '12 + 13 = 25', state: 'variance',
+                            count_entries: [
+                                {entry_id: 1, quantity: '12', version: 1, created_by: '甲'},
+                                {entry_id: 2, quantity: '13', version: 1, created_by: '乙'},
+                            ],
+                        },
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            assert.equal(vm.runInContext('typeof renderCountEntries', context), 'function');
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', version: 4, items: [{
+                    barcode: 'A1', name: '商品', count_total: '12',
+                    count_expression: '12', state: 'matched',
+                    count_entries: [{entry_id: 1, quantity: '12', version: 1, created_by: '甲'}],
+                }]};
+                currentCountItem = inventoryTask.items[0];
+                countDialogEditable = true;
+                renderInventorySummary = () => {};
+                renderInventoryItems = () => {};
+                updateCountBook = () => {};
+                renderLiveDifference = () => {};
+                pollInventoryTask = async () => {};
+                renderCountEntries(currentCountItem);
+            `, context);
+            assert.equal(elements.get('inventoryCountExpression').textContent, '12');
+            assert.equal(elements.get('inventoryCountEntries').children.length, 1);
+            elements.get('inventoryCountNewQuantity').value = '13';
+            (async () => {
+                await vm.runInContext('addCountEntry()', context);
+                assert.equal(requests.length, 1);
+                assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/A1/count-entries');
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    device_id: 'device-a', quantity: '13',
+                });
+                assert.equal(elements.get('inventoryCountNewQuantity').value, '');
+                assert.equal(elements.get('inventoryCountExpression').textContent, '12 + 13 = 25');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_partial_count_update_and_delete_use_entry_versions(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, {
+                    value: '', textContent: '', disabled: false, dataset: {},
+                    replaceChildren() {}, append() {}, focus() {},
+                    classList: {add() {}, remove() {}, toggle() {}},
+                });
+                return elements.get(id);
+            }
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 document: {
                     hidden: false, addEventListener() {},
-                    getElementById(id) { return elements.get(id); },
+                    createElement() { return element(`node-${elements.size}`); },
+                    getElementById: element,
                 },
-                fetch: async () => ({
-                    ok: false, status: 409,
-                    json: async () => ({
-                        success: false, error: '版本过期', current_version: 4,
-                    }),
-                }),
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: requests.length + 4,
+                        item: {
+                            barcode: 'A1', count_total: requests.length === 1 ? '8' : null,
+                            count_expression: requests.length === 1 ? '8' : '', count_entries: [],
+                        },
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-b';
+                inventoryTask = {task_id: 'T1', version: 4, items: [{barcode: 'A1'}]};
+                currentCountItem = inventoryTask.items[0];
+                countDialogEditable = true;
+                renderCountEntries = () => {};
+                updateCountBook = () => {};
+                renderInventorySummary = () => {};
+                renderInventoryItems = () => {};
+            `, context);
+            (async () => {
+                await vm.runInContext("updateCountEntry({entry_id: 9, version: 3}, '8')", context);
+                await vm.runInContext("deleteCountEntry({entry_id: 9, version: 4})", context);
+                assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/A1/count-entries/9');
+                assert.equal(requests[0].options.method, 'POST');
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    device_id: 'device-b', quantity: '8', entry_version: 3,
+                });
+                assert.equal(requests[1].options.method, 'DELETE');
+                assert.deepEqual(JSON.parse(requests[1].options.body), {
+                    device_id: 'device-b', entry_version: 4,
+                });
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_stale_count_entry_refreshes_rows_and_preserves_new_entry_draft(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.value = ''; this.disabled = false;
+                    this.textContent = ''; this.className = ''; this.dataset = {};
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener() {}
+                focus() {}
+            }
+            const input = new FakeNode();
+            input.value = '7';
+            const message = {textContent: '', className: ''};
+            const elements = new Map([
+                ['inventoryCountNewQuantity', input],
+                ['inventoryCountEntries', new FakeNode()],
+                ['inventoryCountExpression', new FakeNode()],
+                ['inventoryCountMessage', message],
+            ]);
+            let requestCount = 0;
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement() { return new FakeNode(); },
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, new FakeNode());
+                        return elements.get(id);
+                    },
+                },
+                fetch: async () => {
+                    requestCount += 1;
+                    if (requestCount === 1) return {
+                        ok: false, status: 409,
+                        json: async () => ({
+                            success: false, error: '该条已修改', current_version: 4,
+                        }),
+                    };
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 4, item: {
+                            barcode: 'A1', count_total: '3', count_expression: '3',
+                            count_entries: [{entry_id: 1, quantity: '3', version: 2}],
+                        },
+                    })};
+                },
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
             };
             vm.createContext(context);
@@ -92,18 +262,14 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 inventoryTask = {task_id: 'T1', version: 3, items: [{barcode: 'A1'}]};
                 currentCountItem = inventoryTask.items[0];
                 countDialogEditable = true;
-                pollInventoryTask = async () => {
-                    inventoryTask.version = 4;
-                    lastInventoryVersion = 4;
-                };
+                updateCountBook = () => {};
             `, context);
             (async () => {
-                await vm.runInContext('submitCount()', context);
-                assert.equal(input.disabled, false);
-                assert.equal(submit.disabled, false);
-                assert.equal(vm.runInContext('countDialogEditable', context), true);
-                assert.match(message.textContent, /重试/);
-                assert.equal(input.focusCount, 1);
+                await vm.runInContext("updateCountEntry({entry_id: 1, version: 1}, '2')", context);
+                assert.equal(requestCount, 2);
+                assert.equal(input.value, '7');
+                assert.equal(elements.get('inventoryCountExpression').textContent, '3');
+                assert.match(message.textContent, /刷新/);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -536,7 +702,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_non_lock_409_does_not_invent_a_lock_owner(self):
+    def test_open_count_409_shows_server_error_without_lock_copy(self):
         self.run_node(
             r"""
             const elements = new Map();
@@ -563,6 +729,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             vm.runInContext(`
                 renderCountProduct = () => {};
                 updateCountBook = () => {};
+                renderCountEntries = () => {};
                 pollInventoryTask = async () => {};
                 inventoryDeviceId = 'device-a';
                 inventoryTask = {task_id: 'task-1', items: [{
@@ -576,7 +743,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     element('inventoryCountMessage').textContent,
                     '当前任务不在数量盘点阶段',
                 );
-                assert.equal(element('inventoryActualQuantity').disabled, true);
+                assert.equal(element('inventoryCountNewQuantity').disabled, true);
+                assert.equal(element('inventoryCountAdd').disabled, true);
+                assert.equal(vm.runInContext('countDialogEditable', context), false);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )

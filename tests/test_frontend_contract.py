@@ -693,7 +693,8 @@ class FrontendContractTest(unittest.TestCase):
             'id="inventoryFilters"', 'id="inventoryItems"',
             'id="inventoryCountDialog"', 'id="inventoryGyjLoginDialog"',
             "pollInventoryTask", "renderInventoryItems", "openCountItem",
-            "sendInventoryHeartbeat", "submitCount", "openGyjLogin",
+            "renderCountEntries", "addCountEntry", "updateCountEntry",
+            "deleteCountEntry", "openGyjLogin",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, source + script)
@@ -705,7 +706,7 @@ class FrontendContractTest(unittest.TestCase):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         for endpoint in (
             "/api/inventory/tasks/active",
-            "/claim", "/heartbeat", "/count",
+            "/count-entries",
             "/api/gyj/credentials", "/api/gyj/login",
             "/api/gyj/login/captcha", "/api/gyj/captcha-preview",
             "/api/gyj/login-status",
@@ -716,7 +717,6 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("localStorage.setItem(INVENTORY_DEVICE_KEY", script)
         self.assertIn("crypto.randomUUID()", script)
         self.assertRegex(script, r"setInterval\(pollInventoryTask,\s*1000\)")
-        self.assertRegex(script, r"setInterval\(sendInventoryHeartbeat,\s*20000\)")
         self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
         self.assertIn("params.set('version'", script)
         self.assertIn("params.set('query'", script)
@@ -725,8 +725,9 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("function decimalDifferenceText", script)
         self.assertIn("BigInt", script)
         self.assertNotIn("parseFloat", script)
-        self.assertIn("data.item.diff_qty", script)
-        self.assertIn("正在从 GYJ 二次读取账面数量", script)
+        self.assertIn("item.count_expression", script)
+        self.assertIn("正在保存这一笔数量并读取 GYJ 最新库存", script)
+        self.assertNotIn("sendInventoryHeartbeat", script)
 
     def test_inventory_renders_allowlisted_fields_without_html_injection(self):
         source = self.source("inventory.html")
@@ -735,7 +736,7 @@ class FrontendContractTest(unittest.TestCase):
             "item.barcode", "item.name", "item.spec", "item.model",
             "item.category", "item.unit", "item.has_serial",
             "item.latest_book_qty", "item.completed_actual_qty",
-            "item.diff_qty", "item.state", "item.lock_actor",
+            "item.diff_qty", "item.state",
             "item.updated_at",
         ):
             with self.subTest(field=field):
@@ -798,18 +799,18 @@ class FrontendContractTest(unittest.TestCase):
             app_source.index('snapshot["items"] = inventory_store.list_items('),
         )
 
-    def test_inventory_lock_owner_is_exposed_and_409_switches_dialog_read_only(self):
+    def test_inventory_partial_count_ui_has_no_quantity_lock_controls(self):
+        source = self.source("inventory.html")
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
-        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertIn("def _inventory_attach_lock_owners(task_id, items):", app_source)
-        self.assertIn('item["lock_actor"] = lock_owners.get(item.get("barcode"), "")', app_source)
-        self.assertIn("error.status === 409", script)
-        self.assertIn("error.data.lock_owner", script)
-        self.assertIn("setCountReadOnly", script)
-        self.assertRegex(
-            script,
-            r"function setCountReadOnly[\s\S]*countDialogEditable = false;[\s\S]*inventoryActualQuantity'[\s\S]*disabled = true",
-        )
+        for element_id in (
+            "inventoryCountEntries", "inventoryCountExpression",
+            "inventoryCountNewQuantity", "inventoryCountAdd",
+        ):
+            self.assertIn(f'id="{element_id}"', source)
+        self.assertNotIn('id="inventoryActualQuantity"', source)
+        self.assertNotIn('id="inventoryCountSubmit"', source)
+        self.assertNotIn("setCountReadOnly", script)
+        self.assertNotIn("sendInventoryHeartbeat", script)
 
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")

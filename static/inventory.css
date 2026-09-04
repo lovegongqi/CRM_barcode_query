@@ -365,6 +365,76 @@ body[data-aurora-page="inventory"] .status-bar {
 .inventory-live-difference.is-negative strong { color: var(--aurora-red); }
 .inventory-live-difference.is-matched strong { color: var(--aurora-cyan); }
 
+.inventory-count-entries {
+    margin: 14px 0;
+    padding: 14px;
+    border: 1px solid var(--aurora-line);
+    border-radius: 12px;
+    background: rgba(4, 14, 26, .34);
+}
+
+.inventory-count-entries-head,
+.inventory-count-entry,
+.inventory-count-entry-actions,
+.inventory-count-add-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.inventory-count-entries-head { justify-content: space-between; }
+
+.inventory-count-entries-head > div,
+.inventory-count-entry-copy {
+    display: grid;
+    gap: 4px;
+}
+
+.inventory-count-entries-head span,
+.inventory-count-entry-copy span {
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-count-entries-head strong {
+    color: var(--aurora-cyan);
+    font-size: 20px;
+}
+
+.inventory-count-entry-list {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.inventory-count-entry {
+    justify-content: space-between;
+    padding: 10px;
+    border-radius: 10px;
+    background: rgba(11, 31, 51, .72);
+}
+
+.inventory-count-entry-input {
+    width: 110px;
+    min-height: 40px;
+}
+
+.inventory-count-entry-actions .btn { min-height: 40px; }
+
+.inventory-count-entry-empty {
+    padding: 10px;
+    color: var(--aurora-muted);
+    text-align: center;
+}
+
+.inventory-count-add-row {
+    align-items: end;
+    margin-top: 12px;
+}
+
+.inventory-count-add-row .inventory-count-field { flex: 1; }
+.inventory-count-add-row .btn { min-height: 44px; }
+
 .inventory-dialog-message {
     min-height: 22px;
     margin: 12px 0;
@@ -601,7 +671,11 @@ body[data-aurora-page="inventory"] .status-bar {
     .inventory-serial-details { grid-template-columns: 1fr; }
     .inventory-serial-row,
     .inventory-discrepancy-head,
-    .inventory-note-form { align-items: stretch; flex-direction: column; }
+    .inventory-note-form,
+    .inventory-count-entry,
+    .inventory-count-add-row { align-items: stretch; flex-direction: column; }
+    .inventory-count-entry-actions { align-items: stretch; }
+    .inventory-count-entry-input { flex: 1; width: auto; }
     .inventory-history-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-history-export,
     .inventory-discrepancy-head .btn,

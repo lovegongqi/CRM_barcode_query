@@ -128,10 +128,23 @@
             <span>GYJ 当前账面</span>
             <strong id="inventoryCountBook">—</strong>
         </div>
-        <label class="inventory-count-field" for="inventoryActualQuantity">
-            <span>实盘数量</span>
-            <input id="inventoryActualQuantity" type="number" inputmode="decimal" min="0" step="any" autocomplete="off">
-        </label>
+        <section class="inventory-count-entries" aria-labelledby="inventoryCountEntriesTitle">
+            <div class="inventory-count-entries-head">
+                <div>
+                    <span id="inventoryCountEntriesTitle">分次盘点数量</span>
+                    <strong id="inventoryCountExpression">尚未记录</strong>
+                </div>
+                <button class="btn btn-secondary" id="inventoryCountAuditButton" type="button" hidden>查看修改记录</button>
+            </div>
+            <div id="inventoryCountEntries" class="inventory-count-entry-list" aria-live="polite"></div>
+            <div class="inventory-count-add-row">
+                <label class="inventory-count-field" for="inventoryCountNewQuantity">
+                    <span>新增一处数量</span>
+                    <input id="inventoryCountNewQuantity" type="number" inputmode="decimal" min="0" step="any" autocomplete="off">
+                </label>
+                <button class="btn btn-primary" id="inventoryCountAdd" type="button">加入合计</button>
+            </div>
+        </section>
         <div class="inventory-live-difference" aria-live="polite">
             <span>实时差异</span>
             <strong id="inventoryCountDifference">—</strong>
@@ -139,8 +152,7 @@
         </div>
         <p id="inventoryCountMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
         <div class="inventory-dialog-actions">
-            <button class="btn btn-secondary" id="inventoryCountCancel" type="button">取消</button>
-            <button class="btn btn-primary" id="inventoryCountSubmit" type="button">确认实盘数量</button>
+            <button class="btn btn-secondary" id="inventoryCountCancel" type="button">关闭</button>
         </div>
     </div>
 </dialog>
