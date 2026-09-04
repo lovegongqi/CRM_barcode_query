@@ -426,7 +426,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 serialWorkspaceOpen = true;
                 serialWorkspaceEditable = true;
                 currentSerialBarcode = 'A1';
-                sendSerialHeartbeat = async () => { refreshEvents.push('heartbeat'); };
+                sendSerialHeartbeat = async () => { refreshEvents.push('heartbeat'); return true; };
                 refreshSerialItem = async () => { refreshEvents.push('refresh'); };
                 startSerialRefreshTimer();
             `, context);
@@ -754,8 +754,174 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.deepEqual(JSON.parse(requests[0].options.body), {device_id: 'device-a'});
                 assert.equal(vm.runInContext('serialWorkspaceOpen', context), true);
                 assert.equal(element('inventorySerialFinish').disabled, false);
+                assert.equal(element('inventorySerialInput').disabled, false);
+                assert.equal(vm.runInContext('serialFinishPending', context), false);
                 assert.match(element('inventorySerialMessage').textContent, /当前扫描界面已保留/);
                 assert.equal(focusCount, 1);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_finish_waits_for_two_accepted_scans_and_preserves_request_order(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            const firstScan = deferred();
+            const order = [];
+            const input = {value: 'FIRST', disabled: false, focus() {}};
+            const finishButton = {disabled: false};
+            const dialog = {
+                open: true,
+                close() { this.open = false; },
+            };
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialFinish', finishButton],
+                ['inventorySerialWorkspace', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {textContent: '', className: ''});
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    if (url.endsWith('/serials')) {
+                        const serial = JSON.parse(options.body).serial;
+                        order.push(`scan:${serial}`);
+                        if (serial === 'FIRST') return firstScan.promise;
+                        return response({success: true, scan: {serial, classification: 'duplicate'}});
+                    }
+                    if (url.endsWith('/serial/finish')) {
+                        order.push('finish');
+                        return response({success: true, serial: {barcode: 'A1', counts: {}}});
+                    }
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                currentSerialData = {counts: {}, duplicates: []};
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                renderSerialReconciliation = value => { currentSerialData = value; };
+                pollInventoryTask = async () => {};
+            `, context);
+            (async () => {
+                const first = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                input.value = 'SECOND';
+                const second = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                const finish = vm.runInContext('finishSerialItem()', context);
+                assert.equal(input.disabled, true);
+                assert.equal(finishButton.disabled, true);
+                await Promise.resolve();
+                assert.deepEqual(order, ['scan:FIRST']);
+
+                input.value = 'THIRD';
+                await vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                assert.equal(input.value, 'THIRD', 'scan requested after finish must not be consumed');
+
+                firstScan.resolve(response({success: true, scan: {
+                    serial: 'FIRST', classification: 'duplicate',
+                }}));
+                await Promise.all([first, second, finish]);
+                assert.deepEqual(order, ['scan:FIRST', 'scan:SECOND', 'finish']);
+                assert.equal(order.filter(value => value === 'scan:FIRST').length, 1);
+                assert.equal(order.filter(value => value === 'scan:SECOND').length, 1);
+                assert.equal(dialog.open, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_stale_heartbeat_409_cannot_disable_reopened_serial_workspace(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload, status = 200) {
+                return {ok: status >= 200 && status < 300, status, json: async () => payload};
+            }
+            const oldHeartbeat = deferred();
+            const input = {value: '', disabled: false, focus() {}};
+            const finishButton = {disabled: false};
+            const message = {textContent: '', className: ''};
+            const dialog = {
+                open: true,
+                close() { this.open = false; },
+                showModal() { this.open = true; },
+            };
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialFinish', finishButton],
+                ['inventorySerialMessage', message],
+                ['inventorySerialWorkspace', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {textContent: '', className: ''});
+                        return elements.get(id);
+                    },
+                },
+                fetch: async url => {
+                    if (url.endsWith('/items/A1/heartbeat')) return oldHeartbeat.promise;
+                    if (url.endsWith('/items/B2/serial/open')) return response({
+                        success: true, serial: {barcode: 'B2', counts: {}},
+                    });
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'task-1', phase: 'serial_check', items: [
+                    {barcode: 'A1', state: 'serial_pending'},
+                    {barcode: 'B2', state: 'serial_pending'},
+                ]};
+                currentSerialBarcode = 'A1';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                renderSerialReconciliation = () => {};
+            `, context);
+            (async () => {
+                const heartbeat = vm.runInContext('sendSerialHeartbeat()', context);
+                vm.runInContext('closeSerialWorkspace()', context);
+                await vm.runInContext("openSerialItem('B2')", context);
+                const newMessage = message.textContent;
+                oldHeartbeat.resolve(response({
+                    success: false, error: '商品已被其他设备锁定', lock_owner: '旧设备',
+                }, 409));
+                await heartbeat;
+                assert.equal(vm.runInContext('currentSerialBarcode', context), 'B2');
+                assert.equal(vm.runInContext('serialWorkspaceEditable', context), true);
+                assert.equal(input.disabled, false);
+                assert.equal(finishButton.disabled, false);
+                assert.equal(message.textContent, newMessage);
+                assert.match(message.textContent, /可以开始扫描/);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
