@@ -14,6 +14,7 @@ class FrontendContractTest(unittest.TestCase):
         "results": "index.html",
         "transfer": "transfer.html",
         "inbound": "inbound.html",
+        "inventory": "inventory.html",
         "product-library": "product_library.html",
         "settings": "accounts.html",
         "login": "login.html",
@@ -511,6 +512,7 @@ class FrontendContractTest(unittest.TestCase):
             source.index("'permission': 'results'"),
             source.index("'permission': 'transfer'"),
             source.index("'permission': 'inbound'"),
+            source.index("'permission': 'inventory'"),
             source.index("'permission': 'product-library'"),
             source.index("'permission': 'accounts'"),
         ]
@@ -647,13 +649,15 @@ class FrontendContractTest(unittest.TestCase):
             r"if \(preferLatest && !data\.job_id\)\s*\{[\s\S]*?clearInterval\(inboundPollTimer\)[\s\S]*?inboundPollTimer = null;[\s\S]*?return;",
         )
 
-    def test_shared_navigation_has_six_columns_and_inbound_permission(self):
+    def test_shared_navigation_has_inventory_permission_and_responsive_columns(self):
         settings = self.source("accounts.html")
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
         layout_css = (STATIC / "app_layout.css").read_text(encoding="utf-8")
         aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(settings, r'<input type="checkbox" value="inbound">\s*入库')
+        self.assertRegex(settings, r'<input type="checkbox" value="inventory">\s*盘点')
         self.assertIn("'/inbound':", aurora)
+        self.assertIn("'/inventory':", aurora)
         self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)")
         # aurora.css declares .page-nav twice (desktop + mobile media query).
         # Both must use auto-fit so limited-permission accounts don’t end up
@@ -680,6 +684,177 @@ class FrontendContractTest(unittest.TestCase):
             desktop_auto_fit or mobile_flex,
             "aurora.css must declare either an auto-fit grid OR a flex .page-nav so the nav row adapts to the number of visible tabs",
         )
+
+    def test_inventory_page_has_live_count_contract_and_no_price_copy(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for token in (
+            'id="inventoryTaskSummary"', 'id="inventorySearch"',
+            'id="inventoryFilters"', 'id="inventoryItems"',
+            'id="inventoryCountDialog"', 'id="inventoryGyjLoginDialog"',
+            "pollInventoryTask", "renderInventoryItems", "openCountItem",
+            "sendInventoryHeartbeat", "submitCount", "openGyjLogin",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source + script)
+        for forbidden in ("成本价", "采购价", "零售价", "销售价", "库存金额"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source + script)
+
+    def test_inventory_script_uses_exact_live_endpoints_and_timing(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for endpoint in (
+            "/api/inventory/tasks/active",
+            "/claim", "/heartbeat", "/count",
+            "/api/gyj/credentials", "/api/gyj/login",
+            "/api/gyj/login/captcha", "/api/gyj/captcha-preview",
+            "/api/gyj/login-status",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIn(endpoint, script)
+        self.assertIn("localStorage.getItem(INVENTORY_DEVICE_KEY)", script)
+        self.assertIn("localStorage.setItem(INVENTORY_DEVICE_KEY", script)
+        self.assertIn("crypto.randomUUID()", script)
+        self.assertRegex(script, r"setInterval\(pollInventoryTask,\s*1000\)")
+        self.assertRegex(script, r"setInterval\(sendInventoryHeartbeat,\s*20000\)")
+        self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
+        self.assertIn("params.set('version'", script)
+        self.assertIn("params.set('query'", script)
+        self.assertIn("event.key === 'Enter'", script)
+        self.assertIn("item.barcode === query", script)
+        self.assertIn("function decimalDifferenceText", script)
+        self.assertIn("BigInt", script)
+        self.assertNotIn("parseFloat", script)
+        self.assertIn("data.item.diff_qty", script)
+        self.assertIn("正在从 GYJ 二次读取账面数量", script)
+
+    def test_inventory_renders_allowlisted_fields_without_html_injection(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for field in (
+            "item.barcode", "item.name", "item.spec", "item.model",
+            "item.category", "item.unit", "item.has_serial",
+            "item.latest_book_qty", "item.completed_actual_qty",
+            "item.diff_qty", "item.state", "item.lock_actor",
+            "item.updated_at",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, script)
+        for label in ("商品总数", "已完成", "待盘点", "数量一致", "盘盈", "盘亏", "待序列号"):
+            with self.subTest(label=label):
+                self.assertIn(label, source + script)
+        self.assertNotIn("innerHTML", script)
+        self.assertNotIn("接口未提供", script)
+        self.assertIn("task.participant_count", script)
+        self.assertIn("task.product_total", script)
+        self.assertIn("task.quantity_difference_count", script)
+        self.assertIn("task.serial_difference_count", script)
+        self.assertIn('tabindex="0"', source)
+        self.assertIn('tabindex="-1"', source)
+        self.assertNotIn("insertAdjacentHTML", script)
+        self.assertNotIn("JSON.stringify(data", script)
+        self.assertNotIn("JSON.stringify(item", script)
+
+    def test_inventory_marks_catalog_data_errors_as_not_countable(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn("item.data_error", script)
+        self.assertIn("资料异常", script)
+        self.assertIn("不可盘", script)
+
+    def test_inventory_dialogs_are_accessible_keyboard_and_mobile_ready(self):
+        source = self.source("inventory.html")
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertRegex(source, r'<dialog[^>]+id="inventoryCountDialog"[^>]+aria-labelledby="inventoryCountDialogTitle"')
+        self.assertRegex(source, r'<dialog[^>]+id="inventoryGyjLoginDialog"[^>]+aria-labelledby="inventoryGyjLoginDialogTitle"')
+        self.assertIn('aria-live="polite"', source)
+        self.assertIn('inputmode="decimal"', source)
+        self.assertIn("@media (max-width: 720px)", css)
+        self.assertIn("min-height: 44px", css)
+
+    def test_inventory_has_one_gyj_button_and_cache_busted_assets(self):
+        source = self.source("inventory.html")
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertEqual(source.count('id="inventoryGyjLoginButton"'), 1)
+        self.assertNotIn("查询通道", source)
+        self.assertIn("CURRENT_ACCOUNT.is_admin", source)
+        self.assertIn('/static/inventory.css{{ inventory_css_v }}', source)
+        self.assertIn('/static/inventory.js{{ inventory_js_v }}', source)
+        self.assertIn('"inventory_css_v": _stamp("inventory.css")', app_source)
+        self.assertIn('"inventory_js_v": _stamp("inventory.js")', app_source)
+
+    def test_inventory_active_task_keeps_full_summary_when_zero_stock_rows_are_hidden(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("def _inventory_task_summary(items):", app_source)
+        self.assertIn('snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])', app_source)
+        self.assertLess(
+            app_source.index('snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])'),
+            app_source.index('snapshot["items"] = inventory_store.list_items('),
+        )
+
+    def test_inventory_lock_owner_is_exposed_and_409_switches_dialog_read_only(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("def _inventory_attach_lock_owners(task_id, items):", app_source)
+        self.assertIn('item["lock_actor"] = lock_owners.get(item.get("barcode"), "")', app_source)
+        self.assertIn("error.status === 409", script)
+        self.assertIn("error.data.lock_owner", script)
+        self.assertIn("setCountReadOnly", script)
+        self.assertRegex(
+            script,
+            r"function setCountReadOnly[\s\S]*countDialogEditable = false;[\s\S]*inventoryActualQuantity'[\s\S]*disabled = true",
+        )
+
+    def test_inventory_dialog_async_work_cannot_restart_after_close(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn("const requestId = ++countDialogRequestId;", script)
+        self.assertIn("const session = ++gyjLoginSession;", script)
+        self.assertRegex(
+            script,
+            r"function closeCountDialog[\s\S]*countDialogRequestId \+= 1;",
+        )
+        self.assertRegex(
+            script,
+            r"function closeGyjLogin[\s\S]*gyjLoginSession \+= 1;[\s\S]*stopGyjLoginPolling\(\);[\s\S]*clearGyjCaptcha\(\);",
+        )
+        self.assertIn("if (session !== gyjLoginSession || !dialog.open) return;", script)
+
+    def test_inventory_serial_and_history_contract(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for token in (
+            'role="tablist"', '当前盘点', '历史任务', '历史差异',
+            'id="inventorySerialWorkspace"', 'id="inventorySerialInput"',
+            'id="inventoryHistory"', 'id="inventoryDifferencesOpen"',
+            'id="inventoryDifferencesArchived"', "openSerialItem",
+            "scanSerial", "finishSerialItem", "loadInventoryHistory",
+            "loadDiscrepancies", "saveDiscrepancyNote",
+            "archiveDiscrepancy", "restoreDiscrepancy",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source + script)
+        for label in (
+            "匹配", "账面独有", "实物独有", "其他商品", "重复扫描",
+            "任务号", "开始时间", "完成时间", "参与人数", "商品总数",
+            "数量差异", "序列号差异", "Excel", "待处理", "已归档",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, source + script)
+        self.assertNotIn("innerHTML", script)
+
+    def test_inventory_serial_history_and_discrepancy_timing_contract(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for endpoint in (
+            "/serial/open", "/serial/refresh", "/serials", "/serial/finish",
+            "/api/inventory/tasks/history", "/api/inventory/discrepancies",
+            "/notes", "/archive", "/restore", "/export",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIn(endpoint, script)
+        self.assertRegex(script, r"setInterval\([^,]+,\s*60000\)")
+        self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
+        self.assertIn("CURRENT_ACCOUNT.is_admin", script)
+        self.assertIn("encodeURIComponent(serial)", script)
+        self.assertIn("method: 'DELETE'", script)
 
     def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
@@ -1088,10 +1263,10 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'label': '{label}'", app_source)
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "入库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'{label}'", aurora)
         self.assertIn("aurora-nav-label", aurora)
         self.assertNotIn("anchor.textContent =", aurora)

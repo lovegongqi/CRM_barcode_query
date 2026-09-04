@@ -20,7 +20,9 @@ import queue
 import uuid
 import shutil
 import hashlib
+from contextlib import closing
 from collections import OrderedDict
+from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
 
@@ -37,6 +39,17 @@ from gyj_inbound import (
     GYJPurchaseInboundWriter,
     GYJ_PURCHASE_IN_URL,
     build_gyj_purchase_lines,
+)
+from gyj_inventory import GYJInventoryReadError, GYJInventoryReader
+from inventory_export import build_discrepancy_workbook, build_inventory_workbook
+from inventory_service import InventoryService, InventoryServiceError
+from inventory_store import (
+    InventoryConflict,
+    InventoryNotFound,
+    InventoryPermissionDenied,
+    InventoryStore,
+    InventoryVersionConflict,
+    normalize_quantity,
 )
 
 try:
@@ -3887,6 +3900,71 @@ class GYJSession:
                 self.logged_in = False
                 return False, str(error)
 
+    def load_inventory_catalog(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).load_catalog()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_total_stock(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock_totals(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_stock_totals()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_serials(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_unshipped_serials(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def lookup_inventory_serial(self, serial):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).lookup_serial(serial)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
     def save_purchase_inbound(
         self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
     ):
@@ -3976,6 +4054,21 @@ class GYJWorker:
 
     def check_login_status(self):
         return self._call("check_login_status")
+
+    def load_inventory_catalog(self):
+        return self._call("load_inventory_catalog")
+
+    def read_inventory_stock(self, barcode):
+        return self._call("read_inventory_stock", barcode)
+
+    def read_inventory_stock_totals(self):
+        return self._call("read_inventory_stock_totals")
+
+    def read_inventory_serials(self, barcode):
+        return self._call("read_inventory_serials", barcode)
+
+    def lookup_inventory_serial(self, serial):
+        return self._call("lookup_inventory_serial", serial)
 
     def save_purchase_inbound(
         self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
@@ -6198,6 +6291,7 @@ DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
 TRANSFER_RECORDS_DB_FILE = os.path.join(CONFIG_DIR, "transfer_records.sqlite3")
 INBOUND_HISTORY_DB_FILE = os.path.join(CONFIG_DIR, "inbound_history.sqlite3")
+INVENTORY_DB_FILE = os.path.join(CONFIG_DIR, "inventory_stocktake.sqlite3")
 RESULTS_DIR = os.path.join(DATA_BASE_DIR, "results")
 TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
@@ -6205,6 +6299,12 @@ CRM_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "crm_credentials.json")
 crm_credentials_lock = threading.Lock()
 GYJ_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "gyj_credentials.json")
 gyj_credentials_lock = threading.Lock()
+inventory_store = InventoryStore(INVENTORY_DB_FILE)
+inventory_service = InventoryService(
+    inventory_store, lambda owner: gyj_worker_for_owner(owner)
+)
+inventory_sync_lock = threading.Lock()
+inventory_sync_threads = {}
 DEFAULT_OWN_DEALER_NAME = "江西省天麓工贸有限公司"
 DEFAULT_FROZEN_WAREHOUSE_NAME = "江西天麓冻结仓库"
 OWN_DEALER_NAME = DEFAULT_OWN_DEALER_NAME
@@ -8665,7 +8765,7 @@ def load_accounts():
         'username': 'admin',
         'display_name': '管理员',
         'password': '88293529',
-        'permissions': ['crm', 'results', 'transfer', 'inbound', 'accounts', 'product-library'],
+        'permissions': ['crm', 'results', 'transfer', 'inbound', 'inventory', 'accounts', 'product-library'],
         'updated_at': '',
     }
     if os.path.exists(ACCOUNTS_FILE):
@@ -8768,6 +8868,20 @@ def gyj_credentials_owner_key():
     return ""
 
 
+def gyj_worker_owner_key(owner=""):
+    owner = str(owner or "").strip()
+    if not owner:
+        return gyj_credentials_owner_key()
+    for row in load_accounts():
+        if owner in {str(row.get("id") or ""), str(row.get("username") or "")}:
+            return str(row.get("username") or "").strip()
+    return owner
+
+
+def gyj_worker_for_owner(owner=""):
+    return gyj_worker.get(gyj_worker_owner_key(owner))
+
+
 def load_gyj_credentials_store():
     with gyj_credentials_lock:
         try:
@@ -8817,6 +8931,7 @@ PAGE_LINKS = [
     {'permission': 'results', 'label': '结果', 'href': '/'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
     {'permission': 'inbound', 'label': '入库', 'href': '/inbound'},
+    {'permission': 'inventory', 'label': '盘点', 'href': '/inventory'},
     {'permission': 'product-library', 'label': '匹配', 'href': '/product-library'},
     {'permission': 'accounts', 'label': '设置', 'href': '/accounts'},
 ]
@@ -8843,6 +8958,8 @@ def _aurora_asset_versions():
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),
+        "inventory_css_v": _stamp("inventory.css"),
+        "inventory_js_v": _stamp("inventory.js"),
         "log_modal_css_v": _stamp("log_modal.css") if os.path.exists(os.path.join(app.static_folder, "log_modal.css")) else "",
         "log_modal_js_v": _stamp("log_modal.js") if os.path.exists(os.path.join(app.static_folder, "log_modal.js")) else "",
     }
@@ -8880,8 +8997,12 @@ def required_permission_for_path(path):
         return "crm"
     if path == "/transfer" or path.startswith("/api/transfer") or path.startswith("/api/crm/transfer"):
         return "transfer"
+    if path.startswith("/api/gyj"):
+        return "account-self"
     if path == "/inbound" or path.startswith("/api/inbound"):
         return "inbound"
+    if path == "/inventory" or path.startswith("/api/inventory"):
+        return "inventory"
     if path.startswith("/api/distributor-history"):
         return "transfer"
     if path == "/product-library" or path.startswith("/api/product-library"):
@@ -9881,6 +10002,15 @@ def inbound_page():
     )
 
 
+@app.route("/inventory")
+def inventory_page():
+    return render_template(
+        "inventory.html",
+        nav_links=visible_page_links(),
+        account=current_account_public(),
+    )
+
+
 def _current_inbound_owner():
     account = current_account() or {}
     return str(account.get('id') or account.get('username') or '')
@@ -10072,8 +10202,9 @@ def api_inbound_export():
     )
 
 
+@app.route("/api/gyj/credentials", methods=["GET", "POST"])
 @app.route("/api/inbound/gyj/credentials", methods=["GET", "POST"])
-def api_inbound_gyj_credentials():
+def api_gyj_credentials():
     if request.method == "GET":
         return jsonify({"success": True, **get_remembered_gyj_credentials()})
     data = request.get_json(silent=True) or {}
@@ -10087,8 +10218,9 @@ def api_inbound_gyj_credentials():
     return jsonify({"success": True, "remember": remember})
 
 
+@app.route("/api/gyj/login", methods=["POST"])
 @app.route("/api/inbound/gyj/login", methods=["POST"])
-def api_inbound_gyj_login():
+def api_gyj_login():
     data = request.get_json(silent=True) or {}
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
@@ -10097,7 +10229,7 @@ def api_inbound_gyj_login():
         return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
     if not save_remembered_gyj_credentials(remember, username, password):
         return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
-    worker = gyj_worker.get(_current_inbound_owner())
+    worker = gyj_worker_for_owner()
     ok, message = worker.login_step1(username, password)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10106,11 +10238,12 @@ def api_inbound_gyj_login():
     }), (200 if ok else 409)
 
 
+@app.route("/api/gyj/login/captcha", methods=["POST"])
 @app.route("/api/inbound/gyj/login/captcha", methods=["POST"])
-def api_inbound_gyj_login_captcha():
+def api_gyj_login_captcha():
     data = request.get_json(silent=True) or {}
     captcha = str(data.get("captcha") or "").strip()
-    worker = gyj_worker.get(_current_inbound_owner())
+    worker = gyj_worker_for_owner()
     ok, message = worker.login_step2(captcha)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
@@ -10119,15 +10252,17 @@ def api_inbound_gyj_login_captcha():
     }), (200 if ok else 409)
 
 
+@app.route("/api/gyj/captcha-preview", methods=["GET"])
 @app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
-def api_inbound_gyj_captcha_preview():
-    worker = gyj_worker.get(_current_inbound_owner())
+def api_gyj_captcha_preview():
+    worker = gyj_worker_for_owner()
     return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
 
 
+@app.route("/api/gyj/login-status", methods=["GET"])
 @app.route("/api/inbound/gyj/login-status", methods=["GET"])
-def api_inbound_gyj_login_status():
-    worker = gyj_worker.get(_current_inbound_owner())
+def api_gyj_login_status():
+    worker = gyj_worker_for_owner()
     ok, message = worker.check_login_status()
     return jsonify({
         'success': bool(ok), 'logged_in': bool(ok), 'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
@@ -10251,7 +10386,7 @@ def api_inbound_gyj_start():
     except GYJInboundError as error:
         return jsonify({'success': False, 'error': str(error)}), 409
 
-    worker = gyj_worker.get(owner)
+    worker = gyj_worker_for_owner(owner)
     logged_in, message = worker.check_login_status()
     if not logged_in:
         return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
@@ -10317,6 +10452,585 @@ def api_inbound_gyj_status():
         if job and job.get('owner') != owner:
             return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
         return jsonify(_inbound_gyj_status_payload(job, owner))
+
+def _inventory_identity():
+    account = current_account() or {}
+    owner = str(account.get("id") or account.get("username") or "").strip()
+    actor = str(account.get("username") or "").strip()
+    if not owner or not actor:
+        raise InventoryPermissionDenied("请先登录工具账号")
+    return owner, actor
+
+
+def _inventory_json_body():
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("请求内容格式不正确")
+    return data
+
+
+def _inventory_path_value(value, label):
+    value = str(value or "").strip()
+    if not value or len(value) > 512 or any(ord(char) < 32 for char in value):
+        raise ValueError(f"{label}格式不正确")
+    return value
+
+
+def _inventory_device_id(data):
+    return _inventory_path_value(data.get("device_id"), "设备标识")
+
+
+def _inventory_expected_version(data):
+    if "expected_version" not in data:
+        raise ValueError("expected_version 不能为空")
+    raw = data.get("expected_version")
+    if isinstance(raw, bool):
+        raise ValueError("expected_version 格式不正确")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("expected_version 格式不正确")
+    if value < 1 or str(raw).strip() != str(value):
+        raise ValueError("expected_version 格式不正确")
+    return value
+
+
+def _inventory_mutation_response(key, value, owner=None, task_id=None):
+    public_value = dict(value) if isinstance(value, dict) else value
+    version = None
+    if isinstance(public_value, dict):
+        version = public_value.pop("task_version", None)
+        if version is None:
+            version = public_value.get("version")
+    if version is None and owner and task_id:
+        version = inventory_store.get_task_version(owner, task_id)
+    if not isinstance(version, int):
+        raise RuntimeError("盘点写入结果缺少任务版本")
+    return jsonify({"success": True, key: public_value, "version": version})
+
+
+def _inventory_lock_owner_label(value):
+    label = "".join(
+        character for character in str(value or "")
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip()
+    return label[:80]
+
+
+def _inventory_api(handler):
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except InventoryPermissionDenied as exc:
+            return jsonify({"success": False, "error": str(exc)}), 403
+        except InventoryNotFound as exc:
+            return jsonify({"success": False, "error": str(exc)}), 404
+        except InventoryVersionConflict as exc:
+            return jsonify({
+                "success": False,
+                "error": str(exc),
+                "current_version": exc.current_version,
+            }), 409
+        except InventoryConflict as exc:
+            payload = {"success": False, "error": str(exc)}
+            lock_owner = _inventory_lock_owner_label(
+                getattr(exc, "lock_owner", None)
+            )
+            if lock_owner:
+                payload["lock_owner"] = lock_owner
+            return jsonify(payload), 409
+        except (ValueError, TypeError) as exc:
+            return jsonify({"success": False, "error": str(exc) or "请求参数不正确"}), 400
+        except InventoryServiceError:
+            return jsonify({
+                "success": False,
+                "error": "GYJ 库存读取失败，请检查登录状态后重试",
+            }), 502
+        except Exception:
+            return jsonify({"success": False, "error": "库存盘点服务暂时不可用"}), 500
+    return wrapped
+
+
+def _inventory_owned_task(owner, task_id):
+    task_id = _inventory_path_value(task_id, "任务标识")
+    return inventory_store.get_task_snapshot(owner, task_id)
+
+
+def _inventory_sync_is_due(snapshot):
+    if snapshot.get("phase") == "sync_error":
+        return True
+    value = snapshot.get("last_sync_at")
+    if not value:
+        return True
+    try:
+        last_sync = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return True
+    now = datetime.now(last_sync.tzinfo) if last_sync.tzinfo else datetime.now()
+    return (now - last_sync).total_seconds() >= 60
+
+
+def _run_inventory_sync(owner, task_id):
+    try:
+        inventory_service.sync_completed_items(owner, task_id)
+    except Exception:
+        # Never copy a worker/page exception into a response or application log.
+        pass
+    finally:
+        current_thread = threading.current_thread()
+        with inventory_sync_lock:
+            if inventory_sync_threads.get(task_id) is current_thread:
+                inventory_sync_threads.pop(task_id, None)
+
+
+def _ensure_inventory_sync(owner, task_id):
+    task_id = _inventory_path_value(task_id, "任务标识")
+    with inventory_sync_lock:
+        running = inventory_sync_threads.get(task_id)
+        if running is not None and running.is_alive():
+            return False
+        snapshot = inventory_store.get_task_snapshot(owner, task_id)
+        if snapshot.get("phase") == "completed" or not _inventory_sync_is_due(snapshot):
+            return False
+        thread = threading.Thread(
+            target=_run_inventory_sync,
+            args=(owner, task_id),
+            daemon=True,
+            name=f"inventory-sync-{task_id[:24]}",
+        )
+        inventory_sync_threads[task_id] = thread
+        try:
+            thread.start()
+        except Exception:
+            inventory_sync_threads.pop(task_id, None)
+            return False
+        return True
+
+
+def _inventory_version_arg():
+    raw = request.args.get("version")
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("任务版本格式不正确")
+    if value < 0:
+        raise ValueError("任务版本格式不正确")
+    return value
+
+
+def _inventory_filename_part(value, fallback):
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "")).strip("-_")
+    return cleaned[:80] or fallback
+
+
+def _inventory_discrepancy_filters():
+    state = str(request.args.get("state") or "open").strip()
+    if state not in {"open", "archived"}:
+        raise ValueError("差异状态不正确")
+    return state, str(request.args.get("query") or "").strip()
+
+
+def _inventory_public_task(task):
+    if not isinstance(task, dict):
+        return task
+    public = dict(task)
+    if public.get("gyj_status") not in (None, "", "synced"):
+        public["gyj_status"] = "GYJ 库存读取失败，请检查登录状态后重试"
+    return public
+
+
+def _inventory_task_summary(items):
+    summary = {
+        "total": len(items),
+        "completed": 0,
+        "pending": 0,
+        "matched": 0,
+        "surplus": 0,
+        "deficit": 0,
+        "serial_pending": 0,
+        "data_error": 0,
+    }
+    for item in items:
+        if item.get("state") == "data_error":
+            summary["data_error"] += 1
+        elif item.get("completed_actual_qty") is None:
+            summary["pending"] += 1
+        else:
+            summary["completed"] += 1
+        if item.get("state") == "matched":
+            summary["matched"] += 1
+        difference = str(item.get("diff_qty") or "0")
+        if difference.startswith("-"):
+            summary["deficit"] += 1
+        elif difference.strip("0."):
+            summary["surplus"] += 1
+        if item.get("state") == "serial_pending":
+            summary["serial_pending"] += 1
+    return summary
+
+
+def _inventory_attach_lock_owners(task_id, items):
+    lock_owners = {}
+    try:
+        with closing(inventory_store.connect()) as connection:
+            rows = connection.execute(
+                """SELECT barcode, actor FROM inventory_item_locks
+                   WHERE task_id = ? AND expires_at > ?""",
+                (task_id, datetime.now().isoformat()),
+            )
+            lock_owners = {
+                row["barcode"]: _inventory_lock_owner_label(row["actor"])
+                for row in rows
+            }
+    except Exception:
+        # Lock labels are supplementary; the task snapshot remains usable if
+        # an older store implementation cannot expose them.
+        pass
+    for item in items:
+        item["lock_actor"] = lock_owners.get(item.get("barcode"), "")
+    return items
+
+
+@app.route("/api/inventory/tasks/active", methods=["GET"])
+@_inventory_api
+def api_inventory_active_task():
+    owner, _actor = _inventory_identity()
+    known_version = _inventory_version_arg()
+    active = inventory_store.get_active_task(owner)
+    if not active:
+        return jsonify({"success": True, "task": None})
+    task_id = active["task_id"]
+    snapshot = inventory_store.get_task_snapshot(
+        owner, task_id, known_version=known_version
+    )
+    if not snapshot.get("unchanged"):
+        snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])
+        query = str(request.args.get("query") or "").strip()
+        state = str(request.args.get("state") or "").strip()
+        snapshot["items"] = inventory_store.list_items(
+            task_id,
+            query=query,
+            state=state,
+            include_zero=bool(query),
+        )
+        _inventory_attach_lock_owners(task_id, snapshot["items"])
+    _ensure_inventory_sync(owner, task_id)
+    return jsonify({"success": True, "task": _inventory_public_task(snapshot)})
+
+
+@app.route("/api/inventory/tasks", methods=["POST"])
+@_inventory_api
+def api_inventory_create_task():
+    owner, actor = _inventory_identity()
+    task = inventory_service.create_task(owner, actor)
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task.get("task_id")
+    )
+
+
+@app.route("/api/inventory/tasks/history", methods=["GET"])
+@_inventory_api
+def api_inventory_task_history():
+    owner, _actor = _inventory_identity()
+    try:
+        limit = int(request.args.get("limit", 20))
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        raise ValueError("历史任务分页参数不正确")
+    if not 1 <= limit <= 50 or offset < 0:
+        raise ValueError("历史任务分页参数不正确")
+    page = inventory_store.list_task_history(
+        owner, limit=limit, offset=offset
+    )
+    tasks = [
+        _inventory_public_task(task)
+        for task in page["tasks"]
+    ]
+    return jsonify({
+        "success": True,
+        "tasks": tasks,
+        "pagination": {
+            "limit": page["limit"],
+            "offset": page["offset"],
+            "total": page["total"],
+            "has_more": page["offset"] + len(tasks) < page["total"],
+        },
+    })
+
+
+@app.route("/api/inventory/tasks/<task_id>", methods=["GET"])
+@_inventory_api
+def api_inventory_task(task_id):
+    owner, _actor = _inventory_identity()
+    task = _inventory_owned_task(owner, task_id)
+    return jsonify({"success": True, "task": _inventory_public_task(task)})
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/claim", methods=["POST"])
+@_inventory_api
+def api_inventory_claim_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    item = inventory_service.open_count_item(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/heartbeat", methods=["POST"])
+@_inventory_api
+def api_inventory_heartbeat_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    _inventory_owned_task(owner, task_id)
+    lock = inventory_store.heartbeat_lock(
+        task_id,
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        owner=owner,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("lock", lock, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/count", methods=["POST"])
+@_inventory_api
+def api_inventory_count_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    actual_qty = normalize_quantity(data.get("actual_qty"))
+    item = inventory_service.submit_count(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        actual_qty,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/open", methods=["POST"])
+@_inventory_api
+def api_inventory_open_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.open_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/refresh", methods=["POST"])
+@_inventory_api
+def api_inventory_refresh_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.refresh_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        force=data.get("force") is True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials", methods=["POST"])
+@_inventory_api
+def api_inventory_scan_serial(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.scan_serial(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        _inventory_path_value(data.get("serial"), "序列号"),
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("scan", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials/<path:serial>", methods=["DELETE"])
+@_inventory_api
+def api_inventory_delete_serial(task_id, barcode, serial):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.delete_serial_scan(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        _inventory_path_value(serial, "序列号"),
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/finish", methods=["POST"])
+@_inventory_api
+def api_inventory_finish_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.finish_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/complete", methods=["POST"])
+@_inventory_api
+def api_inventory_complete_task(task_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    task = inventory_service.complete_task(
+        owner, task_id, actor,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task_id
+    )
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/unlock", methods=["POST"])
+@_inventory_api
+def api_inventory_unlock_item(task_id, barcode):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以强制解锁")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    _inventory_owned_task(owner, task_id)
+    result = inventory_store.admin_unlock(
+        task_id, _inventory_path_value(barcode, "商品条码"), actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("result", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/export", methods=["GET"])
+@_inventory_api
+def api_inventory_task_export(task_id):
+    owner, _actor = _inventory_identity()
+    task = _inventory_owned_task(owner, task_id)
+    if task.get("phase") != "completed":
+        raise InventoryConflict("盘点任务尚未完成")
+    discrepancies = []
+    for state in ("open", "archived"):
+        discrepancies.extend(
+            row for row in inventory_store.list_discrepancies(owner, state)
+            if row.get("task_id") == task.get("task_id")
+        )
+    workbook = build_inventory_workbook(task, task.get("items") or [], discrepancies)
+    safe_task_id = _inventory_filename_part(task.get("task_id"), "task")
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"inventory-{safe_task_id}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/api/inventory/discrepancies", methods=["GET"])
+@_inventory_api
+def api_inventory_discrepancies():
+    owner, _actor = _inventory_identity()
+    state, query = _inventory_discrepancy_filters()
+    rows = inventory_store.list_discrepancies(owner, state, query=query)
+    return jsonify({"success": True, "discrepancies": rows})
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/notes", methods=["POST"])
+@_inventory_api
+def api_inventory_discrepancy_note(discrepancy_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    serial = data.get("serial")
+    if serial is not None:
+        serial = _inventory_path_value(serial, "序列号")
+    note = inventory_store.add_discrepancy_note(
+        owner,
+        discrepancy_id,
+        actor,
+        str(data.get("note") or ""),
+        serial=serial,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("note", note)
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/archive", methods=["POST"])
+@_inventory_api
+def api_inventory_archive_discrepancy(discrepancy_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以归档差异")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_store.archive_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/restore", methods=["POST"])
+@_inventory_api
+def api_inventory_restore_discrepancy(discrepancy_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以恢复差异")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_store.restore_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
+
+
+@app.route("/api/inventory/discrepancies/export", methods=["GET"])
+@_inventory_api
+def api_inventory_discrepancy_export():
+    owner, _actor = _inventory_identity()
+    state, query = _inventory_discrepancy_filters()
+    rows = inventory_store.list_discrepancies(owner, state, query=query)
+    workbook = build_discrepancy_workbook(
+        rows, "待处理" if state == "open" else "已归档"
+    )
+    safe_state = _inventory_filename_part(state, "open")
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"inventory-discrepancies-{safe_state}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
 
 @app.route("/product-library")
 def product_library_page():
@@ -10467,7 +11181,7 @@ def api_accounts_save():
         return jsonify({'success': False, 'error': '账号不能为空'})
     if not isinstance(permissions, list):
         permissions = []
-    allowed = {'crm', 'results', 'transfer', 'inbound', 'accounts', 'product-library'}
+    allowed = {'crm', 'results', 'transfer', 'inbound', 'inventory', 'accounts', 'product-library'}
     permissions = [p for p in permissions if p in allowed]
     accounts = load_accounts()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')

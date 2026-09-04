@@ -252,6 +252,14 @@ class InboundRouteTest(unittest.TestCase):
                 "permissions": ["inbound"],
                 "updated_at": "",
             },
+            {
+                "id": "warehouse-account-id",
+                "username": "warehouse-user",
+                "display_name": "仓管员",
+                "password": "warehouse-pass",
+                "permissions": ["inbound"],
+                "updated_at": "",
+            },
         ])
         if hasattr(app_module, "inbound_job_lock"):
             with app_module.inbound_job_lock:
@@ -744,6 +752,158 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
         self.assertEqual(worker.owner, "admin")
+
+    def _assert_gyj_alias_equivalent(self, shared, inbound):
+        self.assertEqual(shared.status_code, inbound.status_code)
+        self.assertEqual(shared.content_type, inbound.content_type)
+        self.assertEqual(shared.data, inbound.data)
+
+    def test_shared_gyj_credentials_get_and_post_match_inbound_aliases(self):
+        client = self._login("admin", "88293529")
+        remembered = {"remember": True, "username": "gyj-user"}
+        with mock.patch.object(
+            app_module, "get_remembered_gyj_credentials", return_value=remembered
+        ):
+            shared_get = client.get("/api/gyj/credentials")
+            inbound_get = client.get("/api/inbound/gyj/credentials")
+        self._assert_gyj_alias_equivalent(shared_get, inbound_get)
+
+        payload = {"remember": False, "username": "", "password": ""}
+        with mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared_post = client.post("/api/gyj/credentials", json=payload)
+            inbound_post = client.post("/api/inbound/gyj/credentials", json=payload)
+        self._assert_gyj_alias_equivalent(shared_post, inbound_post)
+
+    def test_shared_gyj_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        payload = {"username": "gyj-user", "password": "secret", "remember": False}
+        with mock.patch.object(app_module, "gyj_worker", worker), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared = client.post("/api/gyj/login", json=payload)
+            inbound = client.post("/api/inbound/gyj/login", json=payload)
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.post("/api/gyj/login/captcha", json={"captcha": "1234"})
+            inbound = client.post("/api/inbound/gyj/login/captcha", json={"captcha": "1234"})
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_preview_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/captcha-preview")
+            inbound = client.get("/api/inbound/gyj/captcha-preview")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_login_status_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_routes_require_tool_login(self):
+        anonymous = app_module.app.test_client()
+        requests = [
+            ("get", "/api/gyj/credentials", None),
+            ("post", "/api/gyj/credentials", {}),
+            ("post", "/api/gyj/login", {}),
+            ("post", "/api/gyj/login/captcha", {}),
+            ("get", "/api/gyj/captcha-preview", None),
+            ("get", "/api/gyj/login-status", None),
+        ]
+        for method, path, payload in requests:
+            with self.subTest(path=path, method=method):
+                kwargs = {"json": payload} if payload is not None else {}
+                response = getattr(anonymous, method)(path, **kwargs)
+                self.assertEqual(response.status_code, 401)
+
+    def test_shared_gyj_routes_use_account_self_instead_of_inbound_permission(self):
+        client = self._login("transfer-only", "transfer-pass")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+
+        self.assertEqual(shared.status_code, 200)
+        self.assertEqual(inbound.status_code, 403)
+
+    def test_gyj_routes_and_inventory_provider_share_one_worker_when_account_id_differs(self):
+        client = self._login("warehouse-user", "warehouse-pass")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "916000024",
+                "description": "中央净水机",
+                "order_numbers": [],
+                "serials": ["SN00000001"],
+                "expected_quantity": 1,
+                "serial_count": 1,
+                "unbarcoded_quantity": 0,
+                "quantity_mismatch": False,
+            }],
+        }, "2026-09-01 09:40:00")
+        pool = app_module.GYJWorkerPool()
+        created_workers = []
+
+        def create_worker(owner, session_dir):
+            worker = FakeGYJWorker(logged_in=False)
+            worker.owner = owner
+            worker.session_dir = session_dir
+            worker.check_login_status = mock.Mock(wraps=worker.check_login_status)
+            worker.captcha_preview = mock.Mock(wraps=worker.captcha_preview)
+            created_workers.append(worker)
+            return worker
+
+        with mock.patch.object(app_module, "gyj_worker", pool), mock.patch.object(
+            app_module, "GYJWorker", side_effect=create_worker
+        ) as worker_class, mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            login = client.post("/api/gyj/login", json={
+                "username": "gyj-user", "password": "secret", "remember": False,
+            })
+            status = client.get("/api/inbound/gyj/login-status")
+            captcha = client.post("/api/gyj/login/captcha", json={"captcha": "1234"})
+            preview = client.get("/api/inbound/gyj/captcha-preview")
+            started = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(captcha.status_code, 200)
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(started.status_code, 200)
+            self._wait_for_gyj_job(client, started.get_json()["job_id"])
+            self.assertEqual(worker_class.call_count, 1)
+            self.assertEqual(list(pool.workers), ["warehouse-user"])
+            self.assertEqual(created_workers[0].login_calls, [("gyj-user", "secret")])
+            self.assertEqual(created_workers[0].captcha_calls, ["1234"])
+            self.assertEqual(created_workers[0].check_login_status.call_count, 2)
+            created_workers[0].captcha_preview.assert_called_once_with()
+            self.assertEqual(len(created_workers[0].saved), 1)
+            self.assertIs(
+                app_module.gyj_worker_for_owner("warehouse-account-id"),
+                created_workers[0],
+            )
+            self.assertEqual(worker_class.call_count, 1)
+
+        job_id = started.get_json()["job_id"]
+        self.assertEqual(app_module.inbound_gyj_jobs[job_id]["owner"], "warehouse-account-id")
+        self.assertEqual(
+            app_module.latest_inbound_gyj_job_by_owner["warehouse-account-id"], job_id
+        )
 
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):
         client = self._login("admin", "88293529")
