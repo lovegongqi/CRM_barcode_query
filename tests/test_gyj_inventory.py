@@ -180,6 +180,20 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertFalse(any(label == "仓库" for label, _value in page.filled))
         self.assertFalse(any(label == "仓库" for label, _value in page.selected))
 
+    def test_read_total_stock_rejects_any_row_for_a_different_barcode(self):
+        page = FakeInventoryPage({
+            GYJ_STOCK_URL: [stock_page([
+                ["B2", "错误商品", "", "", "配件", "个", "9", "7", "63"],
+            ], 1)],
+        })
+
+        with self.assertRaisesRegex(GYJInventoryReadError, "查询条件"):
+            GYJInventoryReader(page).read_total_stock("A1")
+
+    def test_read_total_stock_keeps_a_legitimate_empty_result_as_zero(self):
+        page = FakeInventoryPage({GYJ_STOCK_URL: [stock_page([], 0)]})
+        self.assertEqual(GYJInventoryReader(page).read_total_stock("A1"), "0")
+
     def test_read_stock_totals_aggregates_all_pages_without_focused_filter(self):
         page = FakeInventoryPage({
             GYJ_STOCK_URL: [

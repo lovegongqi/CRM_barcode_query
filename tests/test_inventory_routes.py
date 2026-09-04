@@ -22,6 +22,7 @@ from inventory_store import (
     InventoryNotFound,
     InventoryPermissionDenied,
     InventoryStore,
+    InventoryVersionConflict,
 )
 
 
@@ -75,6 +76,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.service = mock.Mock()
         self.production_inventory_service = app_module.inventory_service
         self.store.get_active_task.return_value = None
+        self.store.get_task_version.return_value = 3
         self.store.get_task_snapshot.return_value = {
             "success": True,
             "task_id": "task-1",
@@ -99,9 +101,15 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.finish_serial_item.return_value = {"barcode": "A/B", "counts": {}}
         self.service.complete_task.return_value = {"task_id": "task-1", "completed": True}
         self.store.admin_unlock.return_value = {"task_id": "task-1", "barcode": "A/B", "unlocked": True}
-        self.store.add_discrepancy_note.return_value = {"id": 1, "note": "checked"}
-        self.store.archive_discrepancy.return_value = {"id": 1, "state": "archived"}
-        self.store.restore_discrepancy.return_value = {"id": 1, "state": "open"}
+        self.store.add_discrepancy_note.return_value = {
+            "id": 1, "note": "checked", "task_version": 3,
+        }
+        self.store.archive_discrepancy.return_value = {
+            "id": 1, "state": "archived", "task_version": 3,
+        }
+        self.store.restore_discrepancy.return_value = {
+            "id": 1, "state": "open", "task_version": 3,
+        }
         self.store_patch = mock.patch.object(
             app_module, "inventory_store", self.store, create=True
         )
@@ -199,7 +207,7 @@ class InventoryRouteTest(unittest.TestCase):
             json={"owner": "admin", "actor": "spoofed", "device_id": "ignored"},
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(set(response.get_json()), {"success", "task"})
+        self.assertEqual(set(response.get_json()), {"success", "task", "version"})
         self.service.create_task.assert_called_once_with(
             "warehouse-account-id", "warehouse-user"
         )
@@ -243,20 +251,20 @@ class InventoryRouteTest(unittest.TestCase):
             ("post", "/api/inventory/tasks", {}, "task"),
             ("get", "/api/inventory/tasks/history", None, "tasks"),
             ("get", "/api/inventory/tasks/task-1", None, "task"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/claim", {"device_id": "device-a"}, "item"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/heartbeat", {"device_id": "device-a"}, "lock"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/count", {"device_id": "device-a", "actual_qty": "2"}, "item"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/open", {"device_id": "device-a"}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/refresh", {"device_id": "device-a"}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1"}, "scan"),
-            ("delete", "/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1", {"device_id": "device-a"}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/finish", {"device_id": "device-a"}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/complete", {}, "task"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/unlock", {"is_admin": False}, "result"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/claim", {"device_id": "device-a", "expected_version": 3}, "item"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/heartbeat", {"device_id": "device-a", "expected_version": 3}, "lock"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/count", {"device_id": "device-a", "actual_qty": "2", "expected_version": 3}, "item"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/open", {"device_id": "device-a", "expected_version": 3}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/refresh", {"device_id": "device-a", "expected_version": 3}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1", "expected_version": 3}, "scan"),
+            ("delete", "/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1", {"device_id": "device-a", "expected_version": 3}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/finish", {"device_id": "device-a", "expected_version": 3}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/complete", {"expected_version": 3}, "task"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/unlock", {"is_admin": False, "expected_version": 3}, "result"),
             ("get", "/api/inventory/discrepancies?state=open&query=A%2FB", None, "discrepancies"),
-            ("post", "/api/inventory/discrepancies/1/notes", {"note": "checked", "serial": "SN/1", "actor": "spoofed"}, "note"),
-            ("post", "/api/inventory/discrepancies/1/archive", {"is_admin": False}, "discrepancy"),
-            ("post", "/api/inventory/discrepancies/1/restore", {"is_admin": False}, "discrepancy"),
+            ("post", "/api/inventory/discrepancies/1/notes", {"note": "checked", "serial": "SN/1", "actor": "spoofed", "expected_version": 3}, "note"),
+            ("post", "/api/inventory/discrepancies/1/archive", {"is_admin": False, "expected_version": 3}, "discrepancy"),
+            ("post", "/api/inventory/discrepancies/1/restore", {"is_admin": False, "expected_version": 3}, "discrepancy"),
         ]
         for method, path, body, key in cases:
             with self.subTest(method=method, path=path):
@@ -265,24 +273,186 @@ class InventoryRouteTest(unittest.TestCase):
                 expected_keys = {"success", key}
                 if path == "/api/inventory/tasks/history":
                     expected_keys.add("pagination")
+                if method in {"post", "delete"}:
+                    expected_keys.add("version")
                 self.assertEqual(set(response.get_json()), expected_keys)
                 self.assertTrue(response.get_json()["success"])
 
         self.service.open_count_item.assert_called_once_with(
-            "admin", "task-1", "A/B", "device-a", "admin"
+            "admin", "task-1", "A/B", "device-a", "admin",
+            expected_version=3,
+        )
+        self.store.heartbeat_lock.assert_called_once_with(
+            "task-1", "A/B", "device-a", "admin",
+            owner="admin", expected_version=3,
+        )
+        self.service.submit_count.assert_called_once_with(
+            "admin", "task-1", "A/B", "device-a", "admin", "2",
+            expected_version=3,
+        )
+        self.service.open_serial_item.assert_called_once_with(
+            "admin", "task-1", "A/B", "device-a", "admin",
+            expected_version=3,
+        )
+        self.service.refresh_serial_item.assert_called_once_with(
+            "admin", "task-1", "A/B", "device-a", "admin", force=False,
+            expected_version=3,
         )
         self.service.scan_serial.assert_called_once_with(
-            "admin", "task-1", "A/B", "device-a", "admin", "SN/1"
+            "admin", "task-1", "A/B", "device-a", "admin", "SN/1",
+            expected_version=3,
         )
         self.service.delete_serial_scan.assert_called_once_with(
-            "admin", "task-1", "A/B", "device-a", "admin", "SN/1"
+            "admin", "task-1", "A/B", "device-a", "admin", "SN/1",
+            expected_version=3,
+        )
+        self.service.finish_serial_item.assert_called_once_with(
+            "admin", "task-1", "A/B", "device-a", "admin",
+            expected_version=3,
+        )
+        self.service.complete_task.assert_called_once_with(
+            "admin", "task-1", "admin", expected_version=3,
+        )
+        self.store.admin_unlock.assert_called_once_with(
+            "task-1", "A/B", "admin", True, expected_version=3,
         )
         self.store.add_discrepancy_note.assert_called_once_with(
-            "admin", 1, "admin", "checked", serial="SN/1"
+            "admin", 1, "admin", "checked", serial="SN/1",
+            expected_version=3,
         )
         self.store.archive_discrepancy.assert_called_once_with(
-            "admin", 1, "admin", True
+            "admin", 1, "admin", True, expected_version=3,
         )
+        self.store.restore_discrepancy.assert_called_once_with(
+            "admin", 1, "admin", True, expected_version=3,
+        )
+
+    def test_count_route_requires_forwards_and_returns_task_version(self):
+        client = self.login_account("counter")
+        missing = client.post(
+            "/api/inventory/tasks/task-1/items/A/count",
+            json={"device_id": "device-a", "actual_qty": "2"},
+        )
+        self.assertEqual(missing.status_code, 400)
+        self.assertIn("expected_version", missing.get_json()["error"])
+
+        response = client.post(
+            "/api/inventory/tasks/task-1/items/A/count",
+            json={
+                "device_id": "device-a", "actual_qty": "2",
+                "expected_version": 3,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["version"], 3)
+        self.service.submit_count.assert_called_once_with(
+            "counter-id", "task-1", "A", "device-a", "counter", "2",
+            expected_version=3,
+        )
+
+    def test_heartbeat_uses_session_actor_and_keeps_device_only_as_device(self):
+        response = self.login_account("counter").post(
+            "/api/inventory/tasks/task-1/items/A/heartbeat",
+            json={"device_id": "spoofed-operator", "expected_version": 3},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.store.heartbeat_lock.assert_called_once_with(
+            "task-1", "A", "spoofed-operator", "counter",
+            owner="counter-id", expected_version=3,
+        )
+
+    def test_version_conflict_returns_current_version_without_changing_plain_conflicts(self):
+        client = self.login_account("counter")
+        self.service.submit_count.side_effect = InventoryVersionConflict(
+            "盘点任务已被其他设备更新", current_version=9
+        )
+        stale = client.post(
+            "/api/inventory/tasks/task-1/items/A/count",
+            json={
+                "device_id": "device-a", "actual_qty": "2",
+                "expected_version": 3,
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.get_json(), {
+            "success": False,
+            "error": "盘点任务已被其他设备更新",
+            "current_version": 9,
+        })
+
+        self.service.submit_count.side_effect = InventoryConflict("当前阶段不允许此操作")
+        ordinary = client.post(
+            "/api/inventory/tasks/task-1/items/A/count",
+            json={
+                "device_id": "device-a", "actual_qty": "2",
+                "expected_version": 9,
+            },
+        )
+        self.assertEqual(ordinary.status_code, 409)
+        self.assertNotIn("current_version", ordinary.get_json())
+
+    def test_stale_key_mutations_return_409_and_retry_with_refreshed_version(self):
+        client = self.login_account("admin", "admin-pass")
+        cases = [
+            (
+                "post", "/api/inventory/tasks/task-1/items/A/count",
+                {"device_id": "device-b", "actual_qty": "2"},
+                self.service.submit_count, "item",
+                {"barcode": "A", "state": "matched", "task_version": 10},
+            ),
+            (
+                "post", "/api/inventory/tasks/task-1/items/A/serials",
+                {"device_id": "device-b", "serial": "SN-1"},
+                self.service.scan_serial, "scan",
+                {"serial": "SN-1", "classification": "matched", "task_version": 10},
+            ),
+            (
+                "delete", "/api/inventory/tasks/task-1/items/A/serials/SN-1",
+                {"device_id": "device-b"}, self.service.delete_serial_scan,
+                "serial", {"barcode": "A", "removed": "SN-1", "task_version": 10},
+            ),
+            (
+                "post", "/api/inventory/discrepancies/1/notes",
+                {"note": "复核"}, self.store.add_discrepancy_note,
+                "note", {"id": 1, "note": "复核", "task_version": 10},
+            ),
+            (
+                "post", "/api/inventory/discrepancies/1/archive", {},
+                self.store.archive_discrepancy, "discrepancy",
+                {"id": 1, "state": "archived", "task_version": 10},
+            ),
+            (
+                "post", "/api/inventory/discrepancies/1/restore", {},
+                self.store.restore_discrepancy, "discrepancy",
+                {"id": 1, "state": "open", "task_version": 10},
+            ),
+            (
+                "post", "/api/inventory/tasks/task-1/items/A/unlock", {},
+                self.store.admin_unlock, "result",
+                {"task_id": "task-1", "barcode": "A", "unlocked": True, "task_version": 10},
+            ),
+        ]
+        for method, path, body, target, key, success_value in cases:
+            with self.subTest(path=path):
+                target.side_effect = [
+                    InventoryVersionConflict(
+                        "盘点任务已被其他设备更新，请刷新后重试",
+                        current_version=9,
+                    ),
+                    success_value,
+                ]
+                stale = getattr(client, method)(
+                    path, json={**body, "expected_version": 3}
+                )
+                self.assertEqual(stale.status_code, 409)
+                self.assertEqual(stale.get_json()["current_version"], 9)
+                retried = getattr(client, method)(
+                    path, json={**body, "expected_version": 9}
+                )
+                self.assertEqual(retried.status_code, 200)
+                self.assertEqual(retried.get_json()["version"], 10)
+                self.assertIn(key, retried.get_json())
+                target.side_effect = None
 
     def test_wrong_methods_are_rejected_for_every_inventory_route(self):
         client = self.login_account("admin", "admin-pass")
@@ -362,7 +532,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.open_count_item.side_effect = owned
         claim = client.post(
             "/api/inventory/tasks/task-1/items/A/claim",
-            json={"device_id": "device-a"},
+            json={"device_id": "device-a", "expected_version": 3},
         )
         self.assertEqual(claim.status_code, 409)
         self.assertEqual(claim.get_json()["lock_owner"], "乙操作员")
@@ -370,7 +540,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.heartbeat_lock.side_effect = owned
         heartbeat = client.post(
             "/api/inventory/tasks/task-1/items/A/heartbeat",
-            json={"device_id": "device-a"},
+            json={"device_id": "device-a", "expected_version": 3},
         )
         self.assertEqual(heartbeat.status_code, 409)
         self.assertEqual(heartbeat.get_json()["lock_owner"], "乙操作员")
@@ -378,7 +548,10 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.submit_count.side_effect = owned
         count = client.post(
             "/api/inventory/tasks/task-1/items/A/count",
-            json={"device_id": "device-a", "actual_qty": "1"},
+            json={
+                "device_id": "device-a", "actual_qty": "1",
+                "expected_version": 3,
+            },
         )
         self.assertEqual(count.status_code, 409)
         self.assertEqual(count.get_json()["lock_owner"], "乙操作员")
@@ -388,7 +561,10 @@ class InventoryRouteTest(unittest.TestCase):
             ("/api/inventory/tasks/task-1/items/A/count", self.service.submit_count),
         ):
             target.side_effect = InventoryConflict("当前阶段不允许此操作")
-            body = {"device_id": "device-a", "actual_qty": "1"}
+            body = {
+                "device_id": "device-a", "actual_qty": "1",
+                "expected_version": 3,
+            }
             response = client.post(route, json=body)
             self.assertEqual(response.status_code, 409)
             self.assertNotIn("lock_owner", response.get_json())
@@ -398,7 +574,7 @@ class InventoryRouteTest(unittest.TestCase):
         )
         completed = client.post(
             "/api/inventory/tasks/task-1/items/A/claim",
-            json={"device_id": "device-a"},
+            json={"device_id": "device-a", "expected_version": 3},
         )
         self.assertEqual(completed.status_code, 409)
         self.assertNotIn("lock_owner", completed.get_json())
@@ -406,7 +582,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.heartbeat_lock.side_effect = InventoryConflict("设备未持有商品锁")
         expired = client.post(
             "/api/inventory/tasks/task-1/items/A/heartbeat",
-            json={"device_id": "device-a"},
+            json={"device_id": "device-a", "expected_version": 3},
         )
         self.assertEqual(expired.status_code, 409)
         self.assertNotIn("lock_owner", expired.get_json())

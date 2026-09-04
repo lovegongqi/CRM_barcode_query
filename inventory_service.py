@@ -8,6 +8,7 @@ from inventory_store import (
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
+    InventoryVersionConflict,
     normalize_quantity,
     quantity_difference,
 )
@@ -95,30 +96,45 @@ class InventoryService:
         task = self.store.create_task(owner, actor, catalog)
         return self.store.advance_count_phase_if_ready(owner, task["task_id"])
 
-    def open_count_item(self, owner, task_id, barcode, device_id, actor):
+    def open_count_item(
+        self, owner, task_id, barcode, device_id, actor, *,
+        expected_version=None,
+    ):
         snapshot = self._snapshot(owner, task_id, {"counting"})
         item = self._item(snapshot, barcode)
+        if item.get("data_error"):
+            raise InventoryConflict("商品资料异常，不可盘点")
         if item["completed_actual_qty"] is not None:
             raise InventoryConflict("商品数量盘点已完成")
-        self.store.claim_item(task_id, barcode, device_id, actor, "counting")
+        lock = self.store.claim_item(
+            task_id, barcode, device_id, actor, "counting",
+            expected_version=expected_version,
+        )
         value = self._call_worker(owner, "read_inventory_stock", barcode)
         try:
             book_quantity = normalize_quantity(value)
         except ValueError as exc:
             raise InventoryServiceError("GYJ 返回的库存数量无效") from exc
         return self.store.set_open_book_quantity(
-            owner, task_id, barcode, device_id, actor, book_quantity
+            owner, task_id, barcode, device_id, actor, book_quantity,
+            expected_version=lock["task_version"],
         )
 
     def submit_count(
-        self, owner, task_id, barcode, device_id, actor, actual_qty
+        self, owner, task_id, barcode, device_id, actor, actual_qty, *,
+        expected_version=None,
     ):
         snapshot = self._snapshot(owner, task_id, {"counting"})
         item = self._item(snapshot, barcode)
+        if item.get("data_error"):
+            raise InventoryConflict("商品资料异常，不可盘点")
         if item["completed_actual_qty"] is not None:
             raise InventoryConflict("商品数量盘点已完成")
         actual_qty = normalize_quantity(actual_qty)
-        self.store.assert_item_lock(task_id, barcode, device_id, "counting")
+        checked_version = self.store.assert_item_lock(
+            task_id, barcode, device_id, "counting", actor,
+            expected_version=expected_version,
+        )
         value = self._call_worker(owner, "read_inventory_stock", barcode)
         try:
             latest_book_qty = normalize_quantity(value)
@@ -135,6 +151,7 @@ class InventoryService:
             completed_actual_qty=actual_qty,
             diff_qty=diff_qty,
             state=state,
+            expected_version=checked_version,
         )
 
     def _mark_sync_error(self, owner, task_id, message, timestamp):
@@ -250,10 +267,14 @@ class InventoryService:
         return item
 
     def _refresh_serial_item_locked(
-        self, owner, task_id, barcode, device_id, actor, force
+        self, owner, task_id, barcode, device_id, actor, force,
+        expected_version=None,
     ):
         self._serial_item(owner, task_id, barcode)
-        self.store.assert_item_lock(task_id, barcode, device_id, "serial_check")
+        checked_version = self.store.assert_item_lock(
+            task_id, barcode, device_id, "serial_check", actor,
+            expected_version=expected_version,
+        )
         current = self.store.serial_reconciliation(owner, task_id, barcode)
         check_time = self.now()
         last_sync_at = current["item"].get("serial_synced_at")
@@ -268,45 +289,59 @@ class InventoryService:
         result = self.store.replace_expected_serials(
             owner, task_id, barcode, device_id, actor, rows,
             synced_at=self.now(),
+            expected_version=checked_version,
         )
         result["skipped"] = False
         return result
 
-    def open_serial_item(self, owner, task_id, barcode, device_id, actor):
+    def open_serial_item(
+        self, owner, task_id, barcode, device_id, actor, *,
+        expected_version=None,
+    ):
         with self._serial_guard(owner, task_id, barcode):
             self._serial_item(owner, task_id, barcode)
-            self.store.claim_item(
-                task_id, barcode, device_id, actor, "serial_check"
+            lock = self.store.claim_item(
+                task_id, barcode, device_id, actor, "serial_check",
+                expected_version=expected_version,
             )
             try:
                 return self._refresh_serial_item_locked(
-                    owner, task_id, barcode, device_id, actor, True
+                    owner, task_id, barcode, device_id, actor, True,
+                    lock["task_version"],
                 )
-            except Exception:
+            except Exception as exc:
                 self.store.release_item_lock(
                     owner, task_id, barcode, device_id, actor,
                     "serial_check", "serial_open_failed",
                 )
+                if isinstance(exc, InventoryVersionConflict):
+                    exc.current_version = self.store.get_task_version(
+                        owner, task_id
+                    )
                 raise
 
     def refresh_serial_item(
-        self, owner, task_id, barcode, device_id, actor, force=False
+        self, owner, task_id, barcode, device_id, actor, force=False, *,
+        expected_version=None,
     ):
         with self._serial_guard(owner, task_id, barcode):
             return self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, force
+                owner, task_id, barcode, device_id, actor, force,
+                expected_version,
             )
 
     def scan_serial(
-        self, owner, task_id, barcode, device_id, actor, serial
+        self, owner, task_id, barcode, device_id, actor, serial, *,
+        expected_version=None,
     ):
         serial = str(serial or "").strip()
         if not serial:
             raise ValueError("序列号不能为空")
         with self._serial_guard(owner, task_id, barcode):
             self._serial_item(owner, task_id, barcode)
-            self.store.assert_item_lock(
-                task_id, barcode, device_id, "serial_check"
+            checked_version = self.store.assert_item_lock(
+                task_id, barcode, device_id, "serial_check", actor,
+                expected_version=expected_version,
             )
             current = self.store.serial_reconciliation(owner, task_id, barcode)
             active = (
@@ -319,6 +354,7 @@ class InventoryService:
                     return self.store.add_serial_scan(
                         owner, task_id, barcode, device_id, actor, serial,
                         row["classification"],
+                        expected_version=checked_version,
                     )
 
             expected = {
@@ -342,31 +378,39 @@ class InventoryService:
                     classification = "unknown"
             return self.store.add_serial_scan(
                 owner, task_id, barcode, device_id, actor, serial,
-                classification, lookup,
+                classification, lookup, expected_version=checked_version,
             )
 
     def delete_serial_scan(
-        self, owner, task_id, barcode, device_id, actor, serial
+        self, owner, task_id, barcode, device_id, actor, serial, *,
+        expected_version=None,
     ):
         with self._serial_guard(owner, task_id, barcode):
             self._serial_item(owner, task_id, barcode)
-            self.store.assert_item_lock(
-                task_id, barcode, device_id, "serial_check"
+            checked_version = self.store.assert_item_lock(
+                task_id, barcode, device_id, "serial_check", actor,
+                expected_version=expected_version,
             )
             return self.store.remove_serial_scan(
-                owner, task_id, barcode, device_id, actor, serial
+                owner, task_id, barcode, device_id, actor, serial,
+                expected_version=checked_version,
             )
 
     def finish_serial_item(
-        self, owner, task_id, barcode, device_id, actor
+        self, owner, task_id, barcode, device_id, actor, *,
+        expected_version=None,
     ):
         with self._serial_guard(owner, task_id, barcode):
-            self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, True
+            refreshed = self._refresh_serial_item_locked(
+                owner, task_id, barcode, device_id, actor, True,
+                expected_version,
             )
             return self.store.complete_serial_item(
-                owner, task_id, barcode, device_id, actor
+                owner, task_id, barcode, device_id, actor,
+                expected_version=refreshed["version"],
             )
 
-    def complete_task(self, owner, task_id, actor):
-        return self.store.complete_task(owner, task_id, actor)
+    def complete_task(self, owner, task_id, actor, *, expected_version=None):
+        return self.store.complete_task(
+            owner, task_id, actor, expected_version=expected_version
+        )

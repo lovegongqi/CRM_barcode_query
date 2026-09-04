@@ -28,6 +28,132 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_mutation_helper_sends_expected_version_and_adopts_response_version(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}},
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {
+                        ok: true, status: 200,
+                        json: async () => ({success: true, item: {barcode: 'A1'}, version: 5}),
+                    };
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext('inventoryTask = {task_id: "T1", version: 4}; lastInventoryVersion = 4', context);
+            (async () => {
+                const result = await vm.runInContext(
+                    'inventoryMutationPost("/mutation", {device_id: "D1"})', context
+                );
+                assert.equal(result.version, 5);
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    device_id: 'D1', expected_version: 4,
+                });
+                assert.equal(vm.runInContext('inventoryTask.version', context), 5);
+                assert.equal(vm.runInContext('lastInventoryVersion', context), 5);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_stale_count_refreshes_version_and_keeps_form_retryable(self):
+        self.run_node(
+            r"""
+            const input = {value: '2', disabled: false, focusCount: 0, focus() { this.focusCount += 1; }};
+            const submit = {disabled: false, textContent: ''};
+            const message = {textContent: '', className: ''};
+            const dialog = {open: true};
+            const elements = new Map([
+                ['inventoryActualQuantity', input], ['inventoryCountSubmit', submit],
+                ['inventoryCountMessage', message], ['inventoryCountDialog', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return elements.get(id); },
+                },
+                fetch: async () => ({
+                    ok: false, status: 409,
+                    json: async () => ({
+                        success: false, error: '版本过期', current_version: 4,
+                    }),
+                }),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', version: 3, items: [{barcode: 'A1'}]};
+                currentCountItem = inventoryTask.items[0];
+                countDialogEditable = true;
+                pollInventoryTask = async () => {
+                    inventoryTask.version = 4;
+                    lastInventoryVersion = 4;
+                };
+            `, context);
+            (async () => {
+                await vm.runInContext('submitCount()', context);
+                assert.equal(input.disabled, false);
+                assert.equal(submit.disabled, false);
+                assert.equal(vm.runInContext('countDialogEditable', context), true);
+                assert.match(message.textContent, /重试/);
+                assert.equal(input.focusCount, 1);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_stale_discrepancy_mutations_reload_rows_before_retry(self):
+        self.run_node(
+            r"""
+            const input = {value: '已复核'};
+            const status = {textContent: '', className: ''};
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: true},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        return id === 'inventoryDifferencesStatus' ? status : input;
+                    },
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {
+                        ok: false, status: 409,
+                        json: async () => ({
+                            success: false, error: '版本过期', current_version: 4,
+                        }),
+                    };
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                let discrepancyReloads = 0;
+                loadDiscrepancies = async () => { discrepancyReloads += 1; };
+            `, context);
+            (async () => {
+                await vm.runInContext("saveDiscrepancyNote(9, 'SN-1', 3)", context);
+                await vm.runInContext('archiveDiscrepancy(9, 3)', context);
+                await vm.runInContext('restoreDiscrepancy(9, 3)', context);
+                assert.equal(vm.runInContext('discrepancyReloads', context), 3);
+                assert.match(status.textContent, /刷新|重试/);
+                assert.deepEqual(
+                    requests.map(request => JSON.parse(request.options.body).expected_version),
+                    [3, 3, 3],
+                );
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_search_force_refresh_waits_for_current_query_and_ignores_stale_response(self):
         self.run_node(
             r"""
@@ -387,11 +513,15 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(input.value, '');
                 assert.equal(focusCount, 1);
                 assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/A%2FB/serials');
-                assert.deepEqual(JSON.parse(requests[0].options.body), {device_id: 'device-a', serial: 'SN/1'});
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    device_id: 'device-a', serial: 'SN/1', expected_version: 1,
+                });
                 await vm.runInContext("deleteSerialScan('SN/1')", context);
                 const deletion = requests.find(request => request.options.method === 'DELETE');
                 assert.equal(deletion.url, '/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1');
-                assert.deepEqual(JSON.parse(deletion.options.body), {device_id: 'device-a'});
+                assert.deepEqual(JSON.parse(deletion.options.body), {
+                    device_id: 'device-a', expected_version: 1,
+                });
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -751,7 +881,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 await vm.runInContext('finishSerialItem()', context);
                 assert.equal(requests.length, 1);
                 assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/A%2FB/serial/finish');
-                assert.deepEqual(JSON.parse(requests[0].options.body), {device_id: 'device-a'});
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    device_id: 'device-a', expected_version: 1,
+                });
                 assert.equal(vm.runInContext('serialWorkspaceOpen', context), true);
                 assert.equal(element('inventorySerialFinish').disabled, false);
                 assert.equal(element('inventorySerialInput').disabled, false);
@@ -1202,7 +1334,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             setImmediate(() => {
                 const noteRequest = requests.find(request => request.url.endsWith('/notes'));
-                assert.deepEqual(JSON.parse(noteRequest.options.body), {note: '已复核', serial: 'SN/1'});
+                assert.deepEqual(JSON.parse(noteRequest.options.body), {
+                    note: '已复核', serial: 'SN/1', expected_version: 1,
+                });
                 context.document.getElementById('inventoryDifferenceSearch').value = 'A/B & SN';
                 vm.runInContext("exportDiscrepancies()", context);
                 assert.equal(assigned[0], '/api/inventory/discrepancies/export?state=open&query=A%2FB+%26+SN');

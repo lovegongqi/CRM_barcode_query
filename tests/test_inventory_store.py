@@ -3,6 +3,8 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
+from unittest import mock
 from datetime import datetime, timedelta
 
 from inventory_store import (
@@ -10,6 +12,7 @@ from inventory_store import (
     InventoryNotFound,
     InventoryPermissionDenied,
     InventoryStore,
+    InventoryVersionConflict,
     normalize_quantity,
     quantity_difference,
 )
@@ -105,6 +108,128 @@ class InventoryStoreTests(unittest.TestCase):
         product["cost_price"] = "100"
         self._assert_catalog_rejected_without_records([product])
 
+    def test_catalog_anomaly_requires_a_nonempty_data_error(self):
+        anomaly = {
+            "barcode": "ORPHAN", "name": "无商品信息", "spec": "", "model": "",
+            "category": "", "unit": "个", "initial_stock": "1", "data_error": "",
+        }
+        self._assert_catalog_rejected_without_records([anomaly])
+
+    def test_catalog_data_error_is_persisted_as_unknown_serial_and_not_countable(self):
+        anomaly = {
+            "barcode": "ORPHAN", "name": "无商品信息", "spec": "", "model": "",
+            "category": "", "unit": "个", "initial_stock": "1",
+            "data_error": "无法确认商品序列号设置",
+        }
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", [anomaly])
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        item = store.get_task_snapshot("admin", task["task_id"])["items"][0]
+
+        self.assertEqual(item["state"], "data_error")
+        self.assertEqual(item["data_error"], "无法确认商品序列号设置")
+        self.assertIsNone(item["has_serial"])
+        with self.assertRaisesRegex(InventoryConflict, "资料异常"):
+            store.claim_item(
+                task["task_id"], "ORPHAN", "device-a", "甲", "counting"
+            )
+
+        completed = store.complete_task("admin", task["task_id"], "管理员")
+        self.assertTrue(completed["completed"])
+        self.assertEqual(store.list_discrepancies("admin", "open"), [])
+
+    def test_mixed_catalog_skips_data_error_without_hiding_normal_differences(self):
+        anomaly = {
+            "barcode": "ORPHAN", "name": "无商品信息", "spec": "", "model": "",
+            "category": "", "unit": "个", "initial_stock": "9",
+            "data_error": "无法确认商品序列号设置",
+        }
+        store = InventoryStore(self.db_path)
+        task = store.create_task(
+            "admin", "管理员", [self.catalog()[0], anomaly]
+        )
+        task = store.advance_count_phase_if_ready("admin", task["task_id"])
+        lock = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=task["version"],
+        )
+        counted = store.record_count(
+            "admin", task["task_id"], "A1", "device-a", "甲",
+            completed_book_qty="2", completed_actual_qty="1",
+            diff_qty="-1", state="variance",
+            expected_version=lock["task_version"],
+        )
+
+        completed = store.complete_task(
+            "admin", task["task_id"], "管理员",
+            expected_version=counted["task_version"],
+        )
+        self.assertTrue(completed["completed"])
+        items = store.get_task_snapshot("admin", task["task_id"])["items"]
+        error_item = next(row for row in items if row["barcode"] == "ORPHAN")
+        self.assertEqual(error_item["state"], "data_error")
+        self.assertIsNone(error_item["completed_actual_qty"])
+        self.assertIsNone(error_item["has_serial"])
+        discrepancies = store.list_discrepancies("admin", "open")
+        self.assertEqual(
+            [(row["barcode"], row["kind"]) for row in discrepancies],
+            [("A1", "product_quantity")],
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            events = connection.execute(
+                "SELECT event_type, details FROM inventory_audit_events "
+                "WHERE task_id = ? ORDER BY event_id",
+                (task["task_id"],),
+            ).fetchall()
+        self.assertIn(("task_created", "catalog_loaded;data_errors=1"), events)
+        self.assertIn(("task_completed", "discrepancies=1"), events)
+
+    def test_initialize_migrates_existing_items_with_empty_data_error(self):
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.executescript(
+                """CREATE TABLE inventory_tasks (
+                    task_id TEXT PRIMARY KEY, owner TEXT NOT NULL,
+                    created_by TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'loading',
+                    version INTEGER NOT NULL DEFAULT 1, started_at TEXT NOT NULL,
+                    completed_at TEXT, last_sync_at TEXT, gyj_status TEXT
+                );
+                CREATE TABLE inventory_items (
+                    task_id TEXT NOT NULL, barcode TEXT NOT NULL,
+                    name TEXT NOT NULL DEFAULT '', spec TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT '',
+                    unit TEXT NOT NULL DEFAULT '', has_serial INTEGER NOT NULL DEFAULT 0,
+                    initial_stock TEXT NOT NULL DEFAULT '0', book_quantity TEXT,
+                    counted_quantity TEXT, completed_book_quantity TEXT,
+                    completed_counted_quantity TEXT, latest_book_quantity TEXT,
+                    difference TEXT, status TEXT NOT NULL DEFAULT 'pending',
+                    completed_at TEXT, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (task_id, barcode)
+                );
+                INSERT INTO inventory_tasks
+                    (task_id, owner, created_by, phase, version, started_at)
+                    VALUES ('legacy-task', 'admin', '管理员', 'counting', 2,
+                            '2026-08-31T10:00:00');
+                INSERT INTO inventory_items
+                    (task_id, barcode, name, unit, has_serial, initial_stock,
+                     book_quantity, status, updated_at)
+                    VALUES ('legacy-task', 'A1', '旧库商品', '个', 0, '2', '2',
+                            'pending', '2026-08-31T10:00:00');
+                """
+            )
+        store = InventoryStore(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            columns = {row[1]: row for row in connection.execute(
+                "PRAGMA table_info(inventory_items)"
+            )}
+        self.assertIn("data_error", columns)
+        self.assertEqual(columns["data_error"][3], 1)
+        self.assertEqual(columns["data_error"][4], "''")
+        item = store.get_task_snapshot("admin", "legacy-task")["items"][0]
+        self.assertEqual(item["name"], "旧库商品")
+        self.assertEqual(item["data_error"], "")
+        self.assertFalse(item["has_serial"])
+        self.assertEqual(item["open_book_qty"], "2")
+
     def test_quantity_helpers_do_not_use_binary_float_rounding(self):
         self.assertEqual(normalize_quantity("10.00"), "10")
         self.assertEqual(normalize_quantity("0.125"), "0.125")
@@ -130,6 +255,14 @@ class InventoryStoreTests(unittest.TestCase):
             "inventory_stock_movements", "inventory_discrepancies",
             "inventory_notes", "inventory_audit_events",
         }.issubset(names))
+
+    def test_context_managed_read_closes_its_sqlite_connection(self):
+        store = InventoryStore(self.db_path)
+        connection = store.connect()
+        with mock.patch.object(store, "connect", return_value=connection):
+            store.get_active_task("admin")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
 
     def test_quantity_columns_have_text_affinity(self):
         InventoryStore(self.db_path)
@@ -204,6 +337,53 @@ class InventoryStoreTests(unittest.TestCase):
         with self.assertRaises(InventoryConflict):
             store.heartbeat_lock(task["task_id"], "A1", "device-b")
 
+    def test_heartbeat_audit_uses_authenticated_actor_not_device_id(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        task = store.create_task("owner-1", "建立者", self.catalog())
+        store.claim_item(
+            task["task_id"], "A1", "spoofed-operator", "建立者", "counting"
+        )
+        store.heartbeat_lock(
+            task["task_id"], "A1", "spoofed-operator", "登录用户",
+            owner="owner-1",
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            actor, device = connection.execute(
+                """SELECT actor, device_id FROM inventory_audit_events
+                   WHERE task_id = ? AND event_type = 'lock_heartbeat'
+                   ORDER BY event_id DESC LIMIT 1""",
+                (task["task_id"],),
+            ).fetchone()
+        self.assertEqual(actor, "登录用户")
+        self.assertEqual(device, "spoofed-operator")
+
+    def test_heartbeat_rejects_stale_version_and_does_not_self_increment(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        task = store.create_task("owner-1", "甲", self.catalog())
+        lock = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=task["version"],
+        )
+        with self.assertRaises(InventoryVersionConflict) as caught:
+            store.heartbeat_lock(
+                task["task_id"], "A1", "device-a", "甲", owner="owner-1",
+                expected_version=task["version"],
+            )
+        self.assertEqual(caught.exception.current_version, lock["task_version"])
+        heartbeat = store.heartbeat_lock(
+            task["task_id"], "A1", "device-a", "甲", owner="owner-1",
+            expected_version=lock["task_version"],
+        )
+        self.assertEqual(heartbeat["task_version"], lock["task_version"])
+        self.assertEqual(
+            store.get_task_version("owner-1", task["task_id"]),
+            lock["task_version"],
+        )
+
     def test_expiry_boundary_version_and_audit_semantics(self):
         current = [datetime(2026, 9, 1, 10, 0, 0)]
         store = InventoryStore(self.db_path, now=lambda: current[0])
@@ -235,6 +415,177 @@ class InventoryStoreTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inventory_audit_events WHERE task_id = ? AND event_type = 'lock_admin_unlocked'",
                 (task["task_id"],),
             ).fetchone()[0], 1)
+
+    def test_stale_admin_unlock_is_rejected_before_mutation_and_refresh_retry_succeeds(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        task = store.create_task("admin", "管理员", self.catalog())
+        stale_version = task["version"]
+        claimed = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=stale_version,
+        )
+
+        with self.assertRaises(InventoryVersionConflict) as caught:
+            store.admin_unlock(
+                task["task_id"], "A1", "管理员", True,
+                expected_version=stale_version,
+            )
+        self.assertEqual(caught.exception.current_version, claimed["task_version"])
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT device_id FROM inventory_item_locks "
+                    "WHERE task_id = ? AND barcode = 'A1'",
+                    (task["task_id"],),
+                ).fetchone()[0],
+                "device-a",
+            )
+
+        refreshed = store.get_task_snapshot("admin", task["task_id"])["version"]
+        result = store.admin_unlock(
+            task["task_id"], "A1", "管理员", True,
+            expected_version=refreshed,
+        )
+        self.assertTrue(result["unlocked"])
+        self.assertEqual(result["task_version"], refreshed + 1)
+
+    def test_two_device_stale_count_scan_and_delete_retry_after_refresh(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        task = store.create_task("admin", "管理员", self.catalog())
+        task = store.advance_count_phase_if_ready("admin", task["task_id"])
+        device_b_version = task["version"]
+        lock_b = store.claim_item(
+            task["task_id"], "B2", "device-b", "乙", "counting",
+            expected_version=device_b_version,
+        )
+        lock_a = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=lock_b["task_version"],
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.record_count(
+                "admin", task["task_id"], "B2", "device-b", "乙",
+                completed_book_qty="0", completed_actual_qty="1",
+                diff_qty="1", state="serial_pending",
+                expected_version=lock_b["task_version"],
+            )
+        counted_b = store.record_count(
+            "admin", task["task_id"], "B2", "device-b", "乙",
+            completed_book_qty="0", completed_actual_qty="1",
+            diff_qty="1", state="serial_pending",
+            expected_version=lock_a["task_version"],
+        )
+        counted_a = store.record_count(
+            "admin", task["task_id"], "A1", "device-a", "甲",
+            completed_book_qty="2", completed_actual_qty="2",
+            diff_qty="0", state="matched",
+            expected_version=counted_b["task_version"],
+        )
+        serial_lock = store.claim_item(
+            task["task_id"], "B2", "device-b", "乙", "serial_check",
+            expected_version=counted_a["task_version"],
+        )
+        expected = store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "device-b", "乙", [{
+                "serial": "SN-1", "barcode": "B2", "name": "零库存商品",
+                "warehouse": "一仓", "shipped": False,
+            }], expected_version=serial_lock["task_version"],
+        )
+        other_lock = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "serial_check",
+            expected_version=expected["version"],
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.add_serial_scan(
+                "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
+                "matched", expected_version=expected["version"],
+            )
+        scan = store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
+            "matched", expected_version=other_lock["task_version"],
+        )
+        unlocked = store.admin_unlock(
+            task["task_id"], "A1", "管理员", True,
+            expected_version=scan["task_version"],
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.remove_serial_scan(
+                "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
+                expected_version=scan["task_version"],
+            )
+        deleted = store.remove_serial_scan(
+            "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
+            expected_version=unlocked["task_version"],
+        )
+        self.assertEqual(deleted["removed"], "SN-1")
+
+    def test_two_device_stale_note_archive_and_restore_retry_after_refresh(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
+        )
+        catalog = [self.catalog()[0]]
+        task = store.create_task("admin", "管理员", catalog)
+        task = store.advance_count_phase_if_ready("admin", task["task_id"])
+        lock = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=task["version"],
+        )
+        counted = store.record_count(
+            "admin", task["task_id"], "A1", "device-a", "甲",
+            completed_book_qty="2", completed_actual_qty="1",
+            diff_qty="-1", state="variance",
+            expected_version=lock["task_version"],
+        )
+        completed = store.complete_task(
+            "admin", task["task_id"], "管理员",
+            expected_version=counted["task_version"],
+        )
+        discrepancy_id = store.list_discrepancies("admin", "open")[0]["id"]
+        device_b_version = completed["version"]
+        note_a = store.add_discrepancy_note(
+            "admin", discrepancy_id, "甲", "甲备注",
+            expected_version=device_b_version,
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.add_discrepancy_note(
+                "admin", discrepancy_id, "乙", "乙备注",
+                expected_version=device_b_version,
+            )
+        note_b = store.add_discrepancy_note(
+            "admin", discrepancy_id, "乙", "乙备注",
+            expected_version=note_a["task_version"],
+        )
+        note_c = store.add_discrepancy_note(
+            "admin", discrepancy_id, "甲", "归档前备注",
+            expected_version=note_b["task_version"],
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.archive_discrepancy(
+                "admin", discrepancy_id, "乙", True,
+                expected_version=note_b["task_version"],
+            )
+        archived = store.archive_discrepancy(
+            "admin", discrepancy_id, "乙", True,
+            expected_version=note_c["task_version"],
+        )
+        bumped = store.add_discrepancy_note(
+            "admin", discrepancy_id, "甲", "恢复前备注",
+            expected_version=archived["task_version"],
+        )
+        with self.assertRaises(InventoryVersionConflict):
+            store.restore_discrepancy(
+                "admin", discrepancy_id, "乙", True,
+                expected_version=archived["task_version"],
+            )
+        restored = store.restore_discrepancy(
+            "admin", discrepancy_id, "乙", True,
+            expected_version=bumped["task_version"],
+        )
+        self.assertEqual(restored["state"], "open")
 
     def test_release_expired_locks_does_not_delete_future_lock(self):
         current = [datetime(2026, 9, 1, 10, 0, 0)]

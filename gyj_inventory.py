@@ -473,7 +473,11 @@ class GYJInventoryReader:
 
     def read_total_stock(self, barcode):
         barcode = _text(barcode)
-        rows = [row for row in self._read_stock_rows(barcode) if row["barcode"] == barcode]
+        rows = self._read_stock_rows(barcode)
+        if any(row["barcode"] != barcode for row in rows):
+            raise GYJInventoryReadError(
+                f"GYJ 库存查询条件未生效：{barcode}"
+            )
         return _sum_quantities(row["stock"] for row in rows)
 
     def read_stock_totals(self):

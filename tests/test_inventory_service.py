@@ -3,10 +3,16 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from datetime import datetime, timedelta
 
 from inventory_service import InventoryService, InventoryServiceError
-from inventory_store import InventoryConflict, InventoryNotFound, InventoryStore
+from inventory_store import (
+    InventoryConflict,
+    InventoryNotFound,
+    InventoryStore,
+    InventoryVersionConflict,
+)
 
 
 class FakeInventoryWorker:
@@ -404,6 +410,35 @@ class InventoryServiceTests(unittest.TestCase):
             task["task_id"], "B2", "device-a", "serial_check"
         )
 
+    def test_serial_open_conflict_reports_version_after_its_lock_cleanup(self):
+        task = self.create_serial_task()
+        current_version = self.store.get_task_snapshot(
+            "admin", task["task_id"]
+        )["version"]
+
+        def change_task_while_gyj_is_read(_barcode):
+            self.store.claim_item(
+                task["task_id"], "A1", "device-b", "乙", "serial_check"
+            )
+
+        self.worker.on_serial_read = change_task_while_gyj_is_read
+        with self.assertRaises(InventoryVersionConflict) as caught:
+            self.service.open_serial_item(
+                "admin", task["task_id"], "B2", "device-a", "甲",
+                expected_version=current_version,
+            )
+
+        final_version = self.store.get_task_snapshot(
+            "admin", task["task_id"]
+        )["version"]
+        self.assertEqual(caught.exception.current_version, final_version)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT 1 FROM inventory_item_locks "
+                "WHERE task_id = ? AND barcode = 'B2'",
+                (task["task_id"],),
+            ).fetchone())
+
     def test_create_task_reads_catalog_and_enters_counting(self):
         task = self.create_task()
         self.assertEqual(task["phase"], "counting")
@@ -412,6 +447,23 @@ class InventoryServiceTests(unittest.TestCase):
             [row["barcode"] for row in self.store.get_task_snapshot("admin", task["task_id"])["items"]],
             ["A1", "B2"],
         )
+
+    def test_create_task_keeps_catalog_data_error_but_refuses_live_count(self):
+        self.worker.catalog = [{
+            "barcode": "ORPHAN", "name": "无商品信息", "spec": "", "model": "",
+            "category": "", "unit": "个", "initial_stock": "1",
+            "data_error": "无法确认商品序列号设置",
+        }]
+        task = self.service.create_task("admin", "管理员")
+        item = self.store.get_task_snapshot("admin", task["task_id"])["items"][0]
+        self.assertEqual(item["state"], "data_error")
+        self.assertIsNone(item["has_serial"])
+
+        with self.assertRaisesRegex(InventoryConflict, "资料异常"):
+            self.service.open_count_item(
+                "admin", task["task_id"], "ORPHAN", "device-a", "甲"
+            )
+        self.assertEqual(self.worker.stock_reads, [])
 
     def test_worker_false_results_abort_without_false_progress(self):
         self.worker.catalog_result = (False, "GYJ 未登录")

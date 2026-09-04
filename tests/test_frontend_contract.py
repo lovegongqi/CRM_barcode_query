@@ -755,6 +755,12 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("JSON.stringify(data", script)
         self.assertNotIn("JSON.stringify(item", script)
 
+    def test_inventory_marks_catalog_data_errors_as_not_countable(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn("item.data_error", script)
+        self.assertIn("资料异常", script)
+        self.assertIn("不可盘", script)
+
     def test_inventory_dialogs_are_accessible_keyboard_and_mobile_ready(self):
         source = self.source("inventory.html")
         css = (STATIC / "inventory.css").read_text(encoding="utf-8")

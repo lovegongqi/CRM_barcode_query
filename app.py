@@ -20,6 +20,7 @@ import queue
 import uuid
 import shutil
 import hashlib
+from contextlib import closing
 from collections import OrderedDict
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
@@ -47,6 +48,7 @@ from inventory_store import (
     InventoryNotFound,
     InventoryPermissionDenied,
     InventoryStore,
+    InventoryVersionConflict,
     normalize_quantity,
 )
 
@@ -10480,6 +10482,35 @@ def _inventory_device_id(data):
     return _inventory_path_value(data.get("device_id"), "设备标识")
 
 
+def _inventory_expected_version(data):
+    if "expected_version" not in data:
+        raise ValueError("expected_version 不能为空")
+    raw = data.get("expected_version")
+    if isinstance(raw, bool):
+        raise ValueError("expected_version 格式不正确")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("expected_version 格式不正确")
+    if value < 1 or str(raw).strip() != str(value):
+        raise ValueError("expected_version 格式不正确")
+    return value
+
+
+def _inventory_mutation_response(key, value, owner=None, task_id=None):
+    public_value = dict(value) if isinstance(value, dict) else value
+    version = None
+    if isinstance(public_value, dict):
+        version = public_value.pop("task_version", None)
+        if version is None:
+            version = public_value.get("version")
+    if version is None and owner and task_id:
+        version = inventory_store.get_task_version(owner, task_id)
+    if not isinstance(version, int):
+        raise RuntimeError("盘点写入结果缺少任务版本")
+    return jsonify({"success": True, key: public_value, "version": version})
+
+
 def _inventory_lock_owner_label(value):
     label = "".join(
         character for character in str(value or "")
@@ -10497,6 +10528,12 @@ def _inventory_api(handler):
             return jsonify({"success": False, "error": str(exc)}), 403
         except InventoryNotFound as exc:
             return jsonify({"success": False, "error": str(exc)}), 404
+        except InventoryVersionConflict as exc:
+            return jsonify({
+                "success": False,
+                "error": str(exc),
+                "current_version": exc.current_version,
+            }), 409
         except InventoryConflict as exc:
             payload = {"success": False, "error": str(exc)}
             lock_owner = _inventory_lock_owner_label(
@@ -10616,9 +10653,12 @@ def _inventory_task_summary(items):
         "surplus": 0,
         "deficit": 0,
         "serial_pending": 0,
+        "data_error": 0,
     }
     for item in items:
-        if item.get("completed_actual_qty") is None:
+        if item.get("state") == "data_error":
+            summary["data_error"] += 1
+        elif item.get("completed_actual_qty") is None:
             summary["pending"] += 1
         else:
             summary["completed"] += 1
@@ -10637,7 +10677,7 @@ def _inventory_task_summary(items):
 def _inventory_attach_lock_owners(task_id, items):
     lock_owners = {}
     try:
-        with inventory_store.connect() as connection:
+        with closing(inventory_store.connect()) as connection:
             rows = connection.execute(
                 """SELECT barcode, actor FROM inventory_item_locks
                    WHERE task_id = ? AND expires_at > ?""",
@@ -10688,7 +10728,9 @@ def api_inventory_active_task():
 def api_inventory_create_task():
     owner, actor = _inventory_identity()
     task = inventory_service.create_task(owner, actor)
-    return jsonify({"success": True, "task": _inventory_public_task(task)})
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task.get("task_id")
+    )
 
 
 @app.route("/api/inventory/tasks/history", methods=["GET"])
@@ -10738,14 +10780,15 @@ def api_inventory_claim_item(task_id, barcode):
     barcode = _inventory_path_value(barcode, "商品条码")
     item = inventory_service.open_count_item(
         owner, task_id, barcode, _inventory_device_id(data), actor,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "item": item})
+    return _inventory_mutation_response("item", item, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/heartbeat", methods=["POST"])
 @_inventory_api
 def api_inventory_heartbeat_item(task_id, barcode):
-    owner, _actor = _inventory_identity()
+    owner, actor = _inventory_identity()
     data = _inventory_json_body()
     task_id = _inventory_path_value(task_id, "任务标识")
     _inventory_owned_task(owner, task_id)
@@ -10753,8 +10796,11 @@ def api_inventory_heartbeat_item(task_id, barcode):
         task_id,
         _inventory_path_value(barcode, "商品条码"),
         _inventory_device_id(data),
+        actor,
+        owner=owner,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "lock": lock})
+    return _inventory_mutation_response("lock", lock, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/count", methods=["POST"])
@@ -10770,8 +10816,9 @@ def api_inventory_count_item(task_id, barcode):
         _inventory_device_id(data),
         actor,
         actual_qty,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "item": item})
+    return _inventory_mutation_response("item", item, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/open", methods=["POST"])
@@ -10785,8 +10832,9 @@ def api_inventory_open_serial_item(task_id, barcode):
         _inventory_path_value(barcode, "商品条码"),
         _inventory_device_id(data),
         actor,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "serial": result})
+    return _inventory_mutation_response("serial", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/refresh", methods=["POST"])
@@ -10801,8 +10849,9 @@ def api_inventory_refresh_serial_item(task_id, barcode):
         _inventory_device_id(data),
         actor,
         force=data.get("force") is True,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "serial": result})
+    return _inventory_mutation_response("serial", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials", methods=["POST"])
@@ -10817,8 +10866,9 @@ def api_inventory_scan_serial(task_id, barcode):
         _inventory_device_id(data),
         actor,
         _inventory_path_value(data.get("serial"), "序列号"),
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "scan": result})
+    return _inventory_mutation_response("scan", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials/<path:serial>", methods=["DELETE"])
@@ -10833,8 +10883,9 @@ def api_inventory_delete_serial(task_id, barcode, serial):
         _inventory_device_id(data),
         actor,
         _inventory_path_value(serial, "序列号"),
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "serial": result})
+    return _inventory_mutation_response("serial", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/finish", methods=["POST"])
@@ -10848,18 +10899,24 @@ def api_inventory_finish_serial_item(task_id, barcode):
         _inventory_path_value(barcode, "商品条码"),
         _inventory_device_id(data),
         actor,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "serial": result})
+    return _inventory_mutation_response("serial", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/complete", methods=["POST"])
 @_inventory_api
 def api_inventory_complete_task(task_id):
     owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
     task = inventory_service.complete_task(
-        owner, _inventory_path_value(task_id, "任务标识"), actor
+        owner, task_id, actor,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "task": _inventory_public_task(task)})
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task_id
+    )
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/unlock", methods=["POST"])
@@ -10868,12 +10925,14 @@ def api_inventory_unlock_item(task_id, barcode):
     if not is_admin_account():
         raise InventoryPermissionDenied("只有管理员可以强制解锁")
     owner, actor = _inventory_identity()
+    data = _inventory_json_body()
     task_id = _inventory_path_value(task_id, "任务标识")
     _inventory_owned_task(owner, task_id)
     result = inventory_store.admin_unlock(
-        task_id, _inventory_path_value(barcode, "商品条码"), actor, True
+        task_id, _inventory_path_value(barcode, "商品条码"), actor, True,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "result": result})
+    return _inventory_mutation_response("result", result, owner, task_id)
 
 
 @app.route("/api/inventory/tasks/<task_id>/export", methods=["GET"])
@@ -10922,8 +10981,9 @@ def api_inventory_discrepancy_note(discrepancy_id):
         actor,
         str(data.get("note") or ""),
         serial=serial,
+        expected_version=_inventory_expected_version(data),
     )
-    return jsonify({"success": True, "note": note})
+    return _inventory_mutation_response("note", note)
 
 
 @app.route("/api/inventory/discrepancies/<int:discrepancy_id>/archive", methods=["POST"])
@@ -10932,8 +10992,12 @@ def api_inventory_archive_discrepancy(discrepancy_id):
     if not is_admin_account():
         raise InventoryPermissionDenied("只有管理员可以归档差异")
     owner, actor = _inventory_identity()
-    result = inventory_store.archive_discrepancy(owner, discrepancy_id, actor, True)
-    return jsonify({"success": True, "discrepancy": result})
+    data = _inventory_json_body()
+    result = inventory_store.archive_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
 
 
 @app.route("/api/inventory/discrepancies/<int:discrepancy_id>/restore", methods=["POST"])
@@ -10942,8 +11006,12 @@ def api_inventory_restore_discrepancy(discrepancy_id):
     if not is_admin_account():
         raise InventoryPermissionDenied("只有管理员可以恢复差异")
     owner, actor = _inventory_identity()
-    result = inventory_store.restore_discrepancy(owner, discrepancy_id, actor, True)
-    return jsonify({"success": True, "discrepancy": result})
+    data = _inventory_json_body()
+    result = inventory_store.restore_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
 
 
 @app.route("/api/inventory/discrepancies/export", methods=["GET"])

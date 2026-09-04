@@ -1,5 +1,6 @@
 """Durable persistence primitives for GYJ inventory stocktake."""
 
+from contextlib import closing
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
 import os
@@ -7,8 +8,11 @@ import sqlite3
 import uuid
 
 
-_CATALOG_KEYS = frozenset(
+_NORMAL_CATALOG_KEYS = frozenset(
     {"barcode", "name", "spec", "model", "category", "unit", "has_serial", "initial_stock"}
+)
+_ANOMALY_CATALOG_KEYS = frozenset(
+    {"barcode", "name", "spec", "model", "category", "unit", "initial_stock", "data_error"}
 )
 
 _SERIAL_DISCREPANCY_KINDS = {
@@ -38,7 +42,9 @@ _DISCREPANCY_SELECT = """
            items.category,
            items.unit,
            items.has_serial,
+           items.data_error,
            tasks.completed_at,
+           tasks.version AS task_version,
            scans.actor AS scan_actor,
            scans.device_id AS scan_device,
            scans.scanned_at,
@@ -64,6 +70,12 @@ class InventoryConflict(RuntimeError):
     def __init__(self, message, *, lock_owner=None):
         super().__init__(message)
         self.lock_owner = lock_owner
+
+
+class InventoryVersionConflict(InventoryConflict):
+    def __init__(self, message, *, current_version):
+        super().__init__(message)
+        self.current_version = int(current_version)
 
 
 class InventoryNotFound(RuntimeError):
@@ -138,7 +150,7 @@ class InventoryStore:
     def initialize(self):
         parent = os.path.dirname(os.path.abspath(self.db_path))
         os.makedirs(parent, exist_ok=True)
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS inventory_tasks (
@@ -163,6 +175,7 @@ class InventoryStore:
                     category TEXT NOT NULL DEFAULT '',
                     unit TEXT NOT NULL DEFAULT '',
                     has_serial INTEGER NOT NULL DEFAULT 0,
+                    data_error TEXT NOT NULL DEFAULT '',
                     initial_stock TEXT NOT NULL DEFAULT '0',
                     book_quantity TEXT,
                     counted_quantity TEXT,
@@ -311,6 +324,11 @@ class InventoryStore:
                 connection.execute(
                     "ALTER TABLE inventory_items ADD COLUMN serial_synced_at TEXT"
                 )
+            if "data_error" not in item_columns:
+                connection.execute(
+                    "ALTER TABLE inventory_items "
+                    "ADD COLUMN data_error TEXT NOT NULL DEFAULT ''"
+                )
             scan_columns = {
                 row[1] for row in connection.execute(
                     "PRAGMA table_info(inventory_serial_scans)"
@@ -353,11 +371,23 @@ class InventoryStore:
             "expected_current_qty": item["expected_current_quantity"],
             "diff_qty": item["difference"],
         })
+        item["has_serial"] = (
+            None if item.get("data_error") else bool(item["has_serial"])
+        )
         return item
 
     def create_task(self, owner, actor, catalog):
         for product in catalog:
-            if not isinstance(product, dict) or set(product) != _CATALOG_KEYS:
+            if (
+                not isinstance(product, dict)
+                or set(product) not in {
+                    _NORMAL_CATALOG_KEYS, _ANOMALY_CATALOG_KEYS,
+                }
+                or (
+                    set(product) == _ANOMALY_CATALOG_KEYS
+                    and not str(product.get("data_error") or "").strip()
+                )
+            ):
                 raise ValueError("catalog item must contain exactly the allowed keys")
         task_id = uuid.uuid4().hex
         timestamp = self._now_text()
@@ -382,8 +412,9 @@ class InventoryStore:
                 connection.execute(
                     """INSERT INTO inventory_items
                        (task_id, barcode, name, spec, model, category, unit,
-                        has_serial, initial_stock, book_quantity, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        has_serial, data_error, initial_stock, book_quantity,
+                        status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         task_id,
                         product["barcode"],
@@ -392,9 +423,11 @@ class InventoryStore:
                         product["model"],
                         product["category"],
                         product["unit"],
-                        1 if product["has_serial"] else 0,
+                        1 if product.get("has_serial") else 0,
+                        str(product.get("data_error") or ""),
                         normalize_quantity(product["initial_stock"]),
                         normalize_quantity(product["initial_stock"]),
+                        "data_error" if product.get("data_error") else "pending",
                         timestamp,
                     ),
                 )
@@ -402,7 +435,12 @@ class InventoryStore:
                 """INSERT INTO inventory_audit_events
                    (task_id, event_type, actor, details, created_at)
                    VALUES (?, 'task_created', ?, ?, ?)""",
-                (task_id, actor, "catalog_loaded", timestamp),
+                (
+                    task_id, actor,
+                    "catalog_loaded;data_errors="
+                    + str(sum(bool(row.get("data_error")) for row in catalog)),
+                    timestamp,
+                ),
             )
             connection.commit()
             return self._row_dict(connection.execute(
@@ -415,7 +453,7 @@ class InventoryStore:
             connection.close()
 
     def get_active_task(self, owner):
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             row = connection.execute(
                 """SELECT * FROM inventory_tasks
                    WHERE owner = ? AND phase IN ('loading', 'counting', 'serial_check', 'sync_error')
@@ -459,7 +497,7 @@ class InventoryStore:
         elif not include_zero:
             clauses.append("initial_stock <> '0'")
         sql = "SELECT * FROM inventory_items WHERE " + " AND ".join(clauses) + " ORDER BY barcode"
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             return [self._item_dict(row) for row in connection.execute(sql, params)]
 
     @staticmethod
@@ -488,6 +526,32 @@ class InventoryStore:
             (task_id,),
         )
 
+    @staticmethod
+    def _task_version(connection, task_id):
+        row = connection.execute(
+            "SELECT version FROM inventory_tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+        if row is None:
+            raise InventoryNotFound("盘点任务不存在")
+        return int(row["version"])
+
+    @classmethod
+    def _assert_expected_version(cls, connection, task_id, expected_version):
+        current_version = cls._task_version(connection, task_id)
+        if expected_version is None:
+            return current_version
+        if int(expected_version) != current_version:
+            raise InventoryVersionConflict(
+                "盘点任务已被其他设备更新，请刷新后重试",
+                current_version=current_version,
+            )
+        return current_version
+
+    def get_task_version(self, owner, task_id):
+        with closing(self.connect()) as connection:
+            self._task_for_owner(connection, owner, task_id)
+            return self._task_version(connection, task_id)
+
     def _expire_locks(self, connection, task_id, now_text):
         expired = connection.execute(
             "SELECT barcode, device_id FROM inventory_item_locks "
@@ -507,20 +571,25 @@ class InventoryStore:
             )
         return len(expired)
 
-    def claim_item(self, task_id, barcode, device_id, actor, phase):
+    def claim_item(
+        self, task_id, barcode, device_id, actor, phase, *, expected_version=None
+    ):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._assert_expected_version(connection, task_id, expected_version)
             now_dt = self.now()
             now = self._timestamp_text(now_dt)
             expires = self._timestamp_text(now_dt + timedelta(seconds=120))
             self._expire_locks(connection, task_id, now)
             item = connection.execute(
-                "SELECT 1 FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                "SELECT status FROM inventory_items WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
             ).fetchone()
             if item is None:
                 raise InventoryNotFound("商品不存在")
+            if item["status"] == "data_error":
+                raise InventoryConflict("商品资料异常，不可盘点")
             existing = connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
@@ -553,20 +622,28 @@ class InventoryStore:
                 )
                 self._audit(connection, task_id, "lock_heartbeat", actor, barcode, device_id, "reclaim", now)
             connection.commit()
-            return self._row_dict(connection.execute(
+            result = self._row_dict(connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
             ).fetchone())
+            result["task_version"] = self._task_version(connection, task_id)
+            return result
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
 
-    def heartbeat_lock(self, task_id, barcode, device_id):
+    def heartbeat_lock(
+        self, task_id, barcode, device_id, actor=None, *, owner=None,
+        expected_version=None,
+    ):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if owner is not None:
+                self._task_for_owner(connection, owner, task_id)
+            self._assert_expected_version(connection, task_id, expected_version)
             now_dt = self.now()
             now = self._timestamp_text(now_dt)
             expires = self._timestamp_text(now_dt + timedelta(seconds=120))
@@ -576,7 +653,10 @@ class InventoryStore:
                 (task_id, barcode),
             ).fetchone()
             if lock is None or lock["device_id"] != device_id:
-                self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "heartbeat_owner_mismatch", now)
+                self._audit(
+                    connection, task_id, "lock_conflict", actor or "system",
+                    barcode, device_id, "heartbeat_owner_mismatch", now,
+                )
                 connection.commit()
                 raise InventoryConflict(
                     "设备未持有商品锁",
@@ -586,28 +666,39 @@ class InventoryStore:
                 "UPDATE inventory_item_locks SET heartbeat_at = ?, expires_at = ? WHERE task_id = ? AND barcode = ?",
                 (now, expires, task_id, barcode),
             )
-            self._audit(connection, task_id, "lock_heartbeat", lock["actor"], barcode, device_id, "extension", now)
+            self._audit(
+                connection, task_id, "lock_heartbeat", actor or lock["actor"],
+                barcode, device_id, "extension", now,
+            )
             connection.commit()
-            return self._row_dict(connection.execute(
+            result = self._row_dict(connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
             ).fetchone())
+            result["task_version"] = self._task_version(connection, task_id)
+            return result
         except Exception:
             connection.rollback()
             raise
         finally:
             connection.close()
 
-    def assert_item_lock(self, task_id, barcode, device_id, phase):
+    def assert_item_lock(
+        self, task_id, barcode, device_id, phase, actor=None, *, expected_version=None
+    ):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._assert_expected_version(connection, task_id, expected_version)
             now = self._now_text()
             self._expire_locks(connection, task_id, now)
             lock = connection.execute(
                 "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
             ).fetchone()
             if lock is None or lock["device_id"] != device_id or lock["phase"] != phase:
-                self._audit(connection, task_id, "lock_conflict", device_id, barcode, device_id, "assertion_failed", now)
+                self._audit(
+                    connection, task_id, "lock_conflict", actor or "system",
+                    barcode, device_id, "assertion_failed", now,
+                )
                 connection.commit()
                 raise InventoryConflict(
                     "设备未持有当前阶段的商品锁",
@@ -618,6 +709,7 @@ class InventoryStore:
                     ),
                 )
             connection.commit()
+            return self._task_version(connection, task_id)
         except Exception:
             connection.rollback()
             raise
@@ -637,27 +729,36 @@ class InventoryStore:
         finally:
             connection.close()
 
-    def admin_unlock(self, task_id, barcode, actor, is_admin):
+    def admin_unlock(
+        self, task_id, barcode, actor, is_admin, *, expected_version=None
+    ):
         if is_admin is not True:
             raise InventoryPermissionDenied("只有管理员可以强制解锁")
         now = self._now_text()
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            self._assert_expected_version(connection, task_id, expected_version)
             lock = connection.execute(
                 "SELECT device_id FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
             ).fetchone()
             if lock is None:
                 self._audit(connection, task_id, "lock_admin_unlocked", actor, barcode, details="no_lock", created_at=now)
                 connection.commit()
-                return {"unlocked": False, "task_id": task_id, "barcode": barcode}
+                return {
+                    "unlocked": False, "task_id": task_id, "barcode": barcode,
+                    "task_version": self._task_version(connection, task_id),
+                }
             connection.execute(
                 "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?", (task_id, barcode)
             )
             self._bump_version(connection, task_id)
             self._audit(connection, task_id, "lock_admin_unlocked", actor, barcode, lock["device_id"], "manual_unlock", now)
             connection.commit()
-            return {"unlocked": True, "task_id": task_id, "barcode": barcode}
+            return {
+                "unlocked": True, "task_id": task_id, "barcode": barcode,
+                "task_version": self._task_version(connection, task_id),
+            }
         except Exception:
             connection.rollback()
             raise
@@ -672,7 +773,8 @@ class InventoryStore:
         elif phase == "counting":
             remaining = connection.execute(
                 "SELECT COUNT(*) FROM inventory_items "
-                "WHERE task_id = ? AND completed_counted_quantity IS NULL",
+                "WHERE task_id = ? AND completed_counted_quantity IS NULL "
+                "AND status <> 'data_error'",
                 (task["task_id"],),
             ).fetchone()[0]
             serial_pending = connection.execute(
@@ -713,7 +815,8 @@ class InventoryStore:
             connection.close()
 
     def set_open_book_quantity(
-        self, owner, task_id, barcode, device_id, actor, book_quantity
+        self, owner, task_id, barcode, device_id, actor, book_quantity, *,
+        expected_version=None,
     ):
         book_quantity = normalize_quantity(book_quantity)
         connection = self.connect()
@@ -721,6 +824,7 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             timestamp = self._now_text()
             task = self._task_for_owner(connection, owner, task_id)
+            self._assert_expected_version(connection, task_id, expected_version)
             if task["phase"] != "counting":
                 raise InventoryConflict("当前任务不在数量盘点阶段")
             self._expire_locks(connection, task_id, timestamp)
@@ -748,6 +852,8 @@ class InventoryStore:
             ).fetchone()
             if item is None:
                 raise InventoryNotFound("商品不存在")
+            if item["status"] == "data_error":
+                raise InventoryConflict("商品资料异常，不可盘点")
             if item["completed_counted_quantity"] is not None:
                 raise InventoryConflict("商品数量盘点已完成")
             connection.execute(
@@ -761,10 +867,12 @@ class InventoryStore:
                 details=book_quantity, created_at=timestamp,
             )
             connection.commit()
-            return self._item_dict(connection.execute(
+            result = self._item_dict(connection.execute(
                 "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
             ).fetchone())
+            result["task_version"] = self._task_version(connection, task_id)
+            return result
         except Exception:
             connection.rollback()
             raise
@@ -774,6 +882,7 @@ class InventoryStore:
     def record_count(
         self, owner, task_id, barcode, device_id, actor, *,
         completed_book_qty, completed_actual_qty, diff_qty, state,
+        expected_version=None,
     ):
         completed_book_qty = normalize_quantity(completed_book_qty)
         completed_actual_qty = normalize_quantity(completed_actual_qty)
@@ -787,6 +896,7 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             timestamp = self._now_text()
             task = self._task_for_owner(connection, owner, task_id)
+            self._assert_expected_version(connection, task_id, expected_version)
             if task["phase"] != "counting":
                 raise InventoryConflict("当前任务不在数量盘点阶段")
             self._expire_locks(connection, task_id, timestamp)
@@ -814,6 +924,8 @@ class InventoryStore:
             ).fetchone()
             if item is None:
                 raise InventoryNotFound("商品不存在")
+            if item["status"] == "data_error":
+                raise InventoryConflict("商品资料异常，不可盘点")
             expected_state = (
                 "matched" if expected_difference == "0"
                 else ("serial_pending" if item["has_serial"] else "variance")
@@ -847,10 +959,12 @@ class InventoryStore:
             self._advance_count_phase(connection, task, timestamp)
             self._bump_version(connection, task_id)
             connection.commit()
-            return self._item_dict(connection.execute(
+            result = self._item_dict(connection.execute(
                 "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
                 (task_id, barcode),
             ).fetchone())
+            result["task_version"] = self._task_version(connection, task_id)
+            return result
         except Exception:
             connection.rollback()
             raise
@@ -962,10 +1076,12 @@ class InventoryStore:
             connection.close()
 
     def _serial_write_context(
-        self, connection, owner, task_id, barcode, device_id, actor, operation
+        self, connection, owner, task_id, barcode, device_id, actor, operation,
+        expected_version=None,
     ):
         timestamp = self._now_text()
         task = self._task_for_owner(connection, owner, task_id)
+        self._assert_expected_version(connection, task_id, expected_version)
         if task["phase"] != "serial_check":
             raise InventoryConflict("当前任务不在序列号核对阶段")
         item = connection.execute(
@@ -1039,7 +1155,8 @@ class InventoryStore:
             connection.close()
 
     def replace_expected_serials(
-        self, owner, task_id, barcode, device_id, actor, rows, *, synced_at=None
+        self, owner, task_id, barcode, device_id, actor, rows, *, synced_at=None,
+        expected_version=None,
     ):
         if not isinstance(rows, list):
             raise ValueError("序列号库存结果格式不正确")
@@ -1068,7 +1185,7 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             self._serial_write_context(
                 connection, owner, task_id, barcode, device_id, actor,
-                "serial_refresh",
+                "serial_refresh", expected_version,
             )
             connection.execute(
                 "UPDATE inventory_serial_expected SET sync_status = 'inactive' "
@@ -1126,7 +1243,7 @@ class InventoryStore:
 
     def add_serial_scan(
         self, owner, task_id, barcode, device_id, actor, serial,
-        classification, lookup=None,
+        classification, lookup=None, *, expected_version=None,
     ):
         serial = str(serial or "").strip()
         if not serial:
@@ -1139,7 +1256,7 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             _, _, timestamp = self._serial_write_context(
                 connection, owner, task_id, barcode, device_id, actor,
-                "serial_scan",
+                "serial_scan", expected_version,
             )
             existing = connection.execute(
                 """SELECT * FROM inventory_serial_scans
@@ -1155,6 +1272,9 @@ class InventoryStore:
                 connection.commit()
                 result = self._serial_scan_dict(existing)
                 result["classification"] = "duplicate"
+                result["task_version"] = self._task_version(
+                    connection, task_id
+                )
                 return result
 
             expected = connection.execute(
@@ -1202,7 +1322,9 @@ class InventoryStore:
                 "SELECT * FROM inventory_serial_scans WHERE scan_id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
-            return self._serial_scan_dict(row)
+            result = self._serial_scan_dict(row)
+            result["task_version"] = self._task_version(connection, task_id)
+            return result
         except Exception:
             connection.rollback()
             raise
@@ -1210,7 +1332,8 @@ class InventoryStore:
             connection.close()
 
     def remove_serial_scan(
-        self, owner, task_id, barcode, device_id, actor, serial
+        self, owner, task_id, barcode, device_id, actor, serial, *,
+        expected_version=None,
     ):
         serial = str(serial or "").strip()
         connection = self.connect()
@@ -1218,7 +1341,7 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             _, _, timestamp = self._serial_write_context(
                 connection, owner, task_id, barcode, device_id, actor,
-                "serial_delete",
+                "serial_delete", expected_version,
             )
             scan = connection.execute(
                 """SELECT * FROM inventory_serial_scans
@@ -1285,6 +1408,7 @@ class InventoryStore:
                 "task_id": task_id,
                 "barcode": barcode,
                 "phase": task["phase"],
+                "version": task["version"],
                 "item": self._item_dict(item),
                 "expected": expected_rows,
                 "matched": [
@@ -1317,14 +1441,15 @@ class InventoryStore:
             connection.close()
 
     def complete_serial_item(
-        self, owner, task_id, barcode, device_id, actor
+        self, owner, task_id, barcode, device_id, actor, *,
+        expected_version=None,
     ):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             _, _, timestamp = self._serial_write_context(
                 connection, owner, task_id, barcode, device_id, actor,
-                "serial_finish",
+                "serial_finish", expected_version,
             )
             connection.execute(
                 """UPDATE inventory_serial_scans AS scans
@@ -1398,7 +1523,9 @@ class InventoryStore:
     @classmethod
     def _discrepancy_dict(cls, connection, row):
         result = dict(row)
-        result["has_serial"] = bool(result["has_serial"])
+        result["has_serial"] = (
+            None if result.get("data_error") else bool(result["has_serial"])
+        )
         result["shipped"] = bool(result.pop("is_checked_out", 0))
         notes = [dict(note) for note in connection.execute(
             """SELECT note_id AS id, task_id, barcode, serial, note, actor,
@@ -1423,11 +1550,12 @@ class InventoryStore:
             raise InventoryNotFound("差异记录不存在")
         return cls._discrepancy_dict(connection, row)
 
-    def complete_task(self, owner, task_id, actor):
+    def complete_task(self, owner, task_id, actor, *, expected_version=None):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             task = self._task_for_owner(connection, owner, task_id)
+            self._assert_expected_version(connection, task_id, expected_version)
             if task["phase"] == "completed":
                 connection.commit()
                 result = self._row_dict(task)
@@ -1438,7 +1566,8 @@ class InventoryStore:
 
             unfinished = connection.execute(
                 """SELECT COUNT(*) FROM inventory_items
-                   WHERE task_id = ? AND completed_counted_quantity IS NULL""",
+                   WHERE task_id = ? AND completed_counted_quantity IS NULL
+                     AND status <> 'data_error'""",
                 (task_id,),
             ).fetchone()[0]
             if unfinished:
@@ -1459,6 +1588,8 @@ class InventoryStore:
                 (task_id,),
             ).fetchall()
             for item in items:
+                if item["status"] == "data_error":
+                    continue
                 if item["difference"] != "0":
                     connection.execute(
                         """INSERT INTO inventory_discrepancies
@@ -1534,7 +1665,7 @@ class InventoryStore:
         offset = int(offset)
         if not 1 <= limit <= 50 or offset < 0:
             raise ValueError("历史任务分页参数不正确")
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             total = connection.execute(
                 """SELECT COUNT(*) FROM inventory_tasks
                    WHERE owner = ? AND phase = 'completed'""",
@@ -1639,14 +1770,15 @@ class InventoryStore:
             pattern = f"%{query}%"
             params.extend((pattern, pattern, pattern))
         sql += " ORDER BY discrepancies.created_at DESC, discrepancies.discrepancy_id DESC"
-        with self.connect() as connection:
+        with closing(self.connect()) as connection:
             return [
                 self._discrepancy_dict(connection, row)
                 for row in connection.execute(sql, params)
             ]
 
     def add_discrepancy_note(
-        self, owner, discrepancy_id, actor, note, serial=None
+        self, owner, discrepancy_id, actor, note, serial=None, *,
+        expected_version=None,
     ):
         note = str(note or "").strip()
         if not note:
@@ -1661,6 +1793,9 @@ class InventoryStore:
             connection.execute("BEGIN IMMEDIATE")
             discrepancy = self._discrepancy_for_owner(
                 connection, owner, discrepancy_id
+            )
+            self._assert_expected_version(
+                connection, discrepancy["task_id"], expected_version
             )
             if serial is not None:
                 known = connection.execute(
@@ -1691,12 +1826,16 @@ class InventoryStore:
                 created_at=timestamp,
             )
             connection.commit()
-            return self._row_dict(connection.execute(
+            result = self._row_dict(connection.execute(
                 """SELECT note_id AS id, task_id, barcode, serial, note,
                           actor, created_at
                    FROM inventory_notes WHERE note_id = ?""",
                 (cursor.lastrowid,),
             ).fetchone())
+            result["task_version"] = self._task_version(
+                connection, discrepancy["task_id"]
+            )
+            return result
         except Exception:
             connection.rollback()
             raise
@@ -1704,7 +1843,7 @@ class InventoryStore:
             connection.close()
 
     def archive_discrepancy(
-        self, owner, discrepancy_id, actor, is_admin
+        self, owner, discrepancy_id, actor, is_admin, *, expected_version=None
     ):
         if not is_admin:
             raise InventoryPermissionDenied("只有管理员可以归档差异")
@@ -1714,8 +1853,14 @@ class InventoryStore:
             discrepancy = self._discrepancy_for_owner(
                 connection, owner, discrepancy_id
             )
+            self._assert_expected_version(
+                connection, discrepancy["task_id"], expected_version
+            )
             if discrepancy["state"] == "archived":
                 connection.commit()
+                discrepancy["task_version"] = self._task_version(
+                    connection, discrepancy["task_id"]
+                )
                 return discrepancy
             timestamp = self._now_text()
             connection.execute(
@@ -1731,9 +1876,13 @@ class InventoryStore:
                 details=f"discrepancy={discrepancy_id}", created_at=timestamp,
             )
             connection.commit()
-            return self._discrepancy_for_owner(
+            result = self._discrepancy_for_owner(
                 connection, owner, discrepancy_id
             )
+            result["task_version"] = self._task_version(
+                connection, discrepancy["task_id"]
+            )
+            return result
         except Exception:
             connection.rollback()
             raise
@@ -1741,7 +1890,7 @@ class InventoryStore:
             connection.close()
 
     def restore_discrepancy(
-        self, owner, discrepancy_id, actor, is_admin
+        self, owner, discrepancy_id, actor, is_admin, *, expected_version=None
     ):
         if not is_admin:
             raise InventoryPermissionDenied("只有管理员可以恢复差异")
@@ -1751,8 +1900,14 @@ class InventoryStore:
             discrepancy = self._discrepancy_for_owner(
                 connection, owner, discrepancy_id
             )
+            self._assert_expected_version(
+                connection, discrepancy["task_id"], expected_version
+            )
             if discrepancy["state"] == "open":
                 connection.commit()
+                discrepancy["task_version"] = self._task_version(
+                    connection, discrepancy["task_id"]
+                )
                 return discrepancy
             timestamp = self._now_text()
             connection.execute(
@@ -1768,9 +1923,13 @@ class InventoryStore:
                 details=f"discrepancy={discrepancy_id}", created_at=timestamp,
             )
             connection.commit()
-            return self._discrepancy_for_owner(
+            result = self._discrepancy_for_owner(
                 connection, owner, discrepancy_id
             )
+            result["task_version"] = self._task_version(
+                connection, discrepancy["task_id"]
+            )
+            return result
         except Exception:
             connection.rollback()
             raise

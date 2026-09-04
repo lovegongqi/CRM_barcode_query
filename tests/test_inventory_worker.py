@@ -14,7 +14,7 @@ os.environ["CRM_DESKTOP_APP"] = "0"
 
 import app as app_module
 from gyj_inventory import GYJInventoryReadError
-from inventory_service import InventoryService
+from inventory_service import InventoryService, InventoryServiceError
 from inventory_store import InventoryStore
 
 
@@ -65,7 +65,57 @@ class _SerialLookupPage:
         }
 
 
+class _MismatchedStockPage:
+    def goto(self, _url, **_kwargs):
+        pass
+
+    def fill_field(self, _label, _value):
+        pass
+
+    def click_query(self):
+        pass
+
+    def read_table_page(self, _report):
+        return {
+            "headers": [
+                "条码", "名称", "规格", "型号", "类别", "单位", "成本价", "库存", "库存金额",
+            ],
+            "rows": [["B2", "错误商品", "", "", "配件", "个", "999", "7", "6993"]],
+            "total": 1,
+            "has_next": False,
+        }
+
+
 class InventoryWorkerTests(unittest.TestCase):
+    def test_mismatched_stock_barcode_fails_through_session_worker_and_service(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            store = InventoryStore(os.path.join(tempdir, "inventory.sqlite3"))
+            task = store.create_task("admin", "管理员", [{
+                "barcode": "A1", "name": "正确商品", "spec": "", "model": "",
+                "category": "配件", "unit": "个", "has_serial": False,
+                "initial_stock": "2",
+            }])
+            task = store.advance_count_phase_if_ready("admin", task["task_id"])
+            session = object.__new__(app_module.GYJSession)
+            session.lock = threading.RLock()
+            session.page = object()
+            session.check_login_status = mock.Mock(return_value=(True, "GYJ 已登录"))
+            worker = object.__new__(app_module.GYJWorker)
+            worker._call = lambda method, *args: getattr(session, method)(*args)
+            service = InventoryService(store, lambda _owner: worker)
+
+            with mock.patch.object(
+                app_module, "GYJPlaywrightPage", return_value=_MismatchedStockPage()
+            ), self.assertRaisesRegex(InventoryServiceError, "查询条件"):
+                service.open_count_item(
+                    "admin", task["task_id"], "A1", "device-a", "甲",
+                    expected_version=task["version"],
+                )
+
+            item = store.get_task_snapshot("admin", task["task_id"])["items"][0]
+            self.assertIsNone(item["completed_actual_qty"])
+            self.assertEqual(item["open_book_qty"], "2")
+
     def test_shipped_lookup_flows_through_worker_session_to_serial_service(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = InventoryStore(
