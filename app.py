@@ -10531,6 +10531,21 @@ def _inventory_expected_version(data):
     return value
 
 
+def _inventory_entry_version(data):
+    if "entry_version" not in data:
+        raise ValueError("entry_version 不能为空")
+    raw = data.get("entry_version")
+    if isinstance(raw, bool):
+        raise ValueError("entry_version 格式不正确")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("entry_version 格式不正确")
+    if value < 1 or str(raw).strip() != str(value):
+        raise ValueError("entry_version 格式不正确")
+    return value
+
+
 def _inventory_mutation_response(key, value, owner=None, task_id=None):
     public_value = dict(value) if isinstance(value, dict) else value
     version = None
@@ -10808,50 +10823,79 @@ def api_inventory_task(task_id):
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/claim", methods=["POST"])
 @_inventory_api
 def api_inventory_claim_item(task_id, barcode):
-    owner, actor = _inventory_identity()
-    data = _inventory_json_body()
-    task_id = _inventory_path_value(task_id, "任务标识")
-    barcode = _inventory_path_value(barcode, "商品条码")
-    item = inventory_service.open_count_item(
-        owner, task_id, barcode, _inventory_device_id(data), actor,
-        expected_version=_inventory_expected_version(data),
-    )
-    return _inventory_mutation_response("item", item, owner, task_id)
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/heartbeat", methods=["POST"])
 @_inventory_api
 def api_inventory_heartbeat_item(task_id, barcode):
-    owner, actor = _inventory_identity()
-    data = _inventory_json_body()
-    task_id = _inventory_path_value(task_id, "任务标识")
-    _inventory_owned_task(owner, task_id)
-    lock = inventory_store.heartbeat_lock(
-        task_id,
-        _inventory_path_value(barcode, "商品条码"),
-        _inventory_device_id(data),
-        actor,
-        owner=owner,
-        expected_version=_inventory_expected_version(data),
-    )
-    return _inventory_mutation_response("lock", lock, owner, task_id)
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
 
 
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/count", methods=["POST"])
 @_inventory_api
 def api_inventory_count_item(task_id, barcode):
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/count-entries",
+    methods=["GET", "POST"],
+)
+@_inventory_api
+def api_inventory_count_entries(task_id, barcode):
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if request.method == "GET":
+        item = inventory_service.open_count_item(
+            owner, task_id, barcode, actor
+        )
+    else:
+        data = _inventory_json_body()
+        item = inventory_service.add_count_entry(
+            owner, task_id, barcode, _inventory_device_id(data), actor,
+            normalize_quantity(data.get("quantity")),
+        )
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/count-entries/<int:entry_id>",
+    methods=["POST", "DELETE"],
+)
+@_inventory_api
+def api_inventory_count_entry(task_id, barcode, entry_id):
     owner, actor = _inventory_identity()
     data = _inventory_json_body()
-    actual_qty = normalize_quantity(data.get("actual_qty"))
-    item = inventory_service.submit_count(
-        owner,
-        _inventory_path_value(task_id, "任务标识"),
-        _inventory_path_value(barcode, "商品条码"),
-        _inventory_device_id(data),
-        actor,
-        actual_qty,
-        expected_version=_inventory_expected_version(data),
-    )
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if entry_id < 1:
+        raise ValueError("分次盘点记录标识格式不正确")
+    entry_version = _inventory_entry_version(data)
+    device_id = _inventory_device_id(data)
+    if request.method == "POST":
+        item = inventory_service.update_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            device_id, actor, normalize_quantity(data.get("quantity")),
+        )
+    else:
+        item = inventory_service.delete_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            device_id, actor,
+        )
     return _inventory_mutation_response("item", item, owner, task_id)
 
 

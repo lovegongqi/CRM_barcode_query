@@ -94,6 +94,15 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.open_count_item.return_value = {"barcode": "A/B", "state": "pending"}
         self.store.heartbeat_lock.return_value = {"barcode": "A/B", "device_id": "device-a"}
         self.service.submit_count.return_value = {"barcode": "A/B", "state": "matched"}
+        self.service.add_count_entry.return_value = {
+            "barcode": "A/B", "count_total": "12", "task_version": 4,
+        }
+        self.service.update_count_entry.return_value = {
+            "barcode": "A/B", "count_total": "13", "task_version": 5,
+        }
+        self.service.delete_count_entry.return_value = {
+            "barcode": "A/B", "count_total": None, "task_version": 6,
+        }
         self.service.open_serial_item.return_value = {"barcode": "A/B", "counts": {}}
         self.service.refresh_serial_item.return_value = {"barcode": "A/B", "counts": {}}
         self.service.scan_serial.return_value = {"serial": "SN/1", "classification": "matched"}
@@ -251,9 +260,6 @@ class InventoryRouteTest(unittest.TestCase):
             ("post", "/api/inventory/tasks", {}, "task"),
             ("get", "/api/inventory/tasks/history", None, "tasks"),
             ("get", "/api/inventory/tasks/task-1", None, "task"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/claim", {"device_id": "device-a", "expected_version": 3}, "item"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/heartbeat", {"device_id": "device-a", "expected_version": 3}, "lock"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/count", {"device_id": "device-a", "actual_qty": "2", "expected_version": 3}, "item"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/open", {"device_id": "device-a", "expected_version": 3}, "serial"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/refresh", {"device_id": "device-a", "expected_version": 3}, "serial"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1", "expected_version": 3}, "scan"),
@@ -278,18 +284,6 @@ class InventoryRouteTest(unittest.TestCase):
                 self.assertEqual(set(response.get_json()), expected_keys)
                 self.assertTrue(response.get_json()["success"])
 
-        self.service.open_count_item.assert_called_once_with(
-            "admin", "task-1", "A/B", "device-a", "admin",
-            expected_version=3,
-        )
-        self.store.heartbeat_lock.assert_called_once_with(
-            "task-1", "A/B", "device-a", "admin",
-            owner="admin", expected_version=3,
-        )
-        self.service.submit_count.assert_called_once_with(
-            "admin", "task-1", "A/B", "device-a", "admin", "2",
-            expected_version=3,
-        )
         self.service.open_serial_item.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin",
             expected_version=3,
@@ -327,50 +321,82 @@ class InventoryRouteTest(unittest.TestCase):
             "admin", 1, "admin", True, expected_version=3,
         )
 
-    def test_count_route_requires_forwards_and_returns_task_version(self):
+    def test_partial_count_entry_routes(self):
         client = self.login_account("counter")
-        missing = client.post(
-            "/api/inventory/tasks/task-1/items/A/count",
-            json={"device_id": "device-a", "actual_qty": "2"},
-        )
-        self.assertEqual(missing.status_code, 400)
-        self.assertIn("expected_version", missing.get_json()["error"])
+        self.service.open_count_item.return_value = {
+            "barcode": "A/B", "count_entries": [], "count_total": None,
+            "task_version": 3,
+        }
 
-        response = client.post(
-            "/api/inventory/tasks/task-1/items/A/count",
+        opened = client.get(
+            "/api/inventory/tasks/task-1/items/A%2FB/count-entries"
+        )
+        added = client.post(
+            "/api/inventory/tasks/task-1/items/A%2FB/count-entries",
+            json={"device_id": "device-a", "quantity": "12"},
+        )
+        updated = client.post(
+            "/api/inventory/tasks/task-1/items/A%2FB/count-entries/7",
             json={
-                "device_id": "device-a", "actual_qty": "2",
-                "expected_version": 3,
+                "device_id": "device-b", "quantity": "13",
+                "entry_version": 1,
             },
         )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["version"], 3)
-        self.service.submit_count.assert_called_once_with(
-            "counter-id", "task-1", "A", "device-a", "counter", "2",
-            expected_version=3,
+        deleted = client.delete(
+            "/api/inventory/tasks/task-1/items/A%2FB/count-entries/7",
+            json={"device_id": "device-a", "entry_version": 2},
         )
 
-    def test_heartbeat_uses_session_actor_and_keeps_device_only_as_device(self):
-        response = self.login_account("counter").post(
-            "/api/inventory/tasks/task-1/items/A/heartbeat",
-            json={"device_id": "spoofed-operator", "expected_version": 3},
+        self.assertEqual(opened.status_code, 200)
+        self.assertEqual(opened.get_json()["item"]["barcode"], "A/B")
+        self.assertEqual(added.get_json()["version"], 4)
+        self.assertEqual(updated.get_json()["version"], 5)
+        self.assertEqual(deleted.get_json()["version"], 6)
+        self.service.open_count_item.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "counter"
         )
-        self.assertEqual(response.status_code, 200)
-        self.store.heartbeat_lock.assert_called_once_with(
-            "task-1", "A", "spoofed-operator", "counter",
-            owner="counter-id", expected_version=3,
+        self.service.add_count_entry.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-a", "counter", "12"
         )
+        self.service.update_count_entry.assert_called_once_with(
+            "counter-id", "task-1", "A/B", 7, 1,
+            "device-b", "counter", "13",
+        )
+        self.service.delete_count_entry.assert_called_once_with(
+            "counter-id", "task-1", "A/B", 7, 2,
+            "device-a", "counter",
+        )
+
+        for path in (
+            "/api/inventory/tasks/task-1/items/A%2FB/claim",
+            "/api/inventory/tasks/task-1/items/A%2FB/heartbeat",
+            "/api/inventory/tasks/task-1/items/A%2FB/count",
+        ):
+            response = client.post(path, json={})
+            self.assertEqual(response.status_code, 409)
+            self.assertTrue(response.get_json()["refresh_required"])
+
+    def test_retired_quantity_lock_routes_request_page_refresh(self):
+        client = self.login_account("counter")
+        for suffix in ("claim", "heartbeat", "count"):
+            response = client.post(
+                f"/api/inventory/tasks/task-1/items/A/{suffix}", json={}
+            )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.get_json()["refresh_required"], True)
+        self.service.submit_count.assert_not_called()
+        self.store.heartbeat_lock.assert_not_called()
 
     def test_version_conflict_returns_current_version_without_changing_plain_conflicts(self):
         client = self.login_account("counter")
-        self.service.submit_count.side_effect = InventoryVersionConflict(
+        self.service.update_count_entry.side_effect = InventoryVersionConflict(
             "盘点任务已被其他设备更新", current_version=9
         )
         stale = client.post(
-            "/api/inventory/tasks/task-1/items/A/count",
+            "/api/inventory/tasks/task-1/items/A/count-entries/7",
             json={
-                "device_id": "device-a", "actual_qty": "2",
-                "expected_version": 3,
+                "device_id": "device-a", "quantity": "2",
+                "entry_version": 1,
             },
         )
         self.assertEqual(stale.status_code, 409)
@@ -380,12 +406,12 @@ class InventoryRouteTest(unittest.TestCase):
             "current_version": 9,
         })
 
-        self.service.submit_count.side_effect = InventoryConflict("当前阶段不允许此操作")
+        self.service.update_count_entry.side_effect = InventoryConflict("当前阶段不允许此操作")
         ordinary = client.post(
-            "/api/inventory/tasks/task-1/items/A/count",
+            "/api/inventory/tasks/task-1/items/A/count-entries/7",
             json={
-                "device_id": "device-a", "actual_qty": "2",
-                "expected_version": 9,
+                "device_id": "device-a", "quantity": "2",
+                "entry_version": 1,
             },
         )
         self.assertEqual(ordinary.status_code, 409)
@@ -395,9 +421,9 @@ class InventoryRouteTest(unittest.TestCase):
         client = self.login_account("admin", "admin-pass")
         cases = [
             (
-                "post", "/api/inventory/tasks/task-1/items/A/count",
-                {"device_id": "device-b", "actual_qty": "2"},
-                self.service.submit_count, "item",
+                "post", "/api/inventory/tasks/task-1/items/A/count-entries/7",
+                {"device_id": "device-b", "quantity": "2", "entry_version": 1},
+                self.service.update_count_entry, "item",
                 {"barcode": "A", "state": "matched", "task_version": 10},
             ),
             (
@@ -529,63 +555,23 @@ class InventoryRouteTest(unittest.TestCase):
             "商品已被其他设备锁定", lock_owner="\x00乙\n操作员\t"
         )
 
-        self.service.open_count_item.side_effect = owned
-        claim = client.post(
-            "/api/inventory/tasks/task-1/items/A/claim",
+        self.service.open_serial_item.side_effect = owned
+        serial = client.post(
+            "/api/inventory/tasks/task-1/items/A/serial/open",
             json={"device_id": "device-a", "expected_version": 3},
         )
-        self.assertEqual(claim.status_code, 409)
-        self.assertEqual(claim.get_json()["lock_owner"], "乙操作员")
+        self.assertEqual(serial.status_code, 409)
+        self.assertEqual(serial.get_json()["lock_owner"], "乙操作员")
 
-        self.store.heartbeat_lock.side_effect = owned
-        heartbeat = client.post(
-            "/api/inventory/tasks/task-1/items/A/heartbeat",
+        self.service.open_serial_item.side_effect = InventoryConflict(
+            "当前阶段不允许此操作"
+        )
+        ordinary = client.post(
+            "/api/inventory/tasks/task-1/items/A/serial/open",
             json={"device_id": "device-a", "expected_version": 3},
         )
-        self.assertEqual(heartbeat.status_code, 409)
-        self.assertEqual(heartbeat.get_json()["lock_owner"], "乙操作员")
-
-        self.service.submit_count.side_effect = owned
-        count = client.post(
-            "/api/inventory/tasks/task-1/items/A/count",
-            json={
-                "device_id": "device-a", "actual_qty": "1",
-                "expected_version": 3,
-            },
-        )
-        self.assertEqual(count.status_code, 409)
-        self.assertEqual(count.get_json()["lock_owner"], "乙操作员")
-
-        for route, target in (
-            ("/api/inventory/tasks/task-1/items/A/claim", self.service.open_count_item),
-            ("/api/inventory/tasks/task-1/items/A/count", self.service.submit_count),
-        ):
-            target.side_effect = InventoryConflict("当前阶段不允许此操作")
-            body = {
-                "device_id": "device-a", "actual_qty": "1",
-                "expected_version": 3,
-            }
-            response = client.post(route, json=body)
-            self.assertEqual(response.status_code, 409)
-            self.assertNotIn("lock_owner", response.get_json())
-
-        self.service.open_count_item.side_effect = InventoryConflict(
-            "商品数量盘点已完成"
-        )
-        completed = client.post(
-            "/api/inventory/tasks/task-1/items/A/claim",
-            json={"device_id": "device-a", "expected_version": 3},
-        )
-        self.assertEqual(completed.status_code, 409)
-        self.assertNotIn("lock_owner", completed.get_json())
-
-        self.store.heartbeat_lock.side_effect = InventoryConflict("设备未持有商品锁")
-        expired = client.post(
-            "/api/inventory/tasks/task-1/items/A/heartbeat",
-            json={"device_id": "device-a", "expected_version": 3},
-        )
-        self.assertEqual(expired.status_code, 409)
-        self.assertNotIn("lock_owner", expired.get_json())
+        self.assertEqual(ordinary.status_code, 409)
+        self.assertNotIn("lock_owner", ordinary.get_json())
 
     def test_real_service_maps_raised_worker_error_to_redacted_502(self):
         secret = "cost=999; password=secret; <html>private page</html>"
@@ -706,20 +692,21 @@ class InventoryRouteTest(unittest.TestCase):
         )
         self.assertEqual(
             client.post(
-                "/api/inventory/tasks/task-1/items/A/count",
-                json={"device_id": "device-a", "actual_qty": "not-a-number"},
+                "/api/inventory/tasks/task-1/items/A/count-entries",
+                json={"device_id": "device-a", "quantity": "not-a-number"},
             ).status_code,
             400,
         )
         self.assertEqual(
             client.post(
-                "/api/inventory/tasks/task-1/items/A/claim", json={}
+                "/api/inventory/tasks/task-1/items/A/count-entries",
+                json={"quantity": "1"},
             ).status_code,
             400,
         )
         self.assertEqual(
             client.post(
-                "/api/inventory/tasks/task-1/items/A/claim", json=[]
+                "/api/inventory/tasks/task-1/items/A/count-entries", json=[]
             ).status_code,
             400,
         )

@@ -534,6 +534,51 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(mismatch["state"], "variance")
         self.assertEqual(mismatch["diff_qty"], "-1")
 
+    def test_partial_count_writes_refresh_gyj_without_locks(self):
+        task = self.create_task()
+        self.assertTrue(hasattr(self.service, "add_count_entry"))
+
+        created = self.service.add_count_entry(
+            "admin", task["task_id"], "A1", "device-a", "甲", "12"
+        )
+        entry = created["count_entries"][0]
+        self.worker.stock["A1"] = "31"
+        updated = self.service.update_count_entry(
+            "admin", task["task_id"], "A1",
+            entry["entry_id"], entry["version"],
+            "device-b", "乙", "13",
+        )
+        self.worker.stock["A1"] = "32"
+        deleted = self.service.delete_count_entry(
+            "admin", task["task_id"], "A1",
+            entry["entry_id"], updated["count_entries"][0]["version"],
+            "device-a", "甲",
+        )
+
+        self.assertEqual(self.worker.stock_reads, ["A1", "A1", "A1"])
+        self.assertEqual(updated["book_quantity"], "31")
+        self.assertEqual(deleted["book_quantity"], "32")
+        self.assertEqual(deleted["count_entries"], [])
+        with self.store.connect() as connection:
+            lock_count = connection.execute(
+                "SELECT COUNT(*) FROM inventory_item_locks WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(lock_count, 0)
+
+    def test_failed_partial_count_stock_read_does_not_change_entries(self):
+        task = self.create_task()
+        self.assertTrue(hasattr(self.service, "add_count_entry"))
+        self.worker.stock_failures["A1"] = "session expired"
+
+        with self.assertRaises(InventoryServiceError):
+            self.service.add_count_entry(
+                "admin", task["task_id"], "A1", "device-a", "甲", "12"
+            )
+
+        item = self.store.get_task_snapshot("admin", task["task_id"])["items"][0]
+        self.assertEqual(item["count_entries"], [])
+
     def test_precise_decimal_difference_is_preserved(self):
         self.worker.catalog[0]["initial_stock"] = "0.2"
         self.worker.stock["A1"] = "0.2"

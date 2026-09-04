@@ -96,10 +96,43 @@ class InventoryService:
         task = self.store.create_task(owner, actor, catalog)
         return self.store.advance_count_phase_if_ready(owner, task["task_id"])
 
+    def _live_stock(self, owner, barcode):
+        value = self._call_worker(owner, "read_inventory_stock", barcode)
+        try:
+            return normalize_quantity(value)
+        except ValueError as exc:
+            raise InventoryServiceError("GYJ 返回的库存数量无效") from exc
+
+    def _partial_count_item(self, owner, task_id, barcode):
+        snapshot = self._snapshot(owner, task_id, {"counting", "serial_check"})
+        item = self._item(snapshot, barcode)
+        if item.get("data_error"):
+            raise InventoryConflict("商品资料异常，不可盘点")
+        return snapshot, item
+
     def open_count_item(
-        self, owner, task_id, barcode, device_id, actor, *,
+        self, owner, task_id, barcode, device_or_actor, actor=None, *,
         expected_version=None,
     ):
+        if actor is None:
+            snapshot, item = self._partial_count_item(owner, task_id, barcode)
+            book_quantity = self._live_stock(owner, barcode)
+            result = dict(item)
+            result.update({
+                "book_quantity": book_quantity,
+                "open_book_qty": book_quantity,
+                "latest_book_quantity": book_quantity,
+                "latest_book_qty": book_quantity,
+                "difference": (
+                    quantity_difference(item["count_total"], book_quantity)
+                    if item.get("count_total") is not None else None
+                ),
+            })
+            result["diff_qty"] = result["difference"]
+            result["task_version"] = snapshot["version"]
+            return result
+
+        device_id = device_or_actor
         snapshot = self._snapshot(owner, task_id, {"counting"})
         item = self._item(snapshot, barcode)
         if item.get("data_error"):
@@ -152,6 +185,38 @@ class InventoryService:
             diff_qty=diff_qty,
             state=state,
             expected_version=checked_version,
+        )
+
+    def add_count_entry(
+        self, owner, task_id, barcode, device_id, actor, quantity
+    ):
+        self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._live_stock(owner, barcode)
+        return self.store.add_count_entry(
+            owner, task_id, barcode, actor, device_id,
+            quantity, book_quantity,
+        )
+
+    def update_count_entry(
+        self, owner, task_id, barcode, entry_id, entry_version,
+        device_id, actor, quantity
+    ):
+        self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._live_stock(owner, barcode)
+        return self.store.update_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            actor, device_id, quantity, book_quantity,
+        )
+
+    def delete_count_entry(
+        self, owner, task_id, barcode, entry_id, entry_version,
+        device_id, actor
+    ):
+        self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._live_stock(owner, barcode)
+        return self.store.delete_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            actor, device_id, book_quantity,
         )
 
     def _mark_sync_error(self, owner, task_id, message, timestamp):
