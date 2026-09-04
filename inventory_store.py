@@ -3,6 +3,7 @@
 from contextlib import closing
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, localcontext
+import json
 import os
 import sqlite3
 import uuid
@@ -1045,6 +1046,247 @@ class InventoryStore:
             ).fetchone())
             result["task_version"] = self._task_version(connection, task_id)
             return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @classmethod
+    def _recalculate_item_from_entries(
+        cls, connection, task, item, book_quantity, timestamp
+    ):
+        book_quantity = normalize_quantity(book_quantity)
+        entries = cls._count_entries(
+            connection, task["task_id"], item["barcode"]
+        )
+        if entries:
+            values = [Decimal(entry["quantity"]) for entry in entries]
+            precision = sum(len(value.as_tuple().digits) for value in values)
+            with localcontext() as context:
+                context.prec = max(precision + 2, 28)
+                count_total = _decimal_text(sum(values, Decimal("0")))
+            difference = quantity_difference(count_total, book_quantity)
+            state = (
+                "matched" if difference == "0"
+                else "serial_pending" if item["has_serial"]
+                else "variance"
+            )
+            completed_at = timestamp
+        else:
+            count_total = None
+            difference = None
+            state = "pending"
+            completed_at = None
+        connection.execute(
+            """UPDATE inventory_items
+               SET book_quantity = ?, counted_quantity = ?,
+                   completed_book_quantity = ?, completed_counted_quantity = ?,
+                   latest_book_quantity = ?, expected_current_quantity = ?,
+                   difference = ?, status = ?, serial_synced_at = NULL,
+                   completed_at = ?, updated_at = ?
+               WHERE task_id = ? AND barcode = ?""",
+            (
+                book_quantity, count_total,
+                book_quantity if entries else None, count_total,
+                book_quantity, count_total,
+                difference, state, completed_at, timestamp,
+                task["task_id"], item["barcode"],
+            ),
+        )
+
+    @staticmethod
+    def _count_entry_audit_details(entry_id, before, after):
+        return json.dumps(
+            {"entry_id": entry_id, "before": before, "after": after},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _count_mutation_context(self, connection, owner, task_id, barcode):
+        task = self._task_for_owner(connection, owner, task_id)
+        if task["phase"] not in {"counting", "serial_check"}:
+            raise InventoryConflict("当前任务不能修改盘点数量")
+        item = connection.execute(
+            "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+            (task_id, barcode),
+        ).fetchone()
+        if item is None:
+            raise InventoryNotFound("商品不存在")
+        if item["status"] == "data_error":
+            raise InventoryConflict("商品资料异常，不可盘点")
+        return task, item
+
+    def _count_mutation_result(self, connection, task_id, barcode):
+        row = connection.execute(
+            "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+            (task_id, barcode),
+        ).fetchone()
+        result = self._item_with_counts(connection, row)
+        result["task_version"] = self._task_version(connection, task_id)
+        return result
+
+    def add_count_entry(
+        self, owner, task_id, barcode, actor, device_id, quantity, book_quantity
+    ):
+        quantity = normalize_quantity(quantity)
+        book_quantity = normalize_quantity(book_quantity)
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = self._now_text()
+            task, item = self._count_mutation_context(
+                connection, owner, task_id, barcode
+            )
+            cursor = connection.execute(
+                """INSERT INTO inventory_count_entries
+                   (task_id, barcode, quantity, version,
+                    created_by, created_device_id, created_at,
+                    updated_by, updated_device_id, updated_at)
+                   VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task_id, barcode, quantity,
+                    actor, device_id, timestamp,
+                    actor, device_id, timestamp,
+                ),
+            )
+            entry_id = cursor.lastrowid
+            after = dict(connection.execute(
+                "SELECT * FROM inventory_count_entries WHERE entry_id = ?",
+                (entry_id,),
+            ).fetchone())
+            self._recalculate_item_from_entries(
+                connection, task, item, book_quantity, timestamp
+            )
+            self._advance_count_phase(connection, task, timestamp)
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "count_entry_added", actor,
+                barcode, device_id,
+                self._count_entry_audit_details(entry_id, None, after),
+                timestamp,
+            )
+            connection.commit()
+            return self._count_mutation_result(connection, task_id, barcode)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def update_count_entry(
+        self, owner, task_id, barcode, entry_id, entry_version,
+        actor, device_id, quantity, book_quantity
+    ):
+        quantity = normalize_quantity(quantity)
+        book_quantity = normalize_quantity(book_quantity)
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = self._now_text()
+            task, item = self._count_mutation_context(
+                connection, owner, task_id, barcode
+            )
+            before_row = connection.execute(
+                """SELECT * FROM inventory_count_entries
+                   WHERE entry_id = ? AND task_id = ? AND barcode = ?""",
+                (entry_id, task_id, barcode),
+            ).fetchone()
+            if before_row is None:
+                raise InventoryNotFound("分次盘点记录不存在")
+            if int(before_row["version"]) != int(entry_version):
+                raise InventoryVersionConflict(
+                    "该条数量已被其他设备修改，请刷新后重试",
+                    current_version=self._task_version(connection, task_id),
+                )
+            before = dict(before_row)
+            cursor = connection.execute(
+                """UPDATE inventory_count_entries
+                   SET quantity = ?, version = version + 1,
+                       updated_by = ?, updated_device_id = ?, updated_at = ?
+                   WHERE entry_id = ? AND task_id = ? AND barcode = ?
+                     AND version = ?""",
+                (
+                    quantity, actor, device_id, timestamp,
+                    entry_id, task_id, barcode, entry_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise InventoryVersionConflict(
+                    "该条数量已被其他设备修改，请刷新后重试",
+                    current_version=self._task_version(connection, task_id),
+                )
+            after = dict(connection.execute(
+                "SELECT * FROM inventory_count_entries WHERE entry_id = ?",
+                (entry_id,),
+            ).fetchone())
+            self._recalculate_item_from_entries(
+                connection, task, item, book_quantity, timestamp
+            )
+            self._advance_count_phase(connection, task, timestamp)
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "count_entry_updated", actor,
+                barcode, device_id,
+                self._count_entry_audit_details(entry_id, before, after),
+                timestamp,
+            )
+            connection.commit()
+            return self._count_mutation_result(connection, task_id, barcode)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def delete_count_entry(
+        self, owner, task_id, barcode, entry_id, entry_version,
+        actor, device_id, book_quantity
+    ):
+        book_quantity = normalize_quantity(book_quantity)
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = self._now_text()
+            task, item = self._count_mutation_context(
+                connection, owner, task_id, barcode
+            )
+            before_row = connection.execute(
+                """SELECT * FROM inventory_count_entries
+                   WHERE entry_id = ? AND task_id = ? AND barcode = ?""",
+                (entry_id, task_id, barcode),
+            ).fetchone()
+            if before_row is None:
+                raise InventoryNotFound("分次盘点记录不存在")
+            if int(before_row["version"]) != int(entry_version):
+                raise InventoryVersionConflict(
+                    "该条数量已被其他设备修改，请刷新后重试",
+                    current_version=self._task_version(connection, task_id),
+                )
+            before = dict(before_row)
+            cursor = connection.execute(
+                """DELETE FROM inventory_count_entries
+                   WHERE entry_id = ? AND task_id = ? AND barcode = ?
+                     AND version = ?""",
+                (entry_id, task_id, barcode, entry_version),
+            )
+            if cursor.rowcount != 1:
+                raise InventoryVersionConflict(
+                    "该条数量已被其他设备修改，请刷新后重试",
+                    current_version=self._task_version(connection, task_id),
+                )
+            self._recalculate_item_from_entries(
+                connection, task, item, book_quantity, timestamp
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "count_entry_deleted", actor,
+                barcode, device_id,
+                self._count_entry_audit_details(entry_id, before, None),
+                timestamp,
+            )
+            connection.commit()
+            return self._count_mutation_result(connection, task_id, barcode)
         except Exception:
             connection.rollback()
             raise

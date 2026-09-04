@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import tempfile
 import threading
@@ -964,6 +965,78 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["phase"], "serial_check")
         self.assertEqual(states["B2"], "serial_complete")
         self.assertEqual(states["C3"], "serial_pending")
+
+    def test_partial_counts_are_shared_summed_and_row_versioned(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        self.assertTrue(hasattr(store, "add_count_entry"))
+
+        first = store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "12", "30"
+        )
+        second = store.add_count_entry(
+            "admin", task["task_id"], "A1", "乙", "device-b", "13", "30"
+        )
+
+        self.assertEqual(second["count_total"], "25")
+        self.assertEqual(second["count_expression"], "12 + 13 = 25")
+        self.assertEqual(
+            [row["created_by"] for row in second["count_entries"]],
+            ["甲", "乙"],
+        )
+
+        first_entry = first["count_entries"][0]
+        edited = store.update_count_entry(
+            "admin", task["task_id"], "A1",
+            first_entry["entry_id"], first_entry["version"],
+            "乙", "device-b", "14", "30",
+        )
+        self.assertEqual(edited["count_expression"], "14 + 13 = 27")
+        self.assertEqual(edited["difference"], "-3")
+        with self.assertRaises(InventoryVersionConflict):
+            store.update_count_entry(
+                "admin", task["task_id"], "A1",
+                first_entry["entry_id"], first_entry["version"],
+                "甲", "device-a", "15", "30",
+            )
+
+    def test_any_device_can_delete_count_entry_with_audit(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        self.assertTrue(hasattr(store, "add_count_entry"))
+        created = store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "12", "30"
+        )
+        entry = created["count_entries"][0]
+
+        deleted = store.delete_count_entry(
+            "admin", task["task_id"], "A1",
+            entry["entry_id"], entry["version"],
+            "乙", "device-b", "30",
+        )
+
+        self.assertEqual(deleted["count_entries"], [])
+        self.assertIsNone(deleted["count_total"])
+        self.assertEqual(deleted["state"], "pending")
+        with sqlite3.connect(self.db_path) as connection:
+            events = connection.execute(
+                "SELECT event_type, actor, device_id, details "
+                "FROM inventory_audit_events WHERE task_id = ? "
+                "AND event_type LIKE 'count_entry_%' ORDER BY event_id",
+                (task["task_id"],),
+            ).fetchall()
+        self.assertEqual(
+            [(row[0], row[1], row[2]) for row in events],
+            [
+                ("count_entry_added", "甲", "device-a"),
+                ("count_entry_deleted", "乙", "device-b"),
+            ],
+        )
+        self.assertEqual(json.loads(events[0][3])["after"]["quantity"], "12")
+        self.assertEqual(json.loads(events[1][3])["before"]["quantity"], "12")
+        self.assertIsNone(json.loads(events[1][3])["after"])
 
     def completed_difference_store(self):
         store, task = self.serial_ready_store()
