@@ -206,6 +206,22 @@ class InventoryStore:
                         REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS inventory_count_entries (
+                    entry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    barcode TEXT NOT NULL,
+                    quantity TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by TEXT NOT NULL,
+                    created_device_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    updated_device_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (task_id, barcode)
+                        REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS inventory_serial_expected (
                     task_id TEXT NOT NULL,
                     barcode TEXT NOT NULL,
@@ -297,6 +313,8 @@ class InventoryStore:
                     ON inventory_tasks(owner, phase);
                 CREATE INDEX IF NOT EXISTS idx_inventory_items_status
                     ON inventory_items(task_id, status);
+                CREATE INDEX IF NOT EXISTS idx_inventory_count_entries_item
+                    ON inventory_count_entries(task_id, barcode, entry_id);
                 CREATE INDEX IF NOT EXISTS idx_inventory_serial_scans_item
                     ON inventory_serial_scans(task_id, barcode, serial);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_active
@@ -345,6 +363,27 @@ class InventoryStore:
                     connection.execute(
                         f"ALTER TABLE inventory_serial_scans ADD COLUMN {name} {definition}"
                     )
+            connection.execute(
+                """INSERT INTO inventory_count_entries
+                   (task_id, barcode, quantity, version,
+                    created_by, created_device_id, created_at,
+                    updated_by, updated_device_id, updated_at)
+                   SELECT items.task_id, items.barcode,
+                          items.completed_counted_quantity, 1,
+                          'system:migration', 'system:migration',
+                          COALESCE(items.completed_at, items.updated_at),
+                          'system:migration', 'system:migration',
+                          COALESCE(items.completed_at, items.updated_at)
+                     FROM inventory_items AS items
+                    WHERE items.completed_counted_quantity IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM inventory_count_entries AS entries
+                           WHERE entries.task_id = items.task_id
+                             AND entries.barcode = items.barcode
+                      )"""
+            )
+            connection.execute("DELETE FROM inventory_item_locks")
+            connection.commit()
 
     def _now_text(self):
         return self._timestamp_text(self.now())
@@ -373,6 +412,44 @@ class InventoryStore:
         })
         item["has_serial"] = (
             None if item.get("data_error") else bool(item["has_serial"])
+        )
+        return item
+
+    @staticmethod
+    def _count_entries(connection, task_id, barcode):
+        return [dict(row) for row in connection.execute(
+            """SELECT entry_id, quantity, version,
+                      created_by, created_device_id, created_at,
+                      updated_by, updated_device_id, updated_at
+                 FROM inventory_count_entries
+                WHERE task_id = ? AND barcode = ?
+                ORDER BY entry_id""",
+            (task_id, barcode),
+        )]
+
+    @classmethod
+    def _item_with_counts(cls, connection, row):
+        item = cls._item_dict(row)
+        if item is None:
+            return None
+        entries = cls._count_entries(
+            connection, item["task_id"], item["barcode"]
+        )
+        quantities = [entry["quantity"] for entry in entries]
+        if quantities:
+            decimals = [Decimal(value) for value in quantities]
+            precision = sum(len(value.as_tuple().digits) for value in decimals)
+            with localcontext() as context:
+                context.prec = max(precision + 2, 28)
+                total = _decimal_text(sum(decimals, Decimal("0")))
+        else:
+            total = None
+        item["count_entries"] = entries
+        item["count_total"] = total
+        item["count_expression"] = (
+            "" if not quantities else
+            quantities[0] if len(quantities) == 1 else
+            " + ".join(quantities) + f" = {total}"
         )
         return item
 
@@ -474,7 +551,7 @@ class InventoryStore:
             if known_version is not None and int(known_version) == int(task["version"]):
                 return {"success": True, "unchanged": True, "version": task["version"]}
             snapshot = self._row_dict(task)
-            snapshot["items"] = [self._item_dict(row) for row in connection.execute(
+            snapshot["items"] = [self._item_with_counts(connection, row) for row in connection.execute(
                 "SELECT * FROM inventory_items WHERE task_id = ? ORDER BY barcode",
                 (task_id,),
             )]
@@ -498,7 +575,10 @@ class InventoryStore:
             clauses.append("initial_stock <> '0'")
         sql = "SELECT * FROM inventory_items WHERE " + " AND ".join(clauses) + " ORDER BY barcode"
         with closing(self.connect()) as connection:
-            return [self._item_dict(row) for row in connection.execute(sql, params)]
+            return [
+                self._item_with_counts(connection, row)
+                for row in connection.execute(sql, params)
+            ]
 
     @staticmethod
     def _task_for_owner(connection, owner, task_id):

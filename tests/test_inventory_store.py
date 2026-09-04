@@ -256,6 +256,47 @@ class InventoryStoreTests(unittest.TestCase):
             "inventory_notes", "inventory_audit_events",
         }.issubset(names))
 
+    def test_initialize_creates_count_entries_and_backfills_legacy_count_once(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        with store.connect() as connection:
+            connection.execute(
+                "UPDATE inventory_items SET completed_counted_quantity = '25', "
+                "counted_quantity = '25', completed_at = updated_at "
+                "WHERE task_id = ? AND barcode = 'A1'",
+                (task["task_id"],),
+            )
+            connection.commit()
+
+        InventoryStore(self.db_path)
+        migrated = InventoryStore(self.db_path).get_task_snapshot(
+            "admin", task["task_id"]
+        )
+
+        with sqlite3.connect(self.db_path) as connection:
+            tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertIn("inventory_count_entries", tables)
+            rows = connection.execute(
+                "SELECT quantity, version, created_by "
+                "FROM inventory_count_entries "
+                "WHERE task_id = ? AND barcode = 'A1'",
+                (task["task_id"],),
+            ).fetchall()
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(inventory_count_entries)"
+                )
+            }
+        self.assertEqual(rows, [("25", 1, "system:migration")])
+        self.assertFalse({"price", "amount", "cost"} & columns)
+        self.assertEqual(migrated["items"][0]["count_total"], "25")
+        self.assertEqual(migrated["items"][0]["count_expression"], "25")
+        self.assertEqual(migrated["items"][1]["count_entries"], [])
+
     def test_context_managed_read_closes_its_sqlite_connection(self):
         store = InventoryStore(self.db_path)
         connection = store.connect()
