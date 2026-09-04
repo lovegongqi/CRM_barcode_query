@@ -216,12 +216,15 @@ class GYJInventoryReader:
         if hasattr(self.page, "click_query"):
             self.page.click_query()
             return
-        for label in ("查 询", "查询"):
-            control = self.browser_page.get_by_role("button", name=label, exact=True)
-            if control.count() == 1:
-                control.click()
-                self.browser_page.wait_for_timeout(300)
-                return
+        for attempt in range(151):
+            for label in ("查 询", "查询"):
+                control = self.browser_page.get_by_role("button", name=label, exact=True)
+                if control.count() == 1:
+                    control.click()
+                    self.browser_page.wait_for_timeout(300)
+                    return
+            if attempt < 150:
+                self.browser_page.wait_for_timeout(100)
         raise GYJInventoryReadError("未找到 GYJ 查询按钮")
 
     def _read_table_page(self, report):

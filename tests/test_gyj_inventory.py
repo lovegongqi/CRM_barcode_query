@@ -164,6 +164,38 @@ def serial_page(rows, total, has_next=False):
 
 
 class GYJInventoryReaderTests(unittest.TestCase):
+    def test_query_waits_for_delayed_gyj_button_mount(self):
+        class QueryButton:
+            def __init__(self, page, available):
+                self.page = page
+                self.available = available
+
+            def count(self):
+                return int(self.available and self.page.elapsed_ms >= 300)
+
+            def click(self):
+                self.page.clicks += 1
+
+        class DelayedQueryPage:
+            def __init__(self):
+                self.elapsed_ms = 0
+                self.clicks = 0
+                self.waits = []
+
+            def get_by_role(self, role, name, exact=False):
+                return QueryButton(self, name == "查 询")
+
+            def wait_for_timeout(self, milliseconds):
+                self.waits.append(milliseconds)
+                self.elapsed_ms += milliseconds
+
+        page = DelayedQueryPage()
+
+        GYJInventoryReader(page)._click_query()
+
+        self.assertEqual(page.clicks, 1)
+        self.assertGreaterEqual(page.elapsed_ms, 300)
+
     def test_total_count_uses_report_total_after_visible_row_range(self):
         self.assertEqual(GYJInventoryReader._total_count("1-10 共527条"), 527)
 
