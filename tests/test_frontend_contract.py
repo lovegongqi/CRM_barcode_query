@@ -771,6 +771,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", css)
         self.assertIn("min-height: 44px", css)
 
+    def test_inventory_gyj_captcha_accepts_alphanumeric_codes(self):
+        source = self.source("inventory.html")
+        self.assertRegex(
+            source,
+            r'<input id="inventoryGyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
+        )
+
     def test_inventory_has_one_gyj_button_and_cache_busted_assets(self):
         source = self.source("inventory.html")
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

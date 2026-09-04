@@ -3809,6 +3809,27 @@ class GYJSession:
             except Exception:
                 return ""
 
+    def refresh_captcha(self):
+        """点击 GYJ 登录页验证码，生成并返回一张新的验证码图片。"""
+        with self.lock:
+            if not self.is_alive():
+                return ""
+            image = self._first_visible([
+                "form#formLogin img",
+                "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
+                "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
+                "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
+                ".captcha img", ".verify img", ".verify-code img", ".captcha canvas",
+            ])
+            if not image:
+                return ""
+            try:
+                image.click()
+                self.page.wait_for_timeout(300)
+            except Exception:
+                return ""
+            return self.captcha_preview()
+
     def login_step1(self, username, password):
         if not username or not password:
             return False, "请输入 GYJ 账号和密码"
@@ -4051,6 +4072,9 @@ class GYJWorker:
 
     def captcha_preview(self):
         return self._call("captcha_preview")
+
+    def refresh_captcha(self):
+        return self._call("refresh_captcha")
 
     def check_login_status(self):
         return self._call("check_login_status")
@@ -10257,6 +10281,16 @@ def api_gyj_login_captcha():
 def api_gyj_captcha_preview():
     worker = gyj_worker_for_owner()
     return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
+
+
+@app.route("/api/gyj/captcha/refresh", methods=["POST"])
+@app.route("/api/inbound/gyj/captcha/refresh", methods=["POST"])
+def api_gyj_captcha_refresh():
+    worker = gyj_worker_for_owner()
+    image = worker.refresh_captcha() or ''
+    if not image:
+        return jsonify({'success': False, 'error': '验证码刷新失败，请重新登录 GYJ'}), 409
+    return jsonify({'success': True, 'captcha_image': image})
 
 
 @app.route("/api/gyj/login-status", methods=["GET"])

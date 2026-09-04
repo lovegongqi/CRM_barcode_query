@@ -58,6 +58,7 @@ class FakeGYJWorker:
         self.saved = []
         self.login_calls = []
         self.captcha_calls = []
+        self.captcha_refresh_calls = 0
 
     def get(self, owner):
         self.owner = owner
@@ -75,6 +76,10 @@ class FakeGYJWorker:
 
     def captcha_preview(self):
         return "data:image/png;base64,ZmFrZQ=="
+
+    def refresh_captcha(self):
+        self.captcha_refresh_calls += 1
+        return "data:image/png;base64,bmV3LWNhcHRjaGE="
 
     def check_login_status(self):
         return self.logged_in, ""
@@ -149,6 +154,19 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
 
         self.assertEqual(preview, "data:image/png;base64,YWN0dWFsLWNhcHRjaGE=")
         self.assertEqual(page.captcha_image.screenshot_type, "png")
+
+    def test_refresh_clicks_visible_captcha_before_returning_preview(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        image = mock.Mock()
+        session.page = mock.Mock()
+        session._first_visible = mock.Mock(return_value=image)
+        session.captcha_preview = mock.Mock(return_value="data:image/png;base64,bmV3")
+
+        preview = session.refresh_captcha()
+
+        image.click.assert_called_once_with()
+        session.page.wait_for_timeout.assert_called_once_with(300)
+        self.assertEqual(preview, "data:image/png;base64,bmV3")
 
 
 class GYJLoginFlowTest(unittest.TestCase):
@@ -751,6 +769,17 @@ class InboundRouteTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
+        self.assertEqual(worker.owner, "admin")
+
+    def test_gyj_captcha_refresh_generates_new_image_for_current_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/gyj/captcha/refresh")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,bmV3LWNhcHRjaGE=")
+        self.assertEqual(worker.captcha_refresh_calls, 1)
         self.assertEqual(worker.owner, "admin")
 
     def _assert_gyj_alias_equivalent(self, shared, inbound):
