@@ -170,18 +170,22 @@ class GYJInventoryReader:
         if hasattr(self.page, "fill_field"):
             self.page.fill_field(label, value)
             return
-        if label == STOCK_SEARCH_FIELD:
-            control = self.browser_page.locator(
-                f'input[placeholder="{STOCK_SEARCH_FIELD}"]:visible'
-            )
-        else:
-            field = self.browser_page.locator(
-                ".ant-form-item:visible, .search-form-item:visible"
-            ).filter(has_text=label)
-            control = field.locator("input:visible").first
-        if control.count() != 1:
-            raise GYJInventoryReadError(f"未找到 GYJ 查询字段：{label}")
-        control.fill(str(value))
+        for attempt in range(151):
+            if label == STOCK_SEARCH_FIELD:
+                control = self.browser_page.locator(
+                    f'input[placeholder="{STOCK_SEARCH_FIELD}"]:visible'
+                )
+            else:
+                field = self.browser_page.locator(
+                    ".ant-form-item:visible, .search-form-item:visible"
+                ).filter(has_text=label)
+                control = field.locator("input:visible").first
+            if control.count() == 1:
+                control.fill(str(value))
+                return
+            if attempt < 150:
+                self.browser_page.wait_for_timeout(100)
+        raise GYJInventoryReadError(f"未找到 GYJ 查询字段：{label}")
 
     def _select_label(self, label, value):
         if hasattr(self.page, "select_label"):

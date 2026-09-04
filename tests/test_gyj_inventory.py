@@ -164,6 +164,37 @@ def serial_page(rows, total, has_next=False):
 
 
 class GYJInventoryReaderTests(unittest.TestCase):
+    def test_stock_search_waits_for_delayed_gyj_field_mount(self):
+        class SearchField:
+            def __init__(self, page):
+                self.page = page
+
+            def count(self):
+                return int(self.page.elapsed_ms >= 300)
+
+            def fill(self, value):
+                self.page.filled = value
+
+        class DelayedSearchPage:
+            def __init__(self):
+                self.elapsed_ms = 0
+                self.filled = None
+
+            def locator(self, _selector):
+                return SearchField(self)
+
+            def wait_for_timeout(self, milliseconds):
+                self.elapsed_ms += milliseconds
+
+        page = DelayedSearchPage()
+
+        GYJInventoryReader(page)._fill_field(
+            "请输入条码、名称、助记码、规格、型号等信息", "926019528"
+        )
+
+        self.assertEqual(page.filled, "926019528")
+        self.assertGreaterEqual(page.elapsed_ms, 300)
+
     def test_query_waits_for_delayed_gyj_button_mount(self):
         class QueryButton:
             def __init__(self, page, available):
