@@ -1,13 +1,14 @@
 # 怡口CRM条码查询 / GYJ 采购入库工具
 
-Flask + Playwright 的内部工具集，包含两条独立流程：
+Flask + Playwright 的内部工具集，包含三条独立流程：
 
 | 流程 | 入口 | 说明 |
 |---|---|---|
 | **CRM 条码查询** | `/crm` | 登录怡口 CRM，单条/批量条码查询，结果留 HTML、归档、导出 Excel |
 | **GYJ 采购入库** | `/inbound` | 把 CRM 装箱单自动录入到 GYJ ERP（cloud.gyjerp.com）。先在 ERP 商品库查重 + 缺失补建，再填写采购入库单并保存草稿 |
+| **GYJ 库存盘点** | `/inventory` | 从 GYJ 只读获取全仓库存，完成多人数量盘点、序列号核对、历史差异和 Excel 导出 |
 
-两条流程都用 Playwright 在后台 Chromium 里跑（容器内用 Xvfb 提供虚拟显示），不需要真实桌面，能兼容 GYJ 的老式 Angular + Crystal Reports 页面。
+三条流程都用 Playwright 在后台 Chromium 里跑（容器内用 Xvfb 提供虚拟显示），不需要真实桌面，能兼容 GYJ 的老式 Angular + Crystal Reports 页面。
 
 ## 项目文件
 
@@ -58,6 +59,7 @@ python app.py
 ```text
 http://127.0.0.1:5002/
 http://127.0.0.1:5002/inbound           # GYJ 采购入库工作台
+http://127.0.0.1:5002/inventory         # GYJ 库存盘点工作台
 http://127.0.0.1:5002/crm
 ```
 
@@ -85,6 +87,15 @@ saving         →  保存（点「保存（Ctrl+S）」，从不点 保存并�
 - **缺失物料在商品库原地补建**：点「新增」打开完整的商品表单（不是 picker mini-create），条码字段用「光标末尾 → Backspace × 20 → 真键入」保住自定义编码（GYJ 自动生成的 13 位 EAN 不受 plain `fill()` 影响）；序列号下拉设「有」或「无」（通过 X 点选 `.ant-select-selection--single`）。
 - **picker 仍异常时不再盲创**：`add_product_line` 的内层 create-on-fail 看到 `_prechecked_existing` 里已有该编码就直接抛 "GYJ 物料 X 预检查已确认存在，但表单选择器无法定位"，避开重试链里的无效 create。
 - **从来不点「保存并审核」/「审核」/「提交」**：流程停在草稿，由人审核。
+
+## GYJ 库存盘点流程（`/inventory`）
+
+- 登录工具账号后，从顶部导航进入紧接在「入库」后的「盘点」。盘点与入库共用当前工具账号的 GYJ 登录状态；如状态失效，可在盘点页唯一的 GYJ 登录入口重新登录。
+- 点击「开始新盘点」会只读加载全部启用商品和所有仓库的库存，不读取、显示或导出价格。先完成所有商品的数量盘点；初始零库存商品默认隐藏，扫描条码或搜索名称/条码即可打开。
+- 第一台打开商品的设备获得编辑锁，页面每 20 秒续期；停止续期约 2 分钟后锁自动失效。已完成商品的 GYJ 账面库存约每 60 秒同步一次，其他设备可看到锁定人和实时进度。
+- 所有数量提交后，仅有序列号差异的商品进入第二阶段。扫描结果区分匹配、账面缺失、实物多出、属于其他商品和重复扫描；完成全部序列号核对后再结束任务。
+- 「历史任务」保留已完成盘点；有 `inventory` 权限的账号可查看差异和追加备注，只有管理员可归档、恢复差异或强制解锁。任务报告与历史差异报告均可导出 Excel，商品盘点报告包含「商品差异汇总」「序列号差异明细」两个工作表，且不含价格字段。
+- 盘点任务、锁、历史、备注和归档状态保存在 `CRM_DATA_DIR/config/inventory_stocktake.sqlite3`。Docker 默认 `CRM_DATA_DIR=/app/data`，实际文件为 `/app/data/config/inventory_stocktake.sqlite3`，由 `crm_app_data` 卷持久化；不要运行 `docker compose down -v`。
 
 ## Docker 部署
 
