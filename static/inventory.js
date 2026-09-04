@@ -1636,9 +1636,6 @@ async function pollGyjLoginStatus() {
         const data = await inventoryRequest('/api/gyj/login-status', {acceptFailureState: true});
         if (session !== gyjLoginSession || !dialog.open) return;
         if (renderGyjLoginState(data)) {
-            setTimeout(() => {
-                if (session === gyjLoginSession) closeGyjLogin();
-            }, 500);
             lastInventoryVersion = null;
             pollInventoryTask({force: true});
         }

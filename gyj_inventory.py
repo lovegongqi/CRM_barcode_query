@@ -316,7 +316,11 @@ class GYJInventoryReader:
             return None
         if isinstance(value, int):
             return value
-        match = re.search(r"\d+", str(value).replace(",", ""))
+        text = str(value).replace(",", "")
+        total_match = re.search(r"共\s*(\d+)\s*条", text)
+        if total_match:
+            return int(total_match.group(1))
+        match = re.search(r"\d+", text)
         if not match:
             raise GYJInventoryReadError("GYJ 报表分页总数无法解析")
         return int(match.group())

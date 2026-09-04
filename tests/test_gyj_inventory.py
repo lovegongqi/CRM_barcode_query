@@ -164,6 +164,9 @@ def serial_page(rows, total, has_next=False):
 
 
 class GYJInventoryReaderTests(unittest.TestCase):
+    def test_total_count_uses_report_total_after_visible_row_range(self):
+        self.assertEqual(GYJInventoryReader._total_count("1-10 共527条"), 527)
+
     def test_read_total_stock_combines_pages_exactly_without_selecting_warehouse(self):
         page = FakeInventoryPage({
             GYJ_STOCK_URL: [

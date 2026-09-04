@@ -330,6 +330,47 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_opening_an_already_logged_in_account_keeps_dialog_open(self):
+        self.run_node(
+            r"""
+            function classList() { return {toggle() {}, add() {}}; }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, {
+                    id, value: '', textContent: '', hidden: true, checked: false,
+                    open: false, className: '', classList: classList(),
+                    focus() {}, removeAttribute() {},
+                    showModal() { this.open = true; }, close() { this.open = false; },
+                });
+                return elements.get(id);
+            }
+            const timers = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                fetch: async url => ({
+                    ok: true,
+                    status: 200,
+                    json: async () => url.endsWith('/credentials')
+                        ? {success: true, username: 'worker', remember: true}
+                        : {success: true, logged_in: true, waiting_captcha: false},
+                }),
+                setTimeout(callback) { timers.push(callback); return timers.length; },
+                clearTimeout() {}, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext('pollInventoryTask = async () => {}', context);
+
+            (async () => {
+                await vm.runInContext('openGyjLogin()', context);
+                for (const callback of timers) callback();
+                assert.equal(element('inventoryGyjLoginDialog').open, true);
+                assert.equal(element('inventoryGyjLoginMessage').textContent, 'GYJ 登录成功。');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_waiting_captcha_stops_polling_and_only_loads_preview_once(self):
         self.run_node(
             r"""
