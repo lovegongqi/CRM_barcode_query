@@ -926,6 +926,222 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_failed_accepted_scan_blocks_finish_until_that_scan_is_retried(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload, status = 200) {
+                return {ok: status >= 200 && status < 300, status, json: async () => payload};
+            }
+            const failedSecond = deferred();
+            const order = [];
+            let secondAttempts = 0;
+            let focusCount = 0;
+            const input = {value: 'FIRST', disabled: false, focus() { focusCount += 1; }};
+            const finishButton = {disabled: false};
+            const dialog = {open: true, close() { this.open = false; }};
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialFinish', finishButton],
+                ['inventorySerialWorkspace', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {textContent: '', className: ''});
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    if (url.endsWith('/serials')) {
+                        const serial = JSON.parse(options.body).serial;
+                        order.push(`scan:${serial}`);
+                        if (serial === 'SECOND' && ++secondAttempts === 1) return failedSecond.promise;
+                        return response({success: true, scan: {serial, classification: 'duplicate'}});
+                    }
+                    if (url.endsWith('/serial/finish')) {
+                        order.push('finish');
+                        return response({success: true, serial: {barcode: 'A1', counts: {}}});
+                    }
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+                currentSerialData = {counts: {}, duplicates: []};
+                renderSerialReconciliation = value => { currentSerialData = value; };
+                pollInventoryTask = async () => {};
+            `, context);
+            (async () => {
+                await vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                input.value = 'SECOND';
+                const failedScan = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                const blockedFinish = vm.runInContext('finishSerialItem()', context);
+                await Promise.resolve();
+                failedSecond.resolve(response({success: false, error: '扫码保存失败'}, 502));
+                await Promise.all([failedScan, blockedFinish]);
+
+                assert.deepEqual(order, ['scan:FIRST', 'scan:SECOND']);
+                assert.equal(dialog.open, true);
+                assert.equal(input.disabled, false);
+                assert.equal(finishButton.disabled, false);
+                assert.equal(vm.runInContext('serialFinishPending', context), false);
+                assert.match(elements.get('inventorySerialMessage').textContent, /扫码保存失败/);
+                assert.ok(focusCount > 0);
+
+                input.value = 'SECOND';
+                await vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                await vm.runInContext('finishSerialItem()', context);
+                assert.deepEqual(order, ['scan:FIRST', 'scan:SECOND', 'scan:SECOND', 'finish']);
+                assert.equal(order.filter(value => value === 'scan:FIRST').length, 1);
+                assert.equal(dialog.open, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_failed_accepted_delete_blocks_finish_until_delete_is_retried(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload, status = 200) {
+                return {ok: status >= 200 && status < 300, status, json: async () => payload};
+            }
+            const failedDelete = deferred();
+            const order = [];
+            let deleteAttempts = 0;
+            const input = {disabled: false, focus() {}};
+            const finishButton = {disabled: false};
+            const dialog = {open: true, close() { this.open = false; }};
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialFinish', finishButton],
+                ['inventorySerialWorkspace', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {textContent: '', className: ''});
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    if (options.method === 'DELETE') {
+                        order.push('delete');
+                        if (++deleteAttempts === 1) return failedDelete.promise;
+                        return response({success: true, serial: {barcode: 'A1', counts: {}}});
+                    }
+                    if (url.endsWith('/serial/finish')) {
+                        order.push('finish');
+                        return response({success: true, serial: {barcode: 'A1', counts: {}}});
+                    }
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+                renderSerialReconciliation = () => {};
+                pollInventoryTask = async () => {};
+            `, context);
+            (async () => {
+                const deletion = vm.runInContext("deleteSerialScan('SN-OLD')", context);
+                const blockedFinish = vm.runInContext('finishSerialItem()', context);
+                await Promise.resolve();
+                failedDelete.resolve(response({success: false, error: '删除失败'}, 502));
+                await Promise.all([deletion, blockedFinish]);
+
+                assert.deepEqual(order, ['delete']);
+                assert.equal(dialog.open, true);
+                assert.equal(input.disabled, false);
+                assert.equal(finishButton.disabled, false);
+                assert.match(elements.get('inventorySerialMessage').textContent, /删除失败/);
+
+                await vm.runInContext("deleteSerialScan('SN-OLD')", context);
+                await vm.runInContext('finishSerialItem()', context);
+                assert.deepEqual(order, ['delete', 'delete', 'finish']);
+                assert.equal(dialog.open, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_hidden_page_does_not_restart_timer_after_finish_failure(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            function response(payload, status) {
+                return {ok: false, status, json: async () => payload};
+            }
+            const failedFinish = deferred();
+            const intervals = [];
+            const input = {disabled: false, focus() {}};
+            const finishButton = {disabled: false};
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialFinish', finishButton],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {textContent: '', className: ''});
+                        return elements.get(id);
+                    },
+                },
+                fetch: async url => {
+                    if (url.endsWith('/serial/finish')) return failedFinish.promise;
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout,
+                setInterval(callback, delay) { intervals.push({callback, delay}); return intervals.length; },
+                clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+            `, context);
+            (async () => {
+                const finish = vm.runInContext('finishSerialItem()', context);
+                await Promise.resolve();
+                context.document.hidden = true;
+                failedFinish.resolve(response({success: false, error: 'GYJ 失败'}, 502));
+                await finish;
+                assert.equal(intervals.length, 0);
+                assert.equal(vm.runInContext('serialWorkspaceOpen', context), true);
+                assert.equal(input.disabled, false);
+                assert.equal(finishButton.disabled, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_discrepancy_admin_gating_note_payload_and_encoded_export(self):
         self.run_node(
             r"""

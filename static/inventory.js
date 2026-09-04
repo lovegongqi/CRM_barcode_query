@@ -33,6 +33,7 @@ let serialFinishPending = false;
 let serialOperationQueue = Promise.resolve();
 let serialOperationGeneration = 0;
 let serialRenderedGeneration = 0;
+let serialMutationFailures = new Map();
 let serialRefreshTimer = null;
 
 function inventoryElement(id) {
@@ -711,6 +712,7 @@ function resetSerialOperations() {
     serialScanQueueLength = 0;
     serialScanPending = false;
     serialFinishPending = false;
+    serialMutationFailures.clear();
 }
 
 function serialOperationIsOpen(requestId) {
@@ -734,6 +736,21 @@ function renderSerialOperation(value, requestId, generation) {
     serialRenderedGeneration = generation;
     renderSerialReconciliation(value);
     return true;
+}
+
+function serialMutationKey(kind, serial) {
+    return `${kind}:${serial}`;
+}
+
+function restoreSerialAfterFailedFinish(message) {
+    serialFinishPending = false;
+    if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
+    const input = inventoryElement('inventorySerialInput');
+    input.disabled = false;
+    inventoryElement('inventorySerialFinish').disabled = false;
+    if (!document.hidden) startSerialRefreshTimer();
+    setSerialMessage(message, 'error');
+    input.focus();
 }
 
 async function sendSerialHeartbeat() {
@@ -974,14 +991,30 @@ async function scanSerial(event) {
     const barcode = currentSerialBarcode;
     serialScanQueueLength += 1;
     serialScanPending = true;
+    const mutationKey = serialMutationKey('scan', serial);
     return queueSerialOperation(async (requestId, generation) => {
         try {
             if (!serialWorkspaceEditable) return;
-            const data = await inventoryPost(
-                `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials`,
-                {device_id: inventoryDeviceId, serial},
-            );
+            let data;
+            try {
+                data = await inventoryPost(
+                    `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials`,
+                    {device_id: inventoryDeviceId, serial},
+                );
+            } catch (error) {
+                if (serialOperationIsOpen(requestId)) {
+                    serialMutationFailures.set(mutationKey, error.message || '扫码保存失败');
+                    if (error.status === 409) {
+                        const owner = error.data && error.data.lock_owner;
+                        setSerialReadOnly(error.message, owner || '');
+                    } else {
+                        setSerialMessage(error.message, 'error');
+                    }
+                }
+                return;
+            }
             if (!serialOperationIsOpen(requestId)) return;
+            serialMutationFailures.delete(mutationKey);
             const scan = data.scan || {};
             if (scan.classification === 'duplicate') {
                 const duplicates = Array.isArray(currentSerialData && currentSerialData.duplicates)
@@ -994,19 +1027,14 @@ async function scanSerial(event) {
                     counts: {...(currentSerialData.counts || {}), duplicates: duplicates.length},
                 }, requestId, generation);
             } else {
-                await performSerialRefresh(false, requestId, generation);
+                try {
+                    await performSerialRefresh(false, requestId, generation);
+                } catch (_error) {
+                    return;
+                }
             }
             if (serialOperationIsOpen(requestId)) {
                 setSerialMessage(`${inventoryText(scan.serial, serial)}：${serialClassificationLabel(scan.classification)}`, scan.classification === 'matched' ? 'success' : '');
-            }
-        } catch (error) {
-            if (serialOperationIsOpen(requestId)) {
-                if (error.status === 409) {
-                    const owner = error.data && error.data.lock_owner;
-                    setSerialReadOnly(error.message, owner || '');
-                } else {
-                    setSerialMessage(error.message, 'error');
-                }
             }
         } finally {
             if (requestId === serialWorkspaceRequestId) {
@@ -1022,23 +1050,32 @@ function deleteSerialScan(serial) {
     if (!serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask) return;
     const taskId = inventoryTask.task_id;
     const barcode = currentSerialBarcode;
+    const mutationKey = serialMutationKey('delete', serial);
     return queueSerialOperation(async (requestId, generation) => {
         try {
             if (!serialWorkspaceEditable) return;
-            const data = await inventoryDelete(
-                `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials/${encodeURIComponent(serial)}`,
-                {device_id: inventoryDeviceId},
-            );
+            let data;
+            try {
+                data = await inventoryDelete(
+                    `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials/${encodeURIComponent(serial)}`,
+                    {device_id: inventoryDeviceId},
+                );
+            } catch (error) {
+                if (serialOperationIsOpen(requestId)) {
+                    serialMutationFailures.set(mutationKey, error.message || '删除失败');
+                    if (error.status === 409) {
+                        const owner = error.data && error.data.lock_owner;
+                        setSerialReadOnly(error.message, owner || '');
+                    } else {
+                        setSerialMessage(error.message, 'error');
+                    }
+                }
+                return;
+            }
+            if (!serialOperationIsOpen(requestId)) return;
+            serialMutationFailures.delete(mutationKey);
             if (!renderSerialOperation(data.serial, requestId, generation)) return;
             setSerialMessage(`${serial} 已删除，操作已记录。`, 'success');
-        } catch (error) {
-            if (!serialOperationIsOpen(requestId)) return;
-            if (error.status === 409) {
-                const owner = error.data && error.data.lock_owner;
-                setSerialReadOnly(error.message, owner || '');
-            } else {
-                setSerialMessage(error.message, 'error');
-            }
         } finally {
             if (serialOperationIsOpen(requestId) && serialWorkspaceEditable && !serialFinishPending) {
                 inventoryElement('inventorySerialInput').focus();
@@ -1061,6 +1098,13 @@ function finishSerialItem() {
     return queueSerialOperation(async (requestId, generation) => {
         try {
             if (!serialWorkspaceEditable) return;
+            const failedMutation = serialMutationFailures.values().next();
+            if (!failedMutation.done) {
+                restoreSerialAfterFailedFinish(
+                    `未能完成核对：${failedMutation.value}。请重试失败的扫码或删除操作。`
+                );
+                return;
+            }
             const prefix = `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}`;
             const data = await inventoryPost(`${prefix}/serial/finish`, {device_id: inventoryDeviceId});
             if (!renderSerialOperation(data.serial, requestId, generation)) return;
@@ -1070,16 +1114,13 @@ function finishSerialItem() {
             await pollInventoryTask({force: true});
         } catch (error) {
             if (!serialOperationIsOpen(requestId)) return;
-            serialFinishPending = false;
             if (error.status === 409) {
                 const owner = error.data && error.data.lock_owner;
                 setSerialReadOnly(error.message, owner || '');
             } else {
-                input.disabled = false;
-                finish.disabled = false;
-                startSerialRefreshTimer();
-                setSerialMessage(`未能完成核对：${error.message}。当前扫描界面已保留。`, 'error');
-                input.focus();
+                restoreSerialAfterFailedFinish(
+                    `未能完成核对：${error.message}。当前扫描界面已保留。`
+                );
             }
         }
     });
