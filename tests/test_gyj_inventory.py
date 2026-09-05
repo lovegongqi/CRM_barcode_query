@@ -227,6 +227,79 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertEqual(page.clicks, 1)
         self.assertGreaterEqual(page.elapsed_ms, 300)
 
+    def test_select_waits_for_the_expanded_filter_and_option_to_mount(self):
+        class Trigger:
+            def __init__(self, page):
+                self.page = page
+
+            @property
+            def first(self):
+                return self
+
+            def count(self):
+                return int(self.page.elapsed_ms >= 300)
+
+            def click(self):
+                self.page.trigger_clicked_at = self.page.elapsed_ms
+
+        class Choice:
+            def __init__(self, page):
+                self.page = page
+
+            def count(self):
+                return int(
+                    self.page.trigger_clicked_at is not None
+                    and self.page.elapsed_ms >= self.page.trigger_clicked_at + 200
+                )
+
+            def click(self):
+                self.page.choice_clicks += 1
+
+        class Field:
+            def __init__(self, page):
+                self.page = page
+
+            def filter(self, **_kwargs):
+                return self
+
+            def locator(self, _selector):
+                return Trigger(self.page)
+
+        class Dropdown:
+            def __init__(self, page):
+                self.page = page
+
+            @property
+            def last(self):
+                return self
+
+            def get_by_text(self, _value, exact=False):
+                return Choice(self.page)
+
+        class DelayedSelectPage:
+            def __init__(self):
+                self.elapsed_ms = 0
+                self.trigger_clicked_at = None
+                self.choice_clicks = 0
+
+            def locator(self, selector):
+                if selector == ".ant-select-dropdown:visible":
+                    return Dropdown(self)
+                return Field(self)
+
+            def wait_for_timeout(self, milliseconds):
+                self.elapsed_ms += milliseconds
+
+        page = DelayedSelectPage()
+
+        try:
+            GYJInventoryReader(page)._select_label("已出库", "否")
+        except GYJInventoryReadError as error:
+            self.fail(f"expanded filter should be awaited: {error}")
+
+        self.assertEqual(page.choice_clicks, 1)
+        self.assertGreaterEqual(page.elapsed_ms, 500)
+
     def test_total_count_uses_report_total_after_visible_row_range(self):
         self.assertEqual(GYJInventoryReader._total_count("1-10 共527条"), 527)
 
@@ -389,6 +462,48 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertFalse(any(label == "仓库" for label, _value in page.filled))
         self.assertFalse(any(label == "仓库" for label, _value in page.selected))
         self.assertNotIn("10", repr(result))
+
+    def test_serial_reader_uses_the_direct_report_before_selecting_unshipped(self):
+        direct_url = (
+            "https://cloud.gyjerp.com/plugins/serialNumberStatistics/"
+            "serialNumberStatistics.html"
+        )
+        page = FakeInventoryPage({
+            GYJ_SERIAL_URL: [serial_page([
+                ["SN-IN", "A1", "甲", "二仓", "10", "否"],
+            ], 1)],
+        })
+
+        result = GYJInventoryReader(page).read_unshipped_serials("A1")
+
+        self.assertEqual(page.visited, [direct_url])
+        self.assertEqual([row["serial"] for row in result], ["SN-IN"])
+        self.assertEqual(page.expanded, 1)
+        self.assertEqual(page.selected, [("已出库", "否")])
+
+    def test_serial_reader_waits_for_the_search_form_before_expanding_filters(self):
+        class HydrationSensitivePage(FakeInventoryPage):
+            def __init__(self, reports):
+                super().__init__(reports)
+                self.search_form_ready = False
+
+            def fill_field(self, label, value):
+                super().fill_field(label, value)
+                self.search_form_ready = True
+
+            def expand_filters(self):
+                if not self.search_form_ready:
+                    raise AssertionError("expanded filters before the search form was ready")
+                super().expand_filters()
+
+        page = HydrationSensitivePage({
+            GYJ_SERIAL_URL: [serial_page([], 0)],
+        })
+
+        GYJInventoryReader(page).read_unshipped_serials("A1")
+
+        self.assertEqual(page.filled, [("商品", "A1")])
+        self.assertEqual(page.expanded, 1)
 
     def test_waits_for_loading_and_stale_rows_before_collecting_next_page(self):
         page = FakeInventoryPage({

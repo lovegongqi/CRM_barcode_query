@@ -559,7 +559,8 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-audit-card {
-    width: min(680px, calc(100vw - 32px));
+    width: 100%;
+    max-width: 100%;
 }
 
 .inventory-audit-events {
@@ -570,19 +571,25 @@ article.inventory-item { cursor: default; }
 .inventory-audit-event {
     display: grid;
     gap: 5px;
+    min-width: 0;
     padding: 11px;
     border: 1px solid var(--aurora-line);
     border-radius: 11px;
     background: rgba(4, 14, 26, .5);
+    overflow-wrap: anywhere;
 }
 
 .inventory-audit-event span {
+    min-width: 0;
     color: var(--aurora-muted);
     font-size: 12px;
+    overflow-wrap: anywhere;
 }
 
 .inventory-audit-event code {
+    min-width: 0;
     color: var(--aurora-cyan);
+    overflow-wrap: anywhere;
 }
 
 .inventory-history-title {

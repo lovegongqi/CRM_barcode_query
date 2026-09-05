@@ -417,6 +417,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 updateCountBook = () => {};
                 renderInventorySummary = () => {};
                 renderInventoryItems = () => {};
+                pollInventoryTask = async () => {};
             `, context);
             (async () => {
                 await vm.runInContext("updateCountEntry({entry_id: 9, version: 3}, '8')", context);
@@ -430,6 +431,215 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.deepEqual(JSON.parse(requests[1].options.body), {
                     device_id: 'device-b', entry_version: 4,
                 });
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_count_entry_mutation_forces_full_task_summary_refresh(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor(tag = 'div') {
+                    this.tagName = tag; this.children = []; this.textContent = '';
+                    this.value = ''; this.disabled = false; this.hidden = false;
+                    this.dataset = {}; this.className = '';
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener() {}
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement(tag) { return new FakeNode(tag); },
+                    getElementById: element,
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    if (requests.length === 1) return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 5,
+                        item: {barcode: 'A1', count_total: '3', count_entries: []},
+                    })};
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, task: {
+                            task_id: 'T1', version: 5, phase: 'counting', gyj_status: 'synced',
+                            summary: {
+                                total: 4, completed: 3, pending: 1, matched: 2,
+                                surplus: 1, deficit: 0, serial_pending: 0, data_error: 0,
+                            },
+                            items: [{barcode: 'A1', count_total: '3', count_entries: []}],
+                        },
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {
+                    task_id: 'T1', version: 4, phase: 'counting', gyj_status: 'synced',
+                    summary: {
+                        total: 4, completed: 0, pending: 4, matched: 0,
+                        surplus: 0, deficit: 0, serial_pending: 0, data_error: 0,
+                    },
+                    items: [{barcode: 'A1', count_total: '0', count_entries: []}],
+                };
+                lastInventoryVersion = 4;
+                currentCountItem = inventoryTask.items[0];
+                countDialogEditable = true;
+                document.getElementById('inventoryCountNewQuantity').value = '3';
+                renderCountEntries = () => {};
+                updateCountBook = () => {};
+                renderInventoryItems = () => {};
+                renderSerialQueue = () => {};
+            `, context);
+            (async () => {
+                await vm.runInContext('addCountEntry()', context);
+                assert.equal(requests.length, 2);
+                assert.equal(requests[1].url, '/api/inventory/tasks/active');
+                const cards = element('inventoryTaskSummary').children;
+                assert.equal(cards[1].children[1].textContent, 3);
+                assert.equal(cards[2].children[1].textContent, 1);
+                assert.equal(vm.runInContext('inventoryTask.summary.completed', context), 3);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_count_entry_refresh_failure_keeps_saved_add_and_blocks_duplicate_request(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.textContent = ''; this.value = '';
+                    this.disabled = false; this.hidden = false; this.className = '';
+                    this.dataset = {}; this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener() {}
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const saved = deferred();
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    if (url.includes('/count-entries') && options.method === 'POST') {
+                        if (requests.filter(request => request.options.method === 'POST').length > 1) {
+                            throw new Error('duplicate add request');
+                        }
+                        return saved.promise;
+                    }
+                    if (url === '/api/inventory/tasks/active') {
+                        return {ok: false, status: 502, json: async () => ({
+                            success: false, error: '统计服务暂不可用',
+                        })};
+                    }
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', version: 4, phase: 'counting', items: [{barcode: 'A1', count_entries: []}]};
+                currentCountItem = inventoryTask.items[0]; countDialogEditable = true;
+                document.getElementById('inventoryCountNewQuantity').value = '3';
+                renderCountEntries = () => {}; updateCountBook = () => {}; renderInventoryItems = () => {};
+            `, context);
+            (async () => {
+                const first = vm.runInContext('addCountEntry()', context);
+                await Promise.resolve();
+                const duplicate = vm.runInContext('addCountEntry()', context);
+                saved.resolve({ok: true, status: 200, json: async () => ({
+                    success: true, version: 5,
+                    item: {barcode: 'A1', count_total: '3', count_entries: []},
+                })});
+                await first;
+                await duplicate;
+                assert.equal(requests.filter(request => request.options.method === 'POST').length, 1);
+                assert.match(element('inventoryCountMessage').textContent, /已保存，但统计刷新失败/);
+                assert.equal(vm.runInContext('inventoryTask.items[0].count_total', context), '3');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_update_and_delete_count_entries_force_full_task_refresh(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() { this.value = ''; this.textContent = ''; this.disabled = false; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const requests = [];
+            const rendered = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                fetch: async (url, options = {}) => {
+                    requests.push({url, options});
+                    const version = requests.length < 3 ? 5 : 6;
+                    if (url === '/api/inventory/tasks/active') return {
+                        ok: true, status: 200, json: async () => ({success: true, task: {
+                            task_id: 'T1', version, phase: 'counting', gyj_status: 'synced',
+                            summary: {total: 4, completed: version - 2, pending: 6 - version}, items: [],
+                        }}),
+                    };
+                    return {ok: true, status: 200, json: async () => ({success: true, version, item: {
+                        barcode: 'A1', count_entries: [], count_total: String(version),
+                    }})};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {}, rendered,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', version: 4, phase: 'counting', items: [{barcode: 'A1', count_entries: []}]};
+                currentCountItem = inventoryTask.items[0]; countDialogEditable = true;
+                renderCountEntries = () => {}; updateCountBook = () => {}; renderInventoryItems = () => {};
+                renderInventoryTask = task => rendered.push(task.summary.completed);
+            `, context);
+            (async () => {
+                await vm.runInContext("updateCountEntry({entry_id: 9, version: 3}, '8')", context);
+                await vm.runInContext("deleteCountEntry({entry_id: 9, version: 4})", context);
+                assert.deepEqual(requests.map(request => request.url), [
+                    '/api/inventory/tasks/T1/items/A1/count-entries/9',
+                    '/api/inventory/tasks/active',
+                    '/api/inventory/tasks/T1/items/A1/count-entries/9',
+                    '/api/inventory/tasks/active',
+                ]);
+                assert.deepEqual(rendered, [3, 4]);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )

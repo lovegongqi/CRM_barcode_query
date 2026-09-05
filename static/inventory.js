@@ -11,6 +11,7 @@ let inventoryPollTimer = null;
 let inventorySearchTimer = null;
 let currentCountItem = null;
 let countDialogEditable = false;
+let countMutationPending = false;
 let countDialogRequestId = 0;
 let countEntryDrafts = new Map();
 let gyjLoginPollTimer = null;
@@ -496,18 +497,18 @@ async function performInventoryPoll(force) {
     const url = '/api/inventory/tasks/active' + (params.size ? `?${params.toString()}` : '');
     try {
         const data = await inventoryRequest(url);
-        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
+        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return null;
         if (!data.task) {
             inventoryTask = null;
             lastInventoryVersion = null;
             renderInventoryTask(null);
-            return;
+            return true;
         }
-        if (data.task.unchanged) return;
+        if (data.task.unchanged) return true;
         let nextTask = data.task;
         if (nextTask.phase === 'serial_check') {
             const detail = await inventoryRequest(`/api/inventory/tasks/${encodeURIComponent(nextTask.task_id)}`);
-            if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
+            if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return null;
             if (detail.task && Array.isArray(detail.task.items)) {
                 nextTask = {...nextTask, items: detail.task.items};
             }
@@ -516,9 +517,11 @@ async function performInventoryPoll(force) {
         lastInventoryVersion = nextTask.version;
         renderInventoryTask(inventoryTask);
         if (!nextTask.gyj_status || nextTask.gyj_status === 'synced') setInventoryNotice('');
+        return true;
     } catch (error) {
-        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return;
+        if (generation !== inventoryQueryGeneration || queryKey !== inventoryQueryKey(currentInventoryQuery())) return null;
         setInventoryNotice(error.message, 'error');
+        return false;
     }
 }
 
@@ -531,11 +534,13 @@ function pollInventoryTask(options = {}) {
     if (options && options.force === true) inventoryPollQueuedForce = true;
     if (inventoryPollPromise) return inventoryPollPromise;
     inventoryPollPromise = (async () => {
+        let refreshed = true;
         do {
             const force = inventoryPollQueuedForce;
             inventoryPollQueuedForce = false;
-            await performInventoryPoll(force);
+            refreshed = await performInventoryPoll(force);
         } while (inventoryPollQueuedForce);
+        return refreshed !== false;
     })().finally(() => {
         inventoryPollPromise = null;
     });
@@ -733,7 +738,7 @@ function renderCountEntries(item) {
                 setCountMessage('该笔数量已被其他设备修改，已显示最新数值，请核对后重新填写。', 'error');
             }
         }
-        input.disabled = !countDialogEditable;
+        input.disabled = !countDialogEditable || countMutationPending;
         input.addEventListener('input', () => {
             countEntryDrafts.set(draftKey, {
                 value: input.value,
@@ -742,14 +747,14 @@ function renderCountEntries(item) {
         });
         const save = inventoryNode('button', 'btn btn-secondary', '保存');
         save.type = 'button';
-        save.disabled = !countDialogEditable;
+        save.disabled = !countDialogEditable || countMutationPending;
         save.addEventListener('click', () => updateCountEntry(entry, input.value));
         input.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') updateCountEntry(entry, input.value);
         });
         const remove = inventoryNode('button', 'btn btn-danger', '删除');
         remove.type = 'button';
-        remove.disabled = !countDialogEditable;
+        remove.disabled = !countDialogEditable || countMutationPending;
         remove.addEventListener('click', () => deleteCountEntry(entry));
         const actions = inventoryNode('div', 'inventory-count-entry-actions');
         actions.append(input, save, remove);
@@ -758,15 +763,26 @@ function renderCountEntries(item) {
     });
 }
 
-function applyCountEntryResult(data, message) {
+async function applyCountEntryResult(data, message) {
     acceptInventoryMutationVersion(data);
     currentCountItem = data.item;
     replaceInventoryItem(data.item);
     renderCountEntries(data.item);
     updateCountBook(data.item);
-    renderInventorySummary(inventoryTask);
     renderInventoryItems(inventoryTask.items || []);
-    setCountMessage(message, 'success');
+    lastInventoryVersion = null;
+    const refreshed = await pollInventoryTask({force: true});
+    setCountMessage(
+        refreshed === false ? `${message} 已保存，但统计刷新失败。` : message,
+        refreshed === false ? 'error' : 'success',
+    );
+}
+
+function setCountMutationPending(pending) {
+    countMutationPending = pending;
+    if (currentCountItem) renderCountEntries(currentCountItem);
+    inventoryElement('inventoryCountNewQuantity').disabled = !countDialogEditable || pending;
+    inventoryElement('inventoryCountAdd').disabled = !countDialogEditable || pending;
 }
 
 async function reloadOpenCountItem(draft = '') {
@@ -845,7 +861,7 @@ async function openCountItem(barcode) {
 }
 
 async function addCountEntry() {
-    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
+    if (countMutationPending || !countDialogEditable || !currentCountItem || !inventoryTask) return;
     const input = inventoryElement('inventoryCountNewQuantity');
     const quantity = input.value.trim();
     if (!decimalParts(quantity)) {
@@ -853,8 +869,7 @@ async function addCountEntry() {
         input.focus();
         return;
     }
-    input.disabled = true;
-    inventoryElement('inventoryCountAdd').disabled = true;
+    setCountMutationPending(true);
     setCountMessage('正在保存这一笔数量并读取 GYJ 最新库存。');
     try {
         const data = await inventoryPost(
@@ -862,46 +877,51 @@ async function addCountEntry() {
             {device_id: inventoryDeviceId, quantity},
         );
         input.value = '';
-        applyCountEntryResult(data, '已加入这一笔数量。');
+        await applyCountEntryResult(data, '已加入这一笔数量。');
     } catch (error) {
         await handleCountEntryError(error, quantity);
     } finally {
-        input.disabled = false;
-        inventoryElement('inventoryCountAdd').disabled = false;
-        input.focus();
+        setCountMutationPending(false);
+        if (countDialogEditable) input.focus();
     }
 }
 
 async function updateCountEntry(entry, rawQuantity) {
-    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
+    if (countMutationPending || !countDialogEditable || !currentCountItem || !inventoryTask) return;
     const quantity = String(rawQuantity || '').trim();
     if (!decimalParts(quantity)) {
         setCountMessage('请输入大于或等于 0 的有效数量。', 'error');
         return;
     }
+    setCountMutationPending(true);
     try {
         const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
             {device_id: inventoryDeviceId, quantity, entry_version: entry.version},
         );
         countEntryDrafts.delete(`${currentCountItem.barcode}:${entry.entry_id}`);
-        applyCountEntryResult(data, '该笔数量已更新。');
+        await applyCountEntryResult(data, '该笔数量已更新。');
     } catch (error) {
         await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
+    } finally {
+        setCountMutationPending(false);
     }
 }
 
 async function deleteCountEntry(entry) {
-    if (!countDialogEditable || !currentCountItem || !inventoryTask) return;
+    if (countMutationPending || !countDialogEditable || !currentCountItem || !inventoryTask) return;
+    setCountMutationPending(true);
     try {
         const data = await inventoryDelete(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
             {device_id: inventoryDeviceId, entry_version: entry.version},
         );
         countEntryDrafts.delete(`${currentCountItem.barcode}:${entry.entry_id}`);
-        applyCountEntryResult(data, '该笔数量已删除。');
+        await applyCountEntryResult(data, '该笔数量已删除。');
     } catch (error) {
         await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
+    } finally {
+        setCountMutationPending(false);
     }
 }
 

@@ -9,7 +9,7 @@ from inventory_store import normalize_quantity
 GYJ_STOCK_URL = "https://cloud.gyjerp.com/report/material_stock"
 GYJ_MATERIAL_URL = "https://cloud.gyjerp.com/material/material"
 GYJ_SERIAL_URL = (
-    "https://cloud.gyjerp.com/system/plugins/serialNumberStatistics/"
+    "https://cloud.gyjerp.com/plugins/serialNumberStatistics/"
     "serialNumberStatistics.html"
 )
 STOCK_SEARCH_FIELD = "请输入条码、名称、助记码、规格、型号等信息"
@@ -191,20 +191,29 @@ class GYJInventoryReader:
         if hasattr(self.page, "select_label"):
             self.page.select_label(label, value)
             return
-        field = self.browser_page.locator(
-            ".ant-form-item:visible, .search-form-item:visible"
-        ).filter(has_text=label)
-        trigger = field.locator(
-            ".ant-select-selector:visible, .ant-select-selection:visible"
-        ).first
-        if trigger.count() != 1:
+        for attempt in range(151):
+            field = self.browser_page.locator(
+                ".ant-form-item:visible, .search-form-item:visible"
+            ).filter(has_text=label)
+            trigger = field.locator(
+                ".ant-select-selector:visible, .ant-select-selection:visible"
+            ).first
+            if trigger.count() == 1:
+                trigger.click()
+                break
+            if attempt < 150:
+                self.browser_page.wait_for_timeout(100)
+        else:
             raise GYJInventoryReadError(f"未找到 GYJ 筛选字段：{label}")
-        trigger.click()
-        dropdown = self.browser_page.locator(".ant-select-dropdown:visible").last
-        choice = dropdown.get_by_text(value, exact=True)
-        if choice.count() != 1:
-            raise GYJInventoryReadError(f"未找到 GYJ {label} 选项：{value}")
-        choice.click()
+        for attempt in range(151):
+            dropdown = self.browser_page.locator(".ant-select-dropdown:visible").last
+            choice = dropdown.get_by_text(value, exact=True)
+            if choice.count() == 1:
+                choice.click()
+                return
+            if attempt < 150:
+                self.browser_page.wait_for_timeout(100)
+        raise GYJInventoryReadError(f"未找到 GYJ {label} 选项：{value}")
 
     def _expand_filters(self):
         if hasattr(self.page, "expand_filters"):
@@ -499,8 +508,8 @@ class GYJInventoryReader:
         if not value:
             raise GYJInventoryReadError(f"GYJ 序列号查询缺少{field}")
         self._goto(GYJ_SERIAL_URL)
-        self._expand_filters()
         self._fill_field(field, value)
+        self._expand_filters()
         self._select_label("已出库", "是" if shipped else "否")
         self._click_query()
         headers, rows, _badges = self._collect_pages("serial")

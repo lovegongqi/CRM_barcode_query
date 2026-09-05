@@ -451,6 +451,31 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="results"\] \.aurora-results-grid\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y:\s*auto',
         )
 
+    def test_inventory_audit_card_fits_inside_its_dialog(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        audit_rule = re.search(r"\.inventory-audit-card\s*\{([^}]*)\}", css, re.S)
+        event_rule = re.search(r"\.inventory-audit-event\s*\{([^}]*)\}", css, re.S)
+        span_rule = re.search(
+            r"\.inventory-audit-event\s+span\s*\{([^}]*)\}",
+            css,
+            re.S,
+        )
+        code_rule = re.search(
+            r"\.inventory-audit-event\s+code\s*\{([^}]*)\}",
+            css,
+            re.S,
+        )
+        self.assertIsNotNone(audit_rule)
+        self.assertIsNotNone(event_rule)
+        self.assertIsNotNone(span_rule)
+        self.assertIsNotNone(code_rule)
+        self.assertRegex(audit_rule.group(1), r"max-width:\s*100%")
+        self.assertRegex(event_rule.group(1), r"min-width:\s*0")
+        self.assertRegex(event_rule.group(1), r"overflow-wrap:\s*anywhere")
+        for value_rule in (span_rule, code_rule):
+            self.assertRegex(value_rule.group(1), r"min-width:\s*0")
+            self.assertRegex(value_rule.group(1), r"overflow-wrap:\s*anywhere")
+
     def test_work_pages_share_one_desktop_bottom_baseline(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn("@media (min-width: 721px)", css)
