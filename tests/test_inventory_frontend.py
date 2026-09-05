@@ -705,6 +705,54 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_serial_open_failure_hides_raw_backend_error(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.hidden = true; this.open = false;
+                    this.value = ''; this.disabled = false; this.textContent = '';
+                    this.className = '';
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                showModal() { this.open = true; }
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async () => ({
+                    ok: false, status: 502,
+                    json: async () => ({success: false, error: 'SENTINEL_INTERNAL_STACK'}),
+                }),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3, items: [{
+                    barcode: 'B2', name: '序列商品', state: 'serial_pending', has_serial: true,
+                }]};
+            `, context);
+            (async () => {
+                await vm.runInContext("openSerialItem('B2')", context);
+                const message = element('inventorySerialMessage').textContent;
+                assert.equal(message, '暂时无法读取账面序列号缓存，请关闭窗口后重试。');
+                assert.doesNotMatch(message, /SENTINEL_INTERNAL_STACK/);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_serial_refresh_preserves_unsubmitted_scan(self):
         self.run_node(
             r"""
@@ -1442,6 +1490,50 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     /visibilitychange[\s\S]*refreshSerialItem\([\s\S]*inventoryActiveTab/,
                 );
                 assert.equal((source.match(/refreshSerialItem\(true\)/g) || []).length, 1);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_manual_serial_refresh_failure_hides_raw_backend_error(self):
+        self.run_node(
+            r"""
+            let focusCount = 0;
+            const elements = new Map([
+                ['inventorySerialRefresh', {disabled: false}],
+                ['inventorySerialInput', {focus() { focusCount += 1; }}],
+                ['inventorySerialMessage', {textContent: '', className: ''}],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return elements.get(id); },
+                },
+                fetch: async () => ({
+                    ok: false, status: 502,
+                    json: async () => ({success: false, error: 'SENTINEL_PRIVATE_GYJ_ERROR'}),
+                }),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3};
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                currentSerialBarcode = 'B2';
+            `, context);
+            (async () => {
+                await vm.runInContext('manualRefreshSerialItem()', context);
+                const message = elements.get('inventorySerialMessage').textContent;
+                assert.equal(
+                    message,
+                    '重新获取失败。已保留上次成功获取的数据，请确认 GYJ 已登录后重试。',
+                );
+                assert.doesNotMatch(message, /SENTINEL_PRIVATE_GYJ_ERROR/);
+                assert.equal(elements.get('inventorySerialRefresh').disabled, false);
+                assert.equal(focusCount, 1);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )

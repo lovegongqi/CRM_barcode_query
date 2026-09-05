@@ -1142,13 +1142,13 @@ async function openSerialItem(barcode) {
         inventoryElement('inventorySerialFinish').disabled = false;
         setSerialMessage('已读取账面序列号缓存，可以开始扫描。', 'success');
         input.focus();
-    } catch (error) {
+    } catch (_error) {
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
         serialWorkspaceEditable = false;
         inventoryElement('inventorySerialInput').disabled = true;
         inventoryElement('inventorySerialRefresh').disabled = true;
         inventoryElement('inventorySerialFinish').disabled = true;
-        setSerialMessage(error.message, 'error');
+        setSerialMessage('暂时无法读取账面序列号缓存，请关闭窗口后重试。', 'error');
     }
 }
 
@@ -1164,7 +1164,7 @@ async function performSerialRefresh(force, requestId, generation) {
         return data.serial;
     } catch (error) {
         if (!serialOperationIsOpen(requestId)) return null;
-        setSerialMessage(`序列号刷新失败：${error.message}`, 'error');
+        setSerialMessage('暂时无法读取账面序列号缓存，请稍后重试。', 'error');
         throw error;
     }
 }
@@ -1185,8 +1185,8 @@ async function manualRefreshSerialItem() {
     try {
         await refreshSerialItem(true);
         setSerialMessage('账面序列号已重新获取。', 'success');
-    } catch (error) {
-        setSerialMessage(`重新获取失败：${error.message}。已保留上次数据。`, 'error');
+    } catch (_error) {
+        setSerialMessage('重新获取失败。已保留上次成功获取的数据，请确认 GYJ 已登录后重试。', 'error');
     } finally {
         button.disabled = false;
         inventoryElement('inventorySerialInput').focus();
