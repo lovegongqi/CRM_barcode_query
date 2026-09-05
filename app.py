@@ -44,6 +44,7 @@ from gyj_inventory import GYJInventoryReadError, GYJInventoryReader
 from inventory_export import build_discrepancy_workbook, build_inventory_workbook
 from inventory_service import InventoryService, InventoryServiceError
 from inventory_store import (
+    InventoryConfirmationRequired,
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
@@ -10583,6 +10584,13 @@ def _inventory_api(handler):
                 "error": str(exc),
                 "current_version": exc.current_version,
             }), 409
+        except InventoryConfirmationRequired as exc:
+            return jsonify({
+                "success": False,
+                "confirmation_required": True,
+                "pending_serial_count": exc.pending_serial_count,
+                "error": str(exc),
+            }), 409
         except InventoryConflict as exc:
             payload = {"success": False, "error": str(exc)}
             lock_owner = _inventory_lock_owner_label(
@@ -10982,9 +10990,13 @@ def api_inventory_finish_serial_item(task_id, barcode):
 def api_inventory_complete_task(task_id):
     owner, actor = _inventory_identity()
     data = _inventory_json_body()
+    allow_unverified_serials = data.get("allow_unverified_serials", False)
+    if not isinstance(allow_unverified_serials, bool):
+        raise ValueError("allow_unverified_serials 格式不正确")
     task_id = _inventory_path_value(task_id, "任务标识")
     task = inventory_service.complete_task(
         owner, task_id, actor,
+        allow_unverified_serials=allow_unverified_serials,
         expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response(

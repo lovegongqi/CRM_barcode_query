@@ -18,6 +18,7 @@ os.environ["CRM_DESKTOP_APP"] = "0"
 import app as app_module
 from inventory_service import InventoryService, InventoryServiceError
 from inventory_store import (
+    InventoryConfirmationRequired,
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
@@ -265,7 +266,7 @@ class InventoryRouteTest(unittest.TestCase):
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1"}, "scan"),
             ("delete", "/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1", {"device_id": "device-a"}, "serial"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/finish", {"device_id": "device-a"}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/complete", {"expected_version": 3}, "task"),
+            ("post", "/api/inventory/tasks/task-1/complete", {"expected_version": 3, "allow_unverified_serials": False}, "task"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/unlock", {"is_admin": False, "expected_version": 3}, "result"),
             ("get", "/api/inventory/discrepancies?state=open&query=A%2FB", None, "discrepancies"),
             ("post", "/api/inventory/discrepancies/1/notes", {"note": "checked", "serial": "SN/1", "actor": "spoofed", "expected_version": 3}, "note"),
@@ -300,7 +301,8 @@ class InventoryRouteTest(unittest.TestCase):
             "admin", "task-1", "A/B", "device-a", "admin",
         )
         self.service.complete_task.assert_called_once_with(
-            "admin", "task-1", "admin", expected_version=3,
+            "admin", "task-1", "admin",
+            allow_unverified_serials=False, expected_version=3,
         )
         self.store.admin_unlock.assert_called_once_with(
             "task-1", "A/B", "admin", True, expected_version=3,
@@ -411,6 +413,34 @@ class InventoryRouteTest(unittest.TestCase):
         )
         self.assertEqual(ordinary.status_code, 409)
         self.assertNotIn("current_version", ordinary.get_json())
+
+    def test_completion_confirmation_is_structured_and_boolean_is_validated(self):
+        client = self.login_account("counter")
+        self.service.complete_task.side_effect = InventoryConfirmationRequired(
+            "仍有 2 个商品未核对序列号",
+            pending_serial_count=2,
+        )
+
+        warning = client.post(
+            "/api/inventory/tasks/task-1/complete",
+            json={"expected_version": 3, "allow_unverified_serials": False},
+        )
+        self.assertEqual(warning.status_code, 409)
+        self.assertEqual(warning.get_json(), {
+            "success": False,
+            "confirmation_required": True,
+            "pending_serial_count": 2,
+            "error": "仍有 2 个商品未核对序列号",
+        })
+
+        self.service.complete_task.reset_mock(side_effect=True)
+        invalid = client.post(
+            "/api/inventory/tasks/task-1/complete",
+            json={"allow_unverified_serials": "true"},
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("allow_unverified_serials", invalid.get_json()["error"])
+        self.service.complete_task.assert_not_called()
 
     def test_stale_key_mutations_return_409_and_retry_with_refreshed_version(self):
         client = self.login_account("admin", "admin-pass")

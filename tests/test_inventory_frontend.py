@@ -61,6 +61,72 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_complete_task_warns_once_then_confirms_unverified_serials(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            const notices = [];
+            const button = {disabled: false, hidden: false, textContent: '完成盘点'};
+            let confirms = 0;
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryCompleteTask') return button;
+                        if (id === 'inventoryNotice') return {textContent: '', className: ''};
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                window: {
+                    confirm(message) {
+                        confirms += 1;
+                        assert.match(message, /2/);
+                        return true;
+                    },
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    if (requests.length === 1) return {
+                        ok: false, status: 409, json: async () => ({
+                            success: false, confirmation_required: true,
+                            pending_serial_count: 2,
+                            error: '仍有 2 个商品未核对序列号',
+                        }),
+                    };
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 8,
+                        task: {task_id: 'T1', completed: true},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+                notices,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', version: 7, phase: 'counting'};
+                lastInventoryVersion = 7;
+                setInventoryNotice = (message, kind) => notices.push({message, kind});
+                pollInventoryTask = async () => {};
+            `, context);
+            (async () => {
+                await vm.runInContext('completeInventoryTask()', context);
+                assert.equal(confirms, 1);
+                assert.equal(requests.length, 2);
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
+                    allow_unverified_serials: false, expected_version: 7,
+                });
+                assert.deepEqual(JSON.parse(requests[1].options.body), {
+                    allow_unverified_serials: true, expected_version: 7,
+                });
+                assert.equal(button.disabled, false);
+                assert.equal(button.textContent, '完成盘点');
+                assert.equal(notices.at(-1).message, '盘点已完成，未盘商品未计入差异报告。');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_partial_count_rows_render_and_add_without_a_lock(self):
         self.run_node(
             r"""

@@ -9,6 +9,7 @@ from unittest import mock
 from datetime import datetime, timedelta
 
 from inventory_store import (
+    InventoryConfirmationRequired,
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
@@ -183,7 +184,12 @@ class InventoryStoreTests(unittest.TestCase):
                 (task["task_id"],),
             ).fetchall()
         self.assertIn(("task_created", "catalog_loaded;data_errors=1"), events)
-        self.assertIn(("task_completed", "discrepancies=1"), events)
+        completion = json.loads(next(
+            details for event_type, details in events
+            if event_type == "task_completed"
+        ))
+        self.assertEqual(completion["discrepancies"], 1)
+        self.assertEqual(completion["counted_items"], 1)
 
     def test_initialize_migrates_existing_items_with_empty_data_error(self):
         with closing(sqlite3.connect(self.db_path)) as connection:
@@ -1096,6 +1102,68 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertNotIn("price", "|".join(
             key.lower() for row in first_rows for key in row
         ))
+
+    def test_partial_completion_requires_serial_confirmation_and_excludes_uncounted(self):
+        catalog = [
+            {"barcode": "U", "name": "未盘", "spec": "", "model": "", "category": "配件", "unit": "个", "has_serial": False, "initial_stock": "1"},
+            {"barcode": "M", "name": "一致", "spec": "", "model": "", "category": "配件", "unit": "个", "has_serial": False, "initial_stock": "1"},
+            {"barcode": "V", "name": "数量差异", "spec": "", "model": "", "category": "配件", "unit": "个", "has_serial": False, "initial_stock": "2"},
+            {"barcode": "S", "name": "序列号未核对", "spec": "", "model": "", "category": "设备", "unit": "台", "has_serial": True, "initial_stock": "2"},
+        ]
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", catalog)
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        for barcode, quantity in (("M", "1"), ("V", "1"), ("S", "1")):
+            store.add_count_entry(
+                "admin", task["task_id"], barcode,
+                "盘点员", "device-a", quantity, catalog[[
+                    row["barcode"] for row in catalog
+                ].index(barcode)]["initial_stock"],
+            )
+
+        with self.assertRaises(InventoryConfirmationRequired) as raised:
+            store.complete_task("admin", task["task_id"], "盘点员")
+        self.assertEqual(raised.exception.pending_serial_count, 1)
+        self.assertNotEqual(
+            store.get_task_snapshot("admin", task["task_id"])["phase"],
+            "completed",
+        )
+        self.assertEqual(store.list_discrepancies("admin", "open"), [])
+
+        completed = store.complete_task(
+            "admin", task["task_id"], "盘点员",
+            allow_unverified_serials=True,
+        )
+        self.assertTrue(completed["completed"])
+        self.assertEqual(completed["counted_items"], 3)
+        self.assertEqual(completed["uncounted_items"], 1)
+        self.assertEqual(completed["unverified_serial_items"], 1)
+        discrepancies = store.list_discrepancies("admin", "open")
+        self.assertNotIn("U", {row["barcode"] for row in discrepancies})
+        self.assertEqual(
+            {(row["barcode"], row["kind"], row["serial"]) for row in discrepancies},
+            {
+                ("V", "product_quantity", None),
+                ("S", "product_quantity", None),
+                ("S", "serial_unverified", None),
+            },
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            details = connection.execute(
+                "SELECT details FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'task_completed'",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(
+            json.loads(details),
+            {
+                "allow_unverified_serials": True,
+                "counted_items": 3,
+                "discrepancies": 3,
+                "uncounted_items": 1,
+                "unverified_serial_items": 1,
+            },
+        )
 
     def test_notes_are_append_only_and_archive_restore_only_change_metadata(self):
         store, task = self.completed_difference_store()

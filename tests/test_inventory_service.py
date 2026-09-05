@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from inventory_service import InventoryService, InventoryServiceError
 from inventory_store import (
+    InventoryConfirmationRequired,
     InventoryConflict,
     InventoryNotFound,
     InventoryStore,
@@ -687,21 +688,25 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(self.store.list_discrepancies("admin", "open"), [])
         self.assertIsNone(self.store.get_active_task("admin"))
 
-    def test_complete_task_rejects_unfinished_quantity_or_serial_work(self):
+    def test_complete_task_allows_partial_counts_and_confirms_serial_pending(self):
         task = self.create_task()
-        with self.assertRaises(InventoryConflict):
-            self.service.complete_task("admin", task["task_id"], "管理员")
         self.submit(task["task_id"], "B2", "1", device_id="device-b")
-        with self.assertRaises(InventoryConflict):
+        with self.assertRaises(InventoryConfirmationRequired) as raised:
             self.service.complete_task("admin", task["task_id"], "管理员")
-        self.submit(task["task_id"], "A1", "2")
-        with self.assertRaises(InventoryConflict):
-            self.service.complete_task("admin", task["task_id"], "管理员")
-        self.assertEqual(
-            self.store.get_task_snapshot("admin", task["task_id"])["phase"],
-            "serial_check",
+        self.assertEqual(raised.exception.pending_serial_count, 1)
+
+        completed = self.service.complete_task(
+            "admin", task["task_id"], "管理员",
+            allow_unverified_serials=True,
         )
-        self.assertEqual(self.store.list_discrepancies("admin", "open"), [])
+        self.assertEqual(completed["counted_items"], 1)
+        self.assertEqual(completed["uncounted_items"], 1)
+        self.assertEqual(completed["unverified_serial_items"], 1)
+        self.assertEqual(
+            {(row["barcode"], row["kind"])
+             for row in self.store.list_discrepancies("admin", "open")},
+            {("B2", "product_quantity"), ("B2", "serial_unverified")},
+        )
 
     def test_completion_preserves_service_serial_classifications(self):
         task = self.create_serial_task()

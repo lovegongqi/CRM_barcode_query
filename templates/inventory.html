@@ -46,7 +46,10 @@
                     <h2 id="inventoryCurrentTitle">当前盘点</h2>
                     <p id="inventoryTaskMeta" class="muted">正在读取盘点任务…</p>
                 </div>
-                <button class="btn btn-primary" id="inventoryCreateTask" type="button">开始新盘点</button>
+                <div class="inventory-task-actions">
+                    <button class="btn btn-secondary" id="inventoryCompleteTask" type="button" hidden>完成盘点</button>
+                    <button class="btn btn-primary" id="inventoryCreateTask" type="button">开始新盘点</button>
+                </div>
             </div>
 
             <div id="inventoryNotice" class="inventory-notice" role="status" aria-live="polite"></div>

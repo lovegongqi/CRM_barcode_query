@@ -441,7 +441,12 @@ class InventoryService:
                 owner, task_id, barcode, device_id, actor,
             )
 
-    def complete_task(self, owner, task_id, actor, *, expected_version=None):
+    def complete_task(
+        self, owner, task_id, actor, *, allow_unverified_serials=False,
+        expected_version=None,
+    ):
         return self.store.complete_task(
-            owner, task_id, actor, expected_version=expected_version
+            owner, task_id, actor,
+            allow_unverified_serials=allow_unverified_serials,
+            expected_version=expected_version,
         )

@@ -426,9 +426,11 @@ function renderSerialQueue(task) {
 function renderInventoryTask(task) {
     const meta = inventoryElement('inventoryTaskMeta');
     const createButton = inventoryElement('inventoryCreateTask');
+    const completeButton = inventoryElement('inventoryCompleteTask');
     if (!task) {
         meta.textContent = '尚无进行中的盘点任务。';
         createButton.hidden = false;
+        completeButton.hidden = true;
         renderInventorySummary(null);
         renderInventoryItems([]);
         renderSerialQueue(null);
@@ -439,6 +441,7 @@ function renderInventoryTask(task) {
     const syncTime = inventoryText(task.last_sync_at, '尚未同步');
     meta.textContent = `${phase} · 最近 GYJ 同步 ${syncTime}`;
     createButton.hidden = true;
+    completeButton.hidden = !['counting', 'serial_check'].includes(task.phase);
     renderInventorySummary(task);
     renderInventoryItems(task.items || []);
     renderSerialQueue(task);
@@ -552,6 +555,50 @@ async function startInventoryTask() {
     } finally {
         button.disabled = false;
         button.textContent = '开始新盘点';
+    }
+}
+
+async function completeInventoryTask() {
+    if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
+    const button = inventoryElement('inventoryCompleteTask');
+    const taskId = inventoryTask.task_id;
+    const version = inventoryTask.version;
+    button.disabled = true;
+    button.textContent = '正在完成…';
+    try {
+        let data;
+        try {
+            data = await inventoryMutationPost(
+                `/api/inventory/tasks/${encodeURIComponent(taskId)}/complete`,
+                {allow_unverified_serials: false},
+                version,
+            );
+        } catch (error) {
+            if (!error.data || error.data.confirmation_required !== true) throw error;
+            const pending = Number(error.data.pending_serial_count) || 0;
+            const confirmed = window.confirm(
+                `仍有 ${pending} 个已盘商品未核对序列号。\n`
+                + '确认完成后，将按“序列号未核对”写入差异报告。'
+            );
+            if (!confirmed) {
+                setInventoryNotice('已取消完成盘点，可继续核对。');
+                return;
+            }
+            data = await inventoryMutationPost(
+                `/api/inventory/tasks/${encodeURIComponent(taskId)}/complete`,
+                {allow_unverified_serials: true},
+                version,
+            );
+        }
+        acceptInventoryMutationVersion(data);
+        await pollInventoryTask({force: true});
+        setInventoryNotice('盘点已完成，未盘商品未计入差异报告。', 'success');
+    } catch (error) {
+        if (isInventoryVersionConflict(error)) await refreshInventoryAfterVersionConflict();
+        setInventoryNotice(error.message, 'error');
+    } finally {
+        button.disabled = false;
+        button.textContent = '完成盘点';
     }
 }
 
@@ -1742,6 +1789,7 @@ function initializeInventoryPage() {
         if (inventoryHistoryHasMore) loadInventoryHistory(inventoryTabGeneration, false);
     });
     inventoryElement('inventoryCreateTask').addEventListener('click', startInventoryTask);
+    inventoryElement('inventoryCompleteTask').addEventListener('click', completeInventoryTask);
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
     inventoryElement('inventoryFilters').addEventListener('change', runInventorySearch);

@@ -79,6 +79,12 @@ class InventoryVersionConflict(InventoryConflict):
         self.current_version = int(current_version)
 
 
+class InventoryConfirmationRequired(InventoryConflict):
+    def __init__(self, message, *, pending_serial_count):
+        super().__init__(message)
+        self.pending_serial_count = int(pending_serial_count)
+
+
 class InventoryNotFound(RuntimeError):
     pass
 
@@ -1849,41 +1855,51 @@ class InventoryStore:
             raise InventoryNotFound("差异记录不存在")
         return cls._discrepancy_dict(connection, row)
 
-    def complete_task(self, owner, task_id, actor, *, expected_version=None):
+    def complete_task(
+        self, owner, task_id, actor, *, allow_unverified_serials=False,
+        expected_version=None,
+    ):
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             task = self._task_for_owner(connection, owner, task_id)
             self._assert_expected_version(connection, task_id, expected_version)
+            counts = connection.execute(
+                """SELECT
+                       SUM(CASE WHEN completed_counted_quantity IS NOT NULL
+                                AND status <> 'data_error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN completed_counted_quantity IS NULL
+                                AND status <> 'data_error' THEN 1 ELSE 0 END),
+                       SUM(CASE WHEN status = 'serial_pending' THEN 1 ELSE 0 END)
+                     FROM inventory_items WHERE task_id = ?""",
+                (task_id,),
+            ).fetchone()
+            counted_items = int(counts[0] or 0)
+            uncounted_items = int(counts[1] or 0)
+            unverified_serial_items = int(counts[2] or 0)
             if task["phase"] == "completed":
                 connection.commit()
                 result = self._row_dict(task)
                 result["completed"] = True
+                result["counted_items"] = counted_items
+                result["uncounted_items"] = uncounted_items
+                result["unverified_serial_items"] = unverified_serial_items
                 return result
             if task["phase"] not in {"counting", "serial_check"}:
                 raise InventoryConflict("当前任务不能完成")
-
-            unfinished = connection.execute(
-                """SELECT COUNT(*) FROM inventory_items
-                   WHERE task_id = ? AND completed_counted_quantity IS NULL
-                     AND status <> 'data_error'""",
-                (task_id,),
-            ).fetchone()[0]
-            if unfinished:
-                raise InventoryConflict("仍有商品未完成数量盘点")
-            serial_pending = connection.execute(
-                """SELECT COUNT(*) FROM inventory_items
-                   WHERE task_id = ? AND status = 'serial_pending'""",
-                (task_id,),
-            ).fetchone()[0]
-            if serial_pending:
-                raise InventoryConflict("仍有商品未完成序列号核对")
+            if unverified_serial_items and not allow_unverified_serials:
+                raise InventoryConfirmationRequired(
+                    f"仍有 {unverified_serial_items} 个商品未核对序列号",
+                    pending_serial_count=unverified_serial_items,
+                )
 
             timestamp = self._now_text()
             discrepancy_count = 0
             items = connection.execute(
                 """SELECT * FROM inventory_items
-                   WHERE task_id = ? ORDER BY barcode""",
+                   WHERE task_id = ?
+                     AND completed_counted_quantity IS NOT NULL
+                   ORDER BY barcode""",
                 (task_id,),
             ).fetchall()
             for item in items:
@@ -1895,6 +1911,21 @@ class InventoryStore:
                            (task_id, barcode, serial, kind, book_quantity,
                             counted_quantity, difference, status, created_at)
                            VALUES (?, ?, NULL, 'product_quantity', ?, ?, ?,
+                                   'open', ?)""",
+                        (
+                            task_id, item["barcode"],
+                            item["completed_book_quantity"],
+                            item["completed_counted_quantity"],
+                            item["difference"], timestamp,
+                        ),
+                    )
+                    discrepancy_count += 1
+                if item["status"] == "serial_pending":
+                    connection.execute(
+                        """INSERT INTO inventory_discrepancies
+                           (task_id, barcode, serial, kind, book_quantity,
+                            counted_quantity, difference, status, created_at)
+                           VALUES (?, ?, NULL, 'serial_unverified', ?, ?, ?,
                                    'open', ?)""",
                         (
                             task_id, item["barcode"],
@@ -1938,7 +1969,13 @@ class InventoryStore:
             self._bump_version(connection, task_id)
             self._audit(
                 connection, task_id, "task_completed", actor,
-                details=f"discrepancies={discrepancy_count}",
+                details=json.dumps({
+                    "allow_unverified_serials": bool(allow_unverified_serials),
+                    "counted_items": counted_items,
+                    "discrepancies": discrepancy_count,
+                    "uncounted_items": uncounted_items,
+                    "unverified_serial_items": unverified_serial_items,
+                }, ensure_ascii=False, separators=(",", ":")),
                 created_at=timestamp,
             )
             connection.commit()
@@ -1946,6 +1983,9 @@ class InventoryStore:
                 "SELECT * FROM inventory_tasks WHERE task_id = ?", (task_id,)
             ).fetchone())
             result["completed"] = True
+            result["counted_items"] = counted_items
+            result["uncounted_items"] = uncounted_items
+            result["unverified_serial_items"] = unverified_serial_items
             return result
         except Exception:
             connection.rollback()
