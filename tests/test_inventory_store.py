@@ -1165,6 +1165,77 @@ class InventoryStoreTests(unittest.TestCase):
             },
         )
 
+    def test_admin_reopens_completed_task_without_losing_entries(self):
+        store, task = self.completed_difference_store()
+        store.complete_task("admin", task["task_id"], "管理员")
+        discrepancy = store.list_discrepancies("admin", "open")[0]
+        store.add_discrepancy_note(
+            "admin", discrepancy["id"], "管理员", "保留备注"
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            scan_count = connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_scans WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0]
+
+        reopened = store.reopen_task(
+            "admin", task["task_id"], "管理员",
+            {"A1": "3", "B2": "1"},
+            synced_at=datetime(2026, 9, 1, 11, 0, 0),
+        )
+
+        self.assertEqual(reopened["phase"], "counting")
+        self.assertIsNone(reopened["completed_at"])
+        self.assertEqual(reopened["last_sync_at"], "2026-09-01T11:00:00")
+        restarted = InventoryStore(self.db_path).get_active_task("admin")
+        self.assertEqual(restarted["task_id"], task["task_id"])
+        snapshot = store.get_task_snapshot("admin", task["task_id"])
+        items = {row["barcode"]: row for row in snapshot["items"]}
+        self.assertEqual(items["A1"]["count_expression"], "2")
+        self.assertEqual(items["A1"]["latest_book_qty"], "3")
+        self.assertEqual(items["A1"]["diff_qty"], "-1")
+        self.assertEqual(items["B2"]["count_expression"], "1")
+        self.assertEqual(items["B2"]["latest_book_qty"], "1")
+        self.assertEqual(items["B2"]["state"], "matched")
+        self.assertEqual(store.list_discrepancies("admin", "open"), [])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_scans WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0], scan_count)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_notes WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0], 1)
+            audit = connection.execute(
+                "SELECT details FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'task_reopened'",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(
+            json.loads(audit),
+            {"from_phase": "completed", "to_phase": "counting"},
+        )
+
+    def test_reopen_is_atomic_when_another_task_is_active(self):
+        store = InventoryStore(self.db_path)
+        target = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", target["task_id"])
+        store.complete_task("admin", target["task_id"], "管理员")
+        active = store.create_task("admin", "管理员", self.catalog())
+        before = store.get_task_snapshot("admin", target["task_id"])
+
+        with self.assertRaisesRegex(InventoryConflict, "先完成当前任务"):
+            store.reopen_task(
+                "admin", target["task_id"], "管理员",
+                {"A1": "2", "B2": "0"},
+            )
+
+        after = store.get_task_snapshot("admin", target["task_id"])
+        self.assertEqual(after["phase"], "completed")
+        self.assertEqual(after["version"], before["version"])
+        self.assertEqual(store.get_active_task("admin")["task_id"], active["task_id"])
+
     def test_notes_are_append_only_and_archive_restore_only_change_metadata(self):
         store, task = self.completed_difference_store()
         completed = store.complete_task("admin", task["task_id"], "管理员")

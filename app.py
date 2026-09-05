@@ -10828,6 +10828,19 @@ def api_inventory_task(task_id):
     return jsonify({"success": True, "task": _inventory_public_task(task)})
 
 
+@app.route("/api/inventory/tasks/<task_id>/reopen", methods=["POST"])
+@_inventory_api
+def api_inventory_reopen_task(task_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以继续历史盘点")
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    task = inventory_service.reopen_task(owner, task_id, actor)
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task_id
+    )
+
+
 @app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/claim", methods=["POST"])
 @_inventory_api
 def api_inventory_claim_item(task_id, barcode):

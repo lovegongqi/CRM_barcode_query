@@ -1993,6 +1993,105 @@ class InventoryStore:
         finally:
             connection.close()
 
+    def reopen_task(
+        self, owner, task_id, actor, stock_totals, *, synced_at=None
+    ):
+        if not isinstance(stock_totals, dict):
+            raise ValueError("GYJ 库存汇总结果格式不正确")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] != "completed":
+                raise InventoryConflict("只能继续已完成的盘点任务")
+            active = connection.execute(
+                """SELECT 1 FROM inventory_tasks
+                   WHERE owner = ? AND task_id <> ?
+                     AND phase IN ('loading', 'counting', 'serial_check', 'sync_error')
+                   LIMIT 1""",
+                (owner, task_id),
+            ).fetchone()
+            if active:
+                raise InventoryConflict("请先完成当前任务，再继续历史盘点")
+
+            timestamp = self._timestamp_text(synced_at or self.now())
+            items = connection.execute(
+                "SELECT * FROM inventory_items WHERE task_id = ? ORDER BY barcode",
+                (task_id,),
+            ).fetchall()
+            normalized_totals = {}
+            for item in items:
+                if item["status"] == "data_error":
+                    continue
+                if item["barcode"] not in stock_totals:
+                    raise ValueError(f"GYJ 库存缺少商品: {item['barcode']}")
+                normalized_totals[item["barcode"]] = normalize_quantity(
+                    stock_totals[item["barcode"]]
+                )
+
+            connection.execute(
+                """INSERT INTO inventory_count_entries
+                   (task_id, barcode, quantity, version,
+                    created_by, created_device_id, created_at,
+                    updated_by, updated_device_id, updated_at)
+                   SELECT items.task_id, items.barcode,
+                          items.completed_counted_quantity, 1,
+                          'system:migration', 'system:migration',
+                          COALESCE(items.completed_at, items.updated_at),
+                          'system:migration', 'system:migration',
+                          COALESCE(items.completed_at, items.updated_at)
+                     FROM inventory_items AS items
+                    WHERE items.task_id = ?
+                      AND items.completed_counted_quantity IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM inventory_count_entries AS entries
+                           WHERE entries.task_id = items.task_id
+                             AND entries.barcode = items.barcode
+                      )""",
+                (task_id,),
+            )
+            connection.execute(
+                """UPDATE inventory_tasks
+                   SET phase = 'counting', completed_at = NULL,
+                       gyj_status = 'synced', sync_resume_phase = NULL,
+                       last_sync_at = ?
+                   WHERE task_id = ?""",
+                (timestamp, task_id),
+            )
+            connection.execute(
+                "DELETE FROM inventory_discrepancies WHERE task_id = ?",
+                (task_id,),
+            )
+            connection.execute(
+                "DELETE FROM inventory_item_locks WHERE task_id = ?",
+                (task_id,),
+            )
+            for item in items:
+                if item["status"] == "data_error":
+                    continue
+                self._recalculate_item_from_entries(
+                    connection, task, item,
+                    normalized_totals[item["barcode"]], timestamp,
+                )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "task_reopened", actor,
+                details=json.dumps(
+                    {"from_phase": "completed", "to_phase": "counting"},
+                    ensure_ascii=False, separators=(",", ":"),
+                ),
+                created_at=timestamp,
+            )
+            connection.commit()
+            return self._row_dict(connection.execute(
+                "SELECT * FROM inventory_tasks WHERE task_id = ?", (task_id,)
+            ).fetchone())
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def list_task_history(self, owner, limit=20, offset=0):
         """Return one completed-task page with server-side summary counts.
 

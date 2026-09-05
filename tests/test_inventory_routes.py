@@ -110,6 +110,9 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.delete_serial_scan.return_value = {"barcode": "A/B", "removed": "SN/1"}
         self.service.finish_serial_item.return_value = {"barcode": "A/B", "counts": {}}
         self.service.complete_task.return_value = {"task_id": "task-1", "completed": True}
+        self.service.reopen_task.return_value = {
+            "task_id": "task-1", "phase": "counting", "version": 9,
+        }
         self.store.admin_unlock.return_value = {"task_id": "task-1", "barcode": "A/B", "unlocked": True}
         self.store.add_discrepancy_note.return_value = {
             "id": 1, "note": "checked", "task_version": 3,
@@ -757,6 +760,26 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.admin_unlock.assert_not_called()
         self.store.archive_discrepancy.assert_not_called()
         self.store.restore_discrepancy.assert_not_called()
+
+    def test_only_admin_can_reopen_inventory_task(self):
+        ordinary = self.login_account("counter")
+        denied = ordinary.post(
+            "/api/inventory/tasks/task-1/reopen", json={"is_admin": True}
+        )
+        self.assertEqual(denied.status_code, 403)
+        self.service.reopen_task.assert_not_called()
+
+        admin = self.login_account("admin", "admin-pass")
+        reopened = admin.post("/api/inventory/tasks/task-1/reopen", json={})
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(reopened.get_json(), {
+            "success": True,
+            "task": {"task_id": "task-1", "phase": "counting", "version": 9},
+            "version": 9,
+        })
+        self.service.reopen_task.assert_called_once_with(
+            "admin", "task-1", "admin"
+        )
 
     def test_history_and_discrepancy_route_json_contract_matches_store_rows(self):
         history_row = {

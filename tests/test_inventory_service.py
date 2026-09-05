@@ -775,6 +775,26 @@ class InventoryServiceTests(unittest.TestCase):
         )
         self.assertEqual(history_page["total"], 2)
 
+    def test_reopen_reads_current_gyj_totals_before_restoring_task(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "A1", "2")
+        self.service.complete_task("admin", task["task_id"], "管理员")
+        self.worker.stock["A1"] = "3"
+
+        reopened = self.service.reopen_task(
+            "admin", task["task_id"], "管理员"
+        )
+
+        self.assertEqual(reopened["phase"], "counting")
+        self.assertEqual(self.worker.totals_reads, 1)
+        item = next(
+            row for row in self.store.get_task_snapshot(
+                "admin", task["task_id"]
+            )["items"] if row["barcode"] == "A1"
+        )
+        self.assertEqual(item["latest_book_qty"], "3")
+        self.assertEqual(item["diff_qty"], "-1")
+
     def test_submit_failure_keeps_lock_and_success_releases_it(self):
         task = self.create_task()
         self.service.open_count_item("admin", task["task_id"], "A1", "device-a", "甲")

@@ -450,3 +450,11 @@ class InventoryService:
             allow_unverified_serials=allow_unverified_serials,
             expected_version=expected_version,
         )
+
+    def reopen_task(self, owner, task_id, actor):
+        totals = self._call_worker(owner, "read_inventory_stock_totals")
+        if not isinstance(totals, dict):
+            raise InventoryServiceError("GYJ 库存汇总结果格式不正确")
+        return self.store.reopen_task(
+            owner, task_id, actor, totals, synced_at=self.now()
+        )
