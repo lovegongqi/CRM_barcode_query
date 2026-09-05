@@ -334,12 +334,9 @@ function renderInventoryItems(items) {
     }
     visible.forEach((item) => {
         const completed = inventoryIsCompleted(item);
-        const row = inventoryNode('button', 'inventory-item');
-        row.type = 'button';
+        const row = inventoryNode('article', 'inventory-item');
         row.dataset.barcode = inventoryText(item.barcode, '');
-        row.disabled = Boolean(item.data_error);
         row.setAttribute('aria-label', `${inventoryText(item.name, '未命名商品')}，${inventoryStateLabel(item)}`);
-        row.addEventListener('click', () => openCountItem(item.barcode));
 
         const top = inventoryNode('div', 'inventory-item-top');
         const product = inventoryNode('div', 'inventory-item-product');
@@ -367,6 +364,20 @@ function renderInventoryItems(items) {
             inventoryNode('span', '', completed ? '可继续追加或修改分次数量' : '尚未记录实盘数量'),
             inventoryNode('span', '', `更新时间：${inventoryText(item.updated_at)}`),
         );
+        const actions = inventoryNode('div', 'inventory-item-actions');
+        const count = inventoryNode(
+            'button', 'btn btn-secondary', completed ? '修改数量' : '盘点数量'
+        );
+        count.type = 'button';
+        count.disabled = Boolean(item.data_error);
+        count.addEventListener('click', () => openCountItem(item.barcode));
+        actions.append(count);
+        if (item.state === 'serial_pending') {
+            const serial = inventoryNode('button', 'btn btn-primary', '核对序列号');
+            serial.type = 'button';
+            serial.addEventListener('click', () => openSerialItem(item.barcode));
+            actions.append(serial);
+        }
         row.append(
             top,
             inventoryNode(
@@ -377,6 +388,7 @@ function renderInventoryItems(items) {
             ),
             metrics,
             foot,
+            actions,
         );
         root.append(row);
     });
@@ -385,10 +397,10 @@ function renderInventoryItems(items) {
 function renderSerialQueue(task) {
     const section = inventoryElement('inventorySerialQueueRoot');
     const root = inventoryElement('inventorySerialQueue');
-    const rows = task && task.phase === 'serial_check'
+    const rows = task && ['counting', 'serial_check'].includes(task.phase)
         ? (task.items || []).filter((item) => item.state === 'serial_pending')
         : [];
-    section.hidden = !(task && task.phase === 'serial_check');
+    section.hidden = !rows.length;
     root.replaceChildren();
     if (!rows.length) {
         root.append(inventoryNode('div', 'inventory-empty', '没有待核对的序列号商品。'));
@@ -442,7 +454,13 @@ function renderInventoryTask(task) {
             inventoryElement('inventoryCountNewQuantity').value = draft;
         }
     }
-    if (serialWorkspaceOpen && task.phase !== 'serial_check') closeSerialWorkspace();
+    if (serialWorkspaceOpen && !serialFinishPending) {
+        const serialItem = (task.items || []).find(
+            (item) => item.barcode === currentSerialBarcode
+        );
+        if (!serialItem || serialItem.state === 'serial_pending') refreshSerialItem();
+        else closeSerialWorkspace();
+    }
     if (task.gyj_status && task.gyj_status !== 'synced') setInventoryNotice(task.gyj_status, 'error');
 }
 
@@ -887,45 +905,8 @@ function restoreSerialAfterFailedFinish(message) {
     input.focus();
 }
 
-async function sendSerialHeartbeat() {
-    if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
-    const requestId = serialWorkspaceRequestId;
-    const taskId = inventoryTask.task_id;
-    const barcode = currentSerialBarcode;
-    const isCurrentWorkspace = () => (
-        requestId === serialWorkspaceRequestId
-        && serialWorkspaceOpen
-        && inventoryTask
-        && inventoryTask.task_id === taskId
-        && currentSerialBarcode === barcode
-    );
-    try {
-        await inventoryMutationPost(
-            `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/heartbeat`,
-            {device_id: inventoryDeviceId},
-        );
-        return isCurrentWorkspace();
-    } catch (error) {
-        if (!isCurrentWorkspace()) return false;
-        if (inventoryIsVersionConflict(error)) {
-            await refreshInventoryAfterVersionConflict();
-            if (!isCurrentWorkspace()) return false;
-            setSerialMessage('盘点任务已更新，已刷新到最新版本。', 'error');
-            return true;
-        }
-        if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setSerialReadOnly(error.message, owner || '');
-        } else {
-            setSerialMessage(`锁定心跳失败：${error.message}`, 'error');
-        }
-        return error.status !== 409;
-    }
-}
-
 async function refreshSerialWorkspace() {
-    const heartbeatIsCurrent = await sendSerialHeartbeat();
-    if (!heartbeatIsCurrent || !serialWorkspaceEditable || serialFinishPending) return;
+    if (!serialWorkspaceEditable || serialFinishPending) return;
     try {
         await refreshSerialItem();
     } catch (_error) {
@@ -936,15 +917,6 @@ async function refreshSerialWorkspace() {
 function startSerialRefreshTimer() {
     stopSerialRefreshTimer();
     serialRefreshTimer = setInterval(refreshSerialWorkspace, 60000);
-}
-
-function setSerialReadOnly(message, owner = '') {
-    serialWorkspaceEditable = false;
-    serialFinishPending = false;
-    stopSerialRefreshTimer();
-    inventoryElement('inventorySerialInput').disabled = true;
-    inventoryElement('inventorySerialFinish').disabled = true;
-    setSerialMessage(owner ? `${message} 当前锁定者：${owner}` : message, 'error');
 }
 
 function serialClassificationLabel(classification) {
@@ -1037,7 +1009,7 @@ function closeSerialWorkspace() {
 }
 
 async function openSerialItem(barcode) {
-    if (!inventoryTask || inventoryTask.phase !== 'serial_check') return;
+    if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
     const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
     if (!item || item.state !== 'serial_pending') return;
     const requestId = ++serialWorkspaceRequestId;
@@ -1052,60 +1024,45 @@ async function openSerialItem(barcode) {
     inventoryElement('inventorySerialInput').disabled = true;
     inventoryElement('inventorySerialFinish').disabled = true;
     renderSerialReconciliation({barcode, item, counts: {}});
-    setSerialMessage('正在锁定商品并从 GYJ 刷新账面序列号…');
+    setSerialMessage('正在从 GYJ 刷新账面序列号…');
     if (!dialog.open) dialog.showModal();
     try {
-        const data = await inventoryMutationPost(
+        const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(barcode)}/serial/open`,
             {device_id: inventoryDeviceId},
         );
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
+        acceptInventoryMutationVersion(data);
         renderSerialReconciliation(data.serial);
         serialWorkspaceEditable = true;
         const input = inventoryElement('inventorySerialInput');
         input.disabled = false;
         inventoryElement('inventorySerialFinish').disabled = false;
-        setSerialMessage('已锁定并刷新账面序列号，可以开始扫描。', 'success');
+        setSerialMessage('已刷新账面序列号，可以开始扫描。', 'success');
         startSerialRefreshTimer();
         input.focus();
     } catch (error) {
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
-        if (inventoryIsVersionConflict(error)) {
-            setSerialReadOnly(`${error.message}，请关闭后重新打开商品。`);
-            await refreshInventoryAfterVersionConflict();
-        } else if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setSerialReadOnly(error.message, owner || '');
-            lastInventoryVersion = null;
-            await pollInventoryTask({force: true});
-        } else {
-            setSerialReadOnly(error.message);
-        }
+        serialWorkspaceEditable = false;
+        inventoryElement('inventorySerialInput').disabled = true;
+        inventoryElement('inventorySerialFinish').disabled = true;
+        setSerialMessage(error.message, 'error');
     }
 }
 
 async function performSerialRefresh(force, requestId, generation) {
     if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return null;
     try {
-        const data = await inventoryMutationPost(
+        const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serial/refresh`,
             {device_id: inventoryDeviceId, force: force === true},
         );
+        acceptInventoryMutationVersion(data);
         if (!renderSerialOperation(data.serial, requestId, generation)) return null;
         return data.serial;
     } catch (error) {
         if (!serialOperationIsOpen(requestId)) return null;
-        if (inventoryIsVersionConflict(error)) {
-            await refreshInventoryAfterVersionConflict();
-            setSerialMessage('盘点任务已更新，请重试刷新。', 'error');
-        } else if (error.status === 409) {
-            const owner = error.data && error.data.lock_owner;
-            setSerialReadOnly(error.message, owner || '');
-            lastInventoryVersion = null;
-            await pollInventoryTask({force: true});
-        } else {
-            setSerialMessage(`序列号刷新失败：${error.message}`, 'error');
-        }
+        setSerialMessage(`序列号刷新失败：${error.message}`, 'error');
         throw error;
     }
 }
@@ -1143,22 +1100,15 @@ async function scanSerial(event) {
             if (!serialWorkspaceEditable) return;
             let data;
             try {
-                data = await inventoryMutationPost(
+                data = await inventoryPost(
                     `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials`,
                     {device_id: inventoryDeviceId, serial},
                 );
+                acceptInventoryMutationVersion(data);
             } catch (error) {
                 if (serialOperationIsOpen(requestId)) {
                     serialMutationFailures.set(mutationKey, error.message || '扫码保存失败');
-                    if (inventoryIsVersionConflict(error)) {
-                        await refreshInventoryAfterVersionConflict();
-                        setSerialMessage('盘点任务已更新，请重新扫码。', 'error');
-                    } else if (error.status === 409) {
-                        const owner = error.data && error.data.lock_owner;
-                        setSerialReadOnly(error.message, owner || '');
-                    } else {
-                        setSerialMessage(error.message, 'error');
-                    }
+                    setSerialMessage(error.message, 'error');
                 }
                 return;
             }
@@ -1205,22 +1155,15 @@ function deleteSerialScan(serial) {
             if (!serialWorkspaceEditable) return;
             let data;
             try {
-                data = await inventoryMutationDelete(
+                data = await inventoryDelete(
                     `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serials/${encodeURIComponent(serial)}`,
                     {device_id: inventoryDeviceId},
                 );
+                acceptInventoryMutationVersion(data);
             } catch (error) {
                 if (serialOperationIsOpen(requestId)) {
                     serialMutationFailures.set(mutationKey, error.message || '删除失败');
-                    if (inventoryIsVersionConflict(error)) {
-                        await refreshInventoryAfterVersionConflict();
-                        setSerialMessage('盘点任务已更新，请重试删除。', 'error');
-                    } else if (error.status === 409) {
-                        const owner = error.data && error.data.lock_owner;
-                        setSerialReadOnly(error.message, owner || '');
-                    } else {
-                        setSerialMessage(error.message, 'error');
-                    }
+                    setSerialMessage(error.message, 'error');
                 }
                 return;
             }
@@ -1258,7 +1201,8 @@ function finishSerialItem() {
                 return;
             }
             const prefix = `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}`;
-            const data = await inventoryMutationPost(`${prefix}/serial/finish`, {device_id: inventoryDeviceId});
+            const data = await inventoryPost(`${prefix}/serial/finish`, {device_id: inventoryDeviceId});
+            acceptInventoryMutationVersion(data);
             if (!renderSerialOperation(data.serial, requestId, generation)) return;
             closeSerialWorkspace();
             lastInventoryVersion = null;
@@ -1266,19 +1210,9 @@ function finishSerialItem() {
             await pollInventoryTask({force: true});
         } catch (error) {
             if (!serialOperationIsOpen(requestId)) return;
-            if (inventoryIsVersionConflict(error)) {
-                await refreshInventoryAfterVersionConflict();
-                restoreSerialAfterFailedFinish(
-                    '盘点任务已更新，请确认后重试完成核对。'
-                );
-            } else if (error.status === 409) {
-                const owner = error.data && error.data.lock_owner;
-                setSerialReadOnly(error.message, owner || '');
-            } else {
-                restoreSerialAfterFailedFinish(
-                    `未能完成核对：${error.message}。当前扫描界面已保留。`
-                );
-            }
+            restoreSerialAfterFailedFinish(
+                `未能完成核对：${error.message}。当前扫描界面已保留。`
+            );
         }
     });
 }

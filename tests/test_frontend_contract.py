@@ -863,6 +863,8 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("CURRENT_ACCOUNT.is_admin", script)
         self.assertIn("encodeURIComponent(serial)", script)
         self.assertIn("method: 'DELETE'", script)
+        self.assertNotIn("/heartbeat", script)
+        self.assertNotIn("sendSerialHeartbeat", script)
 
     def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")

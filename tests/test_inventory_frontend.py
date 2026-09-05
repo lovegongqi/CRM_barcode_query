@@ -205,6 +205,119 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_counting_phase_exposes_serial_reconciliation(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.hidden = true; this.open = false;
+                    this.value = ''; this.disabled = false; this.textContent = '';
+                    this.dataset = {}; this.className = '';
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener(type, handler) { this.handler = handler; }
+                setAttribute() {}
+                showModal() { this.open = true; }
+                close() { this.open = false; }
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 4,
+                        serial: {barcode: 'B2', item: {barcode: 'B2', state: 'serial_pending'}, counts: {}},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3, items: [{
+                    barcode: 'B2', name: '序列商品', state: 'serial_pending', has_serial: true,
+                }]};
+                renderSerialReconciliation = value => { currentSerialData = value; };
+                startSerialRefreshTimer = () => {};
+                renderSerialQueue(inventoryTask);
+            `, context);
+            assert.equal(element('inventorySerialQueueRoot').hidden, false);
+            assert.equal(element('inventorySerialQueue').children.length, 1);
+            (async () => {
+                await vm.runInContext("openSerialItem('B2')", context);
+                assert.equal(requests.length, 1);
+                assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/B2/serial/open');
+                assert.deepEqual(JSON.parse(requests[0].options.body), {device_id: 'device-a'});
+                assert.equal(vm.runInContext('serialWorkspaceEditable', context), true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_serial_refresh_preserves_unsubmitted_scan(self):
+        self.run_node(
+            r"""
+            const input = {value: 'UNSUBMITTED', disabled: false, focus() {}};
+            const elements = new Map([['inventorySerialInput', input]]);
+            let revision = 0;
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {
+                            textContent: '', className: '', disabled: false,
+                            replaceChildren() {}, append() {}, focus() {},
+                        });
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options) => {
+                    revision += 1;
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: revision + 4,
+                        serial: {
+                            barcode: 'B2', item: {barcode: 'B2'},
+                            counts: {matched: revision},
+                            matched: Array.from({length: revision}, (_, index) => ({serial: `S${index}`})),
+                            system_only: [], physical_only: [], other_product: [], duplicates: [],
+                        },
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3};
+                currentSerialBarcode = 'B2';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                renderSerialReconciliation = value => { currentSerialData = value; };
+            `, context);
+            (async () => {
+                await vm.runInContext('refreshSerialItem()', context);
+                await vm.runInContext('refreshSerialItem()', context);
+                assert.equal(input.value, 'UNSUBMITTED');
+                assert.equal(vm.runInContext('currentSerialData.counts.matched', context), 2);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_stale_count_entry_refreshes_rows_and_preserves_new_entry_draft(self):
         self.run_node(
             r"""
@@ -808,13 +921,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(focusCount, 1);
                 assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/A%2FB/serials');
                 assert.deepEqual(JSON.parse(requests[0].options.body), {
-                    device_id: 'device-a', serial: 'SN/1', expected_version: 1,
+                    device_id: 'device-a', serial: 'SN/1',
                 });
                 await vm.runInContext("deleteSerialScan('SN/1')", context);
                 const deletion = requests.find(request => request.options.method === 'DELETE');
                 assert.equal(deletion.url, '/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1');
                 assert.deepEqual(JSON.parse(deletion.options.body), {
-                    device_id: 'device-a', expected_version: 1,
+                    device_id: 'device-a',
                 });
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -850,14 +963,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 serialWorkspaceOpen = true;
                 serialWorkspaceEditable = true;
                 currentSerialBarcode = 'A1';
-                sendSerialHeartbeat = async () => { refreshEvents.push('heartbeat'); return true; };
                 refreshSerialItem = async () => { refreshEvents.push('refresh'); };
                 startSerialRefreshTimer();
             `, context);
             (async () => {
                 assert.equal(intervals[0].delay, 60000);
                 await intervals[0].callback();
-                assert.deepEqual(refreshEvents, ['heartbeat', 'refresh']);
+                assert.deepEqual(refreshEvents, ['refresh']);
                 vm.runInContext("closeSerialWorkspace()", context);
                 assert.deepEqual(cleared, [1]);
                 assert.equal(vm.runInContext('serialRefreshTimer', context), null);
@@ -1176,7 +1288,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(requests.length, 1);
                 assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/A%2FB/serial/finish');
                 assert.deepEqual(JSON.parse(requests[0].options.body), {
-                    device_id: 'device-a', expected_version: 1,
+                    device_id: 'device-a',
                 });
                 assert.equal(vm.runInContext('serialWorkspaceOpen', context), true);
                 assert.equal(element('inventorySerialFinish').disabled, false);
@@ -1275,7 +1387,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_stale_heartbeat_409_cannot_disable_reopened_serial_workspace(self):
+    def test_stale_refresh_cannot_replace_reopened_serial_workspace(self):
         self.run_node(
             r"""
             function deferred() {
@@ -1286,7 +1398,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             function response(payload, status = 200) {
                 return {ok: status >= 200 && status < 300, status, json: async () => payload};
             }
-            const oldHeartbeat = deferred();
+            const oldRefresh = deferred();
             const input = {value: '', disabled: false, focus() {}};
             const finishButton = {disabled: false};
             const message = {textContent: '', className: ''};
@@ -1312,7 +1424,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     },
                 },
                 fetch: async url => {
-                    if (url.endsWith('/items/A1/heartbeat')) return oldHeartbeat.promise;
+                    if (url.endsWith('/items/A1/serial/refresh')) return oldRefresh.promise;
                     if (url.endsWith('/items/B2/serial/open')) return response({
                         success: true, serial: {barcode: 'B2', counts: {}},
                     });
@@ -1331,18 +1443,20 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 currentSerialBarcode = 'A1';
                 serialWorkspaceOpen = true;
                 serialWorkspaceEditable = true;
-                renderSerialReconciliation = () => {};
+                renderSerialReconciliation = value => { currentSerialData = value; };
             `, context);
             (async () => {
-                const heartbeat = vm.runInContext('sendSerialHeartbeat()', context);
+                const refresh = vm.runInContext('refreshSerialItem()', context);
+                await Promise.resolve();
                 vm.runInContext('closeSerialWorkspace()', context);
                 await vm.runInContext("openSerialItem('B2')", context);
                 const newMessage = message.textContent;
-                oldHeartbeat.resolve(response({
-                    success: false, error: '商品已被其他设备锁定', lock_owner: '旧设备',
-                }, 409));
-                await heartbeat;
+                oldRefresh.resolve(response({
+                    success: true, serial: {barcode: 'A1', counts: {matched: 99}},
+                }));
+                await refresh;
                 assert.equal(vm.runInContext('currentSerialBarcode', context), 'B2');
+                assert.equal(vm.runInContext('currentSerialData.barcode', context), 'B2');
                 assert.equal(vm.runInContext('serialWorkspaceEditable', context), true);
                 assert.equal(input.disabled, false);
                 assert.equal(finishButton.disabled, false);
