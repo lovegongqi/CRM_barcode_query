@@ -1644,6 +1644,85 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_stale_camera_start_cannot_clear_newer_session(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = true; this.textContent = '';
+                    this.className = ''; this.srcObject = null;
+                }
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const firstReady = deferred();
+            const trackStops = [0, 0];
+            const controlStops = [0, 0];
+            const streams = [0, 1].map(index => ({
+                id: index,
+                getTracks() {
+                    return [{stop() { trackStops[index] += 1; }}];
+                },
+            }));
+            const controls = [0, 1].map(index => ({
+                stop() { controlStops[index] += 1; },
+            }));
+            let readerIndex = 0;
+            class FakeReader {
+                decodeFromConstraints(_constraints, video) {
+                    const index = readerIndex++;
+                    video.srcObject = streams[index];
+                    return index === 0 ? firstReady.promise : Promise.resolve(controls[index]);
+                }
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+                streams, controls,
+            };
+            context.window = context;
+            context.window.isSecureContext = true;
+            context.window.location = {hostname: 'inventory.example.test'};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+            `, context);
+            (async () => {
+                const firstStart = vm.runInContext('startInventoryCamera()', context);
+                assert.equal(element('inventoryCameraVideo').srcObject, streams[0]);
+                vm.runInContext('stopInventoryCamera()', context);
+
+                const secondStart = vm.runInContext('startInventoryCamera()', context);
+                await secondStart;
+                assert.equal(element('inventoryCameraVideo').srcObject, streams[1]);
+                assert.equal(vm.runInContext('inventoryCameraControls === controls[1]', context), true);
+
+                firstReady.resolve(controls[0]);
+                await firstStart;
+                assert.equal(controlStops[0], 1);
+                assert.equal(controlStops[1], 0);
+                assert.equal(trackStops[1], 0);
+                assert.equal(element('inventoryCameraVideo').srcObject, streams[1]);
+                assert.equal(vm.runInContext('inventoryCameraControls === controls[1]', context), true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_camera_requires_secure_context(self):
         self.run_node(
             r"""

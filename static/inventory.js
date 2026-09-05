@@ -38,6 +38,7 @@ let serialRenderedGeneration = 0;
 let serialMutationFailures = new Map();
 let inventoryCameraControls = null;
 let inventoryCameraGeneration = 0;
+let inventoryCameraActiveGeneration = 0;
 let inventoryCameraLastSerial = '';
 let inventoryCameraLastDecodedAt = 0;
 
@@ -990,6 +991,7 @@ function inventoryCameraCanUseHttp() {
 
 function stopInventoryCamera() {
     inventoryCameraGeneration += 1;
+    inventoryCameraActiveGeneration = 0;
     const controls = inventoryCameraControls;
     inventoryCameraControls = null;
     if (controls && typeof controls.stop === 'function') {
@@ -1027,6 +1029,7 @@ async function startInventoryCamera() {
     }
 
     const generation = ++inventoryCameraGeneration;
+    inventoryCameraActiveGeneration = generation;
     const start = inventoryElement('inventoryCameraStart');
     const stop = inventoryElement('inventoryCameraStop');
     const panel = inventoryElement('inventoryCameraPanel');
@@ -1053,7 +1056,7 @@ async function startInventoryCamera() {
         );
         if (generation !== inventoryCameraGeneration || !serialWorkspaceOpen) {
             if (controls && typeof controls.stop === 'function') controls.stop();
-            if (video.srcObject && typeof video.srcObject.getTracks === 'function') {
+            if (!inventoryCameraActiveGeneration && video.srcObject && typeof video.srcObject.getTracks === 'function') {
                 video.srcObject.getTracks().forEach((track) => track.stop());
                 video.srcObject = null;
             }
