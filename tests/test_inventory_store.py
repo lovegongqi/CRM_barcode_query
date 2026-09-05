@@ -1052,12 +1052,44 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["after_quantity"], "12")
         self.assertEqual(rows[1]["before_quantity"], "12")
         self.assertEqual(rows[1]["after_quantity"], "13")
+        self.assertEqual([row["entry_number"] for row in rows], [1, 1])
         self.assertEqual(set(rows[0]), {
-            "id", "barcode", "event_type", "event_label", "actor",
+            "id", "barcode", "event_type", "event_label", "entry_number", "actor",
             "device_id", "created_at", "before_quantity", "after_quantity",
             "before_serial", "after_serial", "before_classification",
             "after_classification",
         })
+
+    def test_audit_view_numbers_count_entries_stably(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        first = store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "12", "2"
+        )["count_entries"][0]
+        second = store.add_count_entry(
+            "admin", task["task_id"], "A1", "乙", "device-b", "13", "2"
+        )["count_entries"][1]
+        updated_first = store.update_count_entry(
+            "admin", task["task_id"], "A1", first["entry_id"],
+            first["version"], "丙", "device-c", "14", "2",
+        )["count_entries"]
+        first_after_update = next(
+            entry for entry in updated_first if entry["entry_id"] == first["entry_id"]
+        )
+        store.delete_count_entry(
+            "admin", task["task_id"], "A1", first["entry_id"],
+            first_after_update["version"], "丁", "device-d", "2",
+        )
+        remaining = store.get_task_snapshot("admin", task["task_id"])["items"][0]
+        store.update_count_entry(
+            "admin", task["task_id"], "A1", second["entry_id"],
+            remaining["count_entries"][0]["version"], "戊", "device-e", "15", "2",
+        )
+
+        rows = store.list_audit_events("admin", task["task_id"], barcode="A1")
+
+        self.assertEqual([row.get("entry_number") for row in rows], [1, 2, 1, 1, 2])
 
     def completed_difference_store(self):
         store, task = self.serial_ready_store()

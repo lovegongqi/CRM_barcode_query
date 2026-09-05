@@ -1369,8 +1369,17 @@ function renderInventoryAudit(events) {
     }
     events.forEach((event) => {
         const row = inventoryNode('article', 'inventory-audit-event');
+        let title = inventoryText(event.event_label, event.event_type);
+        const countEntryAction = {
+            count_entry_added: '新增',
+            count_entry_updated: '修改',
+            count_entry_deleted: '删除',
+        }[event.event_type];
+        if (countEntryAction && Number.isInteger(event.entry_number) && event.entry_number > 0) {
+            title = `${countEntryAction}第 ${event.entry_number} 笔数量`;
+        }
         row.append(
-            inventoryNode('strong', '', inventoryText(event.event_label, event.event_type)),
+            inventoryNode('strong', '', title),
             inventoryNode('span', '', `${inventoryText(event.actor, '未知账号')} · ${inventoryText(event.created_at, '时间未知')}`),
         );
         if (event.before_quantity !== null || event.after_quantity !== null) {

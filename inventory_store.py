@@ -2270,6 +2270,7 @@ class InventoryStore:
                 params,
             ).fetchall()
         result = []
+        count_entry_numbers = {}
         for row in rows:
             before_quantity = None
             after_quantity = None
@@ -2277,6 +2278,7 @@ class InventoryStore:
             after_serial = None
             before_classification = None
             after_classification = None
+            entry_number = None
             if (
                 row["event_type"].startswith("count_entry_")
                 or row["event_type"] in {
@@ -2290,6 +2292,11 @@ class InventoryStore:
                     details = {}
                 before = details.get("before") if isinstance(details, dict) else None
                 after = details.get("after") if isinstance(details, dict) else None
+                if row["event_type"].startswith("count_entry_"):
+                    entry_id = details.get("entry_id") if isinstance(details, dict) else None
+                    if isinstance(entry_id, int) and not isinstance(entry_id, bool) and entry_id > 0:
+                        numbers = count_entry_numbers.setdefault(row["barcode"], {})
+                        entry_number = numbers.setdefault(entry_id, len(numbers) + 1)
                 if isinstance(before, dict):
                     before_quantity = before.get("quantity")
                 if isinstance(after, dict):
@@ -2306,6 +2313,7 @@ class InventoryStore:
                 "barcode": row["barcode"],
                 "event_type": row["event_type"],
                 "event_label": _AUDIT_EVENT_LABELS[row["event_type"]],
+                "entry_number": entry_number,
                 "actor": row["actor"],
                 "device_id": row["device_id"],
                 "created_at": row["created_at"],

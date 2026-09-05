@@ -2507,6 +2507,45 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_audit_renders_count_entry_number(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [],
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {},
+                };
+            }
+            const auditRoot = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryAuditEvents') return auditRoot;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryAudit([{
+                event_type: 'count_entry_updated', event_label: '修改分次数量',
+                entry_number: 2, actor: '乙', created_at: '2026-09-06T10:00:00',
+                before_quantity: '12', after_quantity: '13',
+            }, {
+                event_type: 'count_entry_deleted', event_label: '删除分次数量',
+                entry_number: null, actor: '甲', created_at: '2026-09-06T10:01:00',
+                before_quantity: '13', after_quantity: null,
+            }])`, context);
+            assert.equal(auditRoot.children[0].children[0].textContent, '修改第 2 笔数量');
+            assert.equal(auditRoot.children[1].children[0].textContent, '删除分次数量');
+            """
+        )
+
     def test_both_tab_groups_support_roving_keyboard_navigation(self):
         self.run_node(
             r"""
