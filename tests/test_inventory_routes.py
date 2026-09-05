@@ -91,6 +91,12 @@ class InventoryRouteTest(unittest.TestCase):
             "tasks": [], "total": 0, "limit": 20, "offset": 0,
         }
         self.store.list_discrepancies.return_value = []
+        self.store.list_audit_events.return_value = [{
+            "id": 7, "barcode": "A/B", "event_type": "count_entry_updated",
+            "event_label": "修改分次数量", "actor": "counter",
+            "device_id": "device-a", "created_at": "2026-09-05T10:00:00",
+            "before_quantity": "12", "after_quantity": "13",
+        }]
         self.service.create_task.return_value = {"task_id": "task-1", "phase": "counting"}
         self.service.open_count_item.return_value = {"barcode": "A/B", "state": "pending"}
         self.store.heartbeat_lock.return_value = {"barcode": "A/B", "device_id": "device-a"}
@@ -779,6 +785,16 @@ class InventoryRouteTest(unittest.TestCase):
         })
         self.service.reopen_task.assert_called_once_with(
             "admin", "task-1", "admin"
+        )
+
+    def test_audit_route_is_owner_scoped_and_filters_barcode(self):
+        response = self.login_account("counter").get(
+            "/api/inventory/tasks/task-1/audit?barcode=A%2FB"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["events"][0]["event_label"], "修改分次数量")
+        self.store.list_audit_events.assert_called_once_with(
+            "counter-id", "task-1", barcode="A/B"
         )
 
     def test_history_and_discrepancy_route_json_contract_matches_store_rows(self):

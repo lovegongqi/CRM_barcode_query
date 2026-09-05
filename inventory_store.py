@@ -24,6 +24,18 @@ _SERIAL_DISCREPANCY_KINDS = {
     "unknown": "unknown_serial",
 }
 
+_AUDIT_EVENT_LABELS = {
+    "count_entry_added": "新增分次数量",
+    "count_entry_updated": "修改分次数量",
+    "count_entry_deleted": "删除分次数量",
+    "serial_expected_refreshed": "刷新账面序列号",
+    "serial_scanned": "扫描序列号",
+    "serial_scan_removed": "删除序列号",
+    "serial_item_completed": "完成序列号核对",
+    "task_completed": "完成盘点",
+    "task_reopened": "继续盘点",
+}
+
 _DISCREPANCY_SELECT = """
     SELECT discrepancies.discrepancy_id AS id,
            discrepancies.task_id,
@@ -2130,8 +2142,10 @@ class InventoryStore:
                    ), discrepancy_counts AS (
                        SELECT discrepancies.task_id,
                               SUM(CASE
-                                  WHEN discrepancies.serial IS NOT NULL
-                                       AND TRIM(discrepancies.serial) <> ''
+                                  WHEN (
+                                      discrepancies.serial IS NOT NULL
+                                      AND TRIM(discrepancies.serial) <> ''
+                                  ) OR discrepancies.kind = 'serial_unverified'
                                   THEN 1 ELSE 0
                               END) AS serial_difference_count
                        FROM inventory_discrepancies AS discrepancies
@@ -2188,6 +2202,53 @@ class InventoryStore:
             "limit": limit,
             "offset": offset,
         }
+
+    def list_audit_events(self, owner, task_id, barcode=None):
+        barcode = str(barcode or "").strip()
+        with closing(self.connect()) as connection:
+            self._task_for_owner(connection, owner, task_id)
+            clauses = ["task_id = ?"]
+            params = [task_id]
+            if barcode:
+                clauses.append("barcode = ?")
+                params.append(barcode)
+            placeholders = ",".join("?" for _ in _AUDIT_EVENT_LABELS)
+            clauses.append(f"event_type IN ({placeholders})")
+            params.extend(_AUDIT_EVENT_LABELS)
+            rows = connection.execute(
+                """SELECT event_id, barcode, event_type, actor, device_id,
+                          details, created_at
+                     FROM inventory_audit_events
+                    WHERE """ + " AND ".join(clauses) + " ORDER BY event_id",
+                params,
+            ).fetchall()
+        result = []
+        for row in rows:
+            before_quantity = None
+            after_quantity = None
+            if row["event_type"].startswith("count_entry_"):
+                try:
+                    details = json.loads(row["details"] or "{}")
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    details = {}
+                before = details.get("before") if isinstance(details, dict) else None
+                after = details.get("after") if isinstance(details, dict) else None
+                if isinstance(before, dict):
+                    before_quantity = before.get("quantity")
+                if isinstance(after, dict):
+                    after_quantity = after.get("quantity")
+            result.append({
+                "id": int(row["event_id"]),
+                "barcode": row["barcode"],
+                "event_type": row["event_type"],
+                "event_label": _AUDIT_EVENT_LABELS[row["event_type"]],
+                "actor": row["actor"],
+                "device_id": row["device_id"],
+                "created_at": row["created_at"],
+                "before_quantity": before_quantity,
+                "after_quantity": after_quantity,
+            })
+        return result
 
     def list_discrepancies(self, owner, state, query=""):
         if state not in {"open", "archived"}:

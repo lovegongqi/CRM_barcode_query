@@ -1027,6 +1027,36 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(json.loads(events[1][3])["before"]["quantity"], "12")
         self.assertIsNone(json.loads(events[1][3])["after"])
 
+    def test_audit_view_returns_allowlisted_before_after_fields(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        created = store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "12", "2"
+        )
+        entry = created["count_entries"][0]
+        store.update_count_entry(
+            "admin", task["task_id"], "A1", entry["entry_id"],
+            entry["version"], "乙", "device-b", "13", "2",
+        )
+
+        rows = store.list_audit_events("admin", task["task_id"], barcode="A1")
+
+        self.assertEqual(
+            [(row["event_label"], row["actor"], row["device_id"])
+             for row in rows],
+            [("新增分次数量", "甲", "device-a"),
+             ("修改分次数量", "乙", "device-b")],
+        )
+        self.assertIsNone(rows[0]["before_quantity"])
+        self.assertEqual(rows[0]["after_quantity"], "12")
+        self.assertEqual(rows[1]["before_quantity"], "12")
+        self.assertEqual(rows[1]["after_quantity"], "13")
+        self.assertEqual(set(rows[0]), {
+            "id", "barcode", "event_type", "event_label", "actor",
+            "device_id", "created_at", "before_quantity", "after_quantity",
+        })
+
     def completed_difference_store(self):
         store, task = self.serial_ready_store()
         task_id = task["task_id"]
@@ -1413,8 +1443,12 @@ class InventoryStoreTests(unittest.TestCase):
             connection.executemany(
                 """INSERT INTO inventory_discrepancies
                    (task_id, barcode, serial, kind, status, created_at)
-                   VALUES (?, ?, ?, 'system_only_serial', 'open', '2026-09-03T10:00:00')""",
-                [("newer", "A1", "SN-1"), ("newer", "A1", "SN-2")],
+                   VALUES (?, ?, ?, ?, 'open', '2026-09-03T10:00:00')""",
+                [
+                    ("newer", "A1", "SN-1", "system_only_serial"),
+                    ("newer", "A1", "SN-2", "system_only_serial"),
+                    ("newer", "B2", None, "serial_unverified"),
+                ],
             )
             connection.executemany(
                 """INSERT INTO inventory_audit_events
@@ -1441,7 +1475,7 @@ class InventoryStoreTests(unittest.TestCase):
             {
                 "product_total": 2,
                 "quantity_difference_count": 1,
-                "serial_difference_count": 2,
+                "serial_difference_count": 3,
                 "participant_count": 2,
             },
         )

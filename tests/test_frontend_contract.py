@@ -695,6 +695,11 @@ class FrontendContractTest(unittest.TestCase):
             "pollInventoryTask", "renderInventoryItems", "openCountItem",
             "renderCountEntries", "addCountEntry", "updateCountEntry",
             "deleteCountEntry", "openGyjLogin",
+            'id="inventoryCompleteTask"',
+            'id="inventoryCompletionConfirmDialog"',
+            'id="inventoryCompletionConfirm"',
+            'id="inventoryAuditDialog"',
+            "reopenInventoryTask", "renderInventoryAudit",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, source + script)

@@ -67,22 +67,24 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const requests = [];
             const notices = [];
             const button = {disabled: false, hidden: false, textContent: '完成盘点'};
-            let confirms = 0;
+            const confirmButton = {disabled: false, textContent: '确认完成'};
+            const confirmMessage = {textContent: ''};
+            const confirmDialog = {
+                open: false,
+                showModal() { this.open = true; },
+                close() { this.open = false; },
+            };
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 document: {
                     hidden: false, addEventListener() {},
                     getElementById(id) {
                         if (id === 'inventoryCompleteTask') return button;
+                        if (id === 'inventoryCompletionConfirm') return confirmButton;
+                        if (id === 'inventoryCompletionConfirmMessage') return confirmMessage;
+                        if (id === 'inventoryCompletionConfirmDialog') return confirmDialog;
                         if (id === 'inventoryNotice') return {textContent: '', className: ''};
                         throw new Error('unexpected element ' + id);
-                    },
-                },
-                window: {
-                    confirm(message) {
-                        confirms += 1;
-                        assert.match(message, /2/);
-                        return true;
                     },
                 },
                 fetch: async (url, options) => {
@@ -112,7 +114,10 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext('completeInventoryTask()', context);
-                assert.equal(confirms, 1);
+                assert.equal(confirmDialog.open, true);
+                assert.match(confirmMessage.textContent, /2/);
+                assert.equal(requests.length, 1);
+                await vm.runInContext('completeInventoryTask(true)', context);
                 assert.equal(requests.length, 2);
                 assert.deepEqual(JSON.parse(requests[0].options.body), {
                     allow_unverified_serials: false, expected_version: 7,
@@ -122,6 +127,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 });
                 assert.equal(button.disabled, false);
                 assert.equal(button.textContent, '完成盘点');
+                assert.equal(confirmDialog.open, false);
                 assert.equal(notices.at(-1).message, '盘点已完成，未盘商品未计入差异报告。');
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -1958,6 +1964,56 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 metrics.map(metric => [metric.children[0].textContent, metric.children[1].textContent]),
                 [['参与人数', '2'], ['商品总数', '8'], ['数量差异', '1'], ['序列号差异', '3']],
             );
+            """
+        )
+
+    def test_history_reopen_is_admin_only_and_audit_renders_changes(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [], href: '',
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener(name, handler) { this[name] = handler; },
+                };
+            }
+            const historyRoot = makeNode('div');
+            const auditRoot = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryHistory') return historyRoot;
+                        if (id === 'inventoryAuditEvents') return auditRoot;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            const task = `[{task_id: 'T2', started_at: 'START', completed_at: 'DONE',
+                participant_count: 2, product_total: 8,
+                quantity_difference_count: 1, serial_difference_count: 3}]`;
+            vm.runInContext(`renderInventoryHistory(${task})`, context);
+            assert.equal(historyRoot.children[0].children[2].children.length, 2);
+            context.CURRENT_ACCOUNT.is_admin = true;
+            vm.runInContext(`renderInventoryHistory(${task})`, context);
+            const actions = historyRoot.children[0].children[2].children;
+            assert.equal(actions.length, 3);
+            assert.equal(actions[2].textContent, '继续盘点');
+
+            vm.runInContext(`renderInventoryAudit([{
+                event_type: 'count_entry_updated', event_label: '修改分次数量',
+                actor: '乙', created_at: '2026-09-05T10:00:00',
+                before_quantity: '12', after_quantity: '13',
+            }])`, context);
+            assert.equal(auditRoot.children[0].children[0].textContent, '修改分次数量');
+            assert.match(auditRoot.children[0].children[1].textContent, /乙/);
+            assert.match(auditRoot.children[0].children[2].textContent, /12.*13/);
             """
         )
 

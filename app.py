@@ -10828,6 +10828,20 @@ def api_inventory_task(task_id):
     return jsonify({"success": True, "task": _inventory_public_task(task)})
 
 
+@app.route("/api/inventory/tasks/<task_id>/audit", methods=["GET"])
+@_inventory_api
+def api_inventory_task_audit(task_id):
+    owner, _actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = str(request.args.get("barcode") or "").strip()
+    if barcode:
+        barcode = _inventory_path_value(barcode, "商品条码")
+    events = inventory_store.list_audit_events(
+        owner, task_id, barcode=barcode or None
+    )
+    return jsonify({"success": True, "events": events})
+
+
 @app.route("/api/inventory/tasks/<task_id>/reopen", methods=["POST"])
 @_inventory_api
 def api_inventory_reopen_task(task_id):

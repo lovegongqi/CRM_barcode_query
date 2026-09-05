@@ -184,6 +184,40 @@
     </div>
 </dialog>
 
+<dialog id="inventoryCompletionConfirmDialog" aria-labelledby="inventoryCompletionConfirmTitle" aria-modal="true" class="inventory-dialog">
+    <div class="inventory-dialog-card inventory-confirm-card">
+        <div class="inventory-dialog-head">
+            <div>
+                <p class="inventory-eyebrow">CONFIRM COMPLETION</p>
+                <h2 id="inventoryCompletionConfirmTitle">确认完成盘点</h2>
+            </div>
+            <button class="inventory-icon-button" id="inventoryCompletionConfirmClose" type="button" aria-label="关闭完成确认窗口">×</button>
+        </div>
+        <p id="inventoryCompletionConfirmMessage" class="inventory-dialog-message"></p>
+        <div class="inventory-dialog-actions">
+            <button class="btn btn-secondary" id="inventoryCompletionCancel" type="button">继续核对</button>
+            <button class="btn btn-primary" id="inventoryCompletionConfirm" type="button">确认完成</button>
+        </div>
+    </div>
+</dialog>
+
+<dialog id="inventoryAuditDialog" aria-labelledby="inventoryAuditTitle" aria-modal="true" class="inventory-dialog">
+    <div class="inventory-dialog-card inventory-audit-card">
+        <div class="inventory-dialog-head">
+            <div>
+                <p class="inventory-eyebrow">CHANGE HISTORY</p>
+                <h2 id="inventoryAuditTitle">修改记录</h2>
+            </div>
+            <button class="inventory-icon-button" id="inventoryAuditClose" type="button" aria-label="关闭修改记录">×</button>
+        </div>
+        <p id="inventoryAuditStatus" class="inventory-dialog-message" role="status" aria-live="polite"></p>
+        <div id="inventoryAuditEvents" class="inventory-audit-events" aria-live="polite"></div>
+        <div class="inventory-dialog-actions">
+            <button class="btn btn-secondary" id="inventoryAuditDone" type="button">关闭</button>
+        </div>
+    </div>
+</dialog>
+
 <dialog id="inventoryGyjLoginDialog" aria-labelledby="inventoryGyjLoginDialogTitle" aria-modal="true" class="inventory-dialog">
     <div class="inventory-dialog-card inventory-login-card">
         <div class="inventory-dialog-head">

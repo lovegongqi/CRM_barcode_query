@@ -545,6 +545,46 @@ article.inventory-item { cursor: default; }
     gap: 14px;
 }
 
+.inventory-task-actions,
+.inventory-history-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.inventory-history-actions {
+    min-width: 132px;
+}
+
+.inventory-audit-card {
+    width: min(680px, calc(100vw - 32px));
+}
+
+.inventory-audit-events {
+    display: grid;
+    gap: 9px;
+}
+
+.inventory-audit-event {
+    display: grid;
+    gap: 5px;
+    padding: 11px;
+    border: 1px solid var(--aurora-line);
+    border-radius: 11px;
+    background: rgba(4, 14, 26, .5);
+}
+
+.inventory-audit-event span {
+    color: var(--aurora-muted);
+    font-size: 12px;
+}
+
+.inventory-audit-event code {
+    color: var(--aurora-cyan);
+}
+
 .inventory-history-title {
     display: grid;
     gap: 5px;
@@ -689,6 +729,8 @@ article.inventory-item { cursor: default; }
     .inventory-count-entry-input { flex: 1; width: auto; }
     .inventory-history-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .inventory-history-export,
+    .inventory-history-actions,
+    .inventory-history-actions .btn,
     .inventory-discrepancy-head .btn,
     .inventory-note-form .btn { width: 100%; min-height: 44px; }
     .inventory-captcha-controls { align-items: stretch; flex-wrap: wrap; }

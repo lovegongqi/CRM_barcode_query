@@ -23,6 +23,7 @@ let inventoryHistoryTasks = [];
 let inventoryHistoryHasMore = false;
 let currentSerialBarcode = '';
 let currentSerialData = null;
+let completionConfirmation = null;
 let serialWorkspaceOpen = false;
 let serialWorkspaceEditable = false;
 let serialWorkspaceRequestId = 0;
@@ -558,47 +559,57 @@ async function startInventoryTask() {
     }
 }
 
-async function completeInventoryTask() {
+function closeCompletionConfirmation() {
+    completionConfirmation = null;
+    const dialog = inventoryElement('inventoryCompletionConfirmDialog');
+    if (dialog.open) dialog.close();
+}
+
+function showCompletionConfirmation(taskId, version, pendingCount) {
+    completionConfirmation = {taskId, version};
+    inventoryElement('inventoryCompletionConfirmMessage').textContent =
+        `仍有 ${pendingCount} 个已盘商品未核对序列号。确认完成后，将按“序列号未核对”写入差异报告。`;
+    const dialog = inventoryElement('inventoryCompletionConfirmDialog');
+    if (!dialog.open) dialog.showModal();
+}
+
+async function completeInventoryTask(allowUnverifiedSerials = false) {
     if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
-    const button = inventoryElement('inventoryCompleteTask');
-    const taskId = inventoryTask.task_id;
-    const version = inventoryTask.version;
+    const confirmation = allowUnverifiedSerials ? completionConfirmation : null;
+    const button = inventoryElement(
+        allowUnverifiedSerials ? 'inventoryCompletionConfirm' : 'inventoryCompleteTask'
+    );
+    const taskId = confirmation ? confirmation.taskId : inventoryTask.task_id;
+    const version = confirmation ? confirmation.version : inventoryTask.version;
     button.disabled = true;
+    const originalText = button.textContent;
     button.textContent = '正在完成…';
     try {
-        let data;
-        try {
-            data = await inventoryMutationPost(
-                `/api/inventory/tasks/${encodeURIComponent(taskId)}/complete`,
-                {allow_unverified_serials: false},
-                version,
-            );
-        } catch (error) {
-            if (!error.data || error.data.confirmation_required !== true) throw error;
-            const pending = Number(error.data.pending_serial_count) || 0;
-            const confirmed = window.confirm(
-                `仍有 ${pending} 个已盘商品未核对序列号。\n`
-                + '确认完成后，将按“序列号未核对”写入差异报告。'
-            );
-            if (!confirmed) {
-                setInventoryNotice('已取消完成盘点，可继续核对。');
-                return;
-            }
-            data = await inventoryMutationPost(
-                `/api/inventory/tasks/${encodeURIComponent(taskId)}/complete`,
-                {allow_unverified_serials: true},
-                version,
-            );
-        }
+        const data = await inventoryMutationPost(
+            `/api/inventory/tasks/${encodeURIComponent(taskId)}/complete`,
+            {allow_unverified_serials: allowUnverifiedSerials},
+            version,
+        );
         acceptInventoryMutationVersion(data);
+        closeCompletionConfirmation();
         await pollInventoryTask({force: true});
         setInventoryNotice('盘点已完成，未盘商品未计入差异报告。', 'success');
     } catch (error) {
+        if (!allowUnverifiedSerials && error.data && error.data.confirmation_required === true) {
+            showCompletionConfirmation(
+                taskId, version, Number(error.data.pending_serial_count) || 0
+            );
+            return;
+        }
         if (isInventoryVersionConflict(error)) await refreshInventoryAfterVersionConflict();
-        setInventoryNotice(error.message, 'error');
+        if (allowUnverifiedSerials) {
+            inventoryElement('inventoryCompletionConfirmMessage').textContent = error.message;
+        } else {
+            setInventoryNotice(error.message, 'error');
+        }
     } finally {
         button.disabled = false;
-        button.textContent = '完成盘点';
+        button.textContent = originalText;
     }
 }
 
@@ -666,6 +677,7 @@ function renderCountEntries(item) {
     const entriesRoot = inventoryElement('inventoryCountEntries');
     const expression = inventoryElement('inventoryCountExpression');
     const entries = Array.isArray(item && item.count_entries) ? item.count_entries : [];
+    inventoryElement('inventoryCountAuditButton').hidden = !item;
     entriesRoot.replaceChildren();
     expression.textContent = item && item.count_expression
         ? item.count_expression : '尚未记录';
@@ -1275,6 +1287,72 @@ function inventoryHistoryCount(value) {
     return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
+function renderInventoryAudit(events) {
+    const root = inventoryElement('inventoryAuditEvents');
+    root.replaceChildren();
+    if (!events.length) {
+        root.append(inventoryNode('div', 'inventory-empty', '暂无修改记录。'));
+        return;
+    }
+    events.forEach((event) => {
+        const row = inventoryNode('article', 'inventory-audit-event');
+        row.append(
+            inventoryNode('strong', '', inventoryText(event.event_label, event.event_type)),
+            inventoryNode('span', '', `${inventoryText(event.actor, '未知账号')} · ${inventoryText(event.created_at, '时间未知')}`),
+        );
+        if (event.before_quantity !== null || event.after_quantity !== null) {
+            row.append(inventoryNode(
+                'code', '',
+                `数量 ${inventoryText(event.before_quantity, '无')} → ${inventoryText(event.after_quantity, '无')}`,
+            ));
+        }
+        root.append(row);
+    });
+}
+
+async function openInventoryAudit(taskId, barcode = '') {
+    const dialog = inventoryElement('inventoryAuditDialog');
+    inventoryElement('inventoryAuditTitle').textContent = barcode
+        ? `修改记录 · ${barcode}` : '任务修改记录';
+    inventoryElement('inventoryAuditStatus').textContent = '正在读取修改记录…';
+    inventoryElement('inventoryAuditEvents').replaceChildren();
+    if (!dialog.open) dialog.showModal();
+    try {
+        const params = new URLSearchParams();
+        if (barcode) params.set('barcode', barcode);
+        const suffix = params.size ? `?${params.toString()}` : '';
+        const data = await inventoryRequest(
+            `/api/inventory/tasks/${encodeURIComponent(taskId)}/audit${suffix}`
+        );
+        renderInventoryAudit(Array.isArray(data.events) ? data.events : []);
+        inventoryElement('inventoryAuditStatus').textContent = '';
+    } catch (error) {
+        inventoryElement('inventoryAuditStatus').textContent = error.message;
+    }
+}
+
+function closeInventoryAudit() {
+    const dialog = inventoryElement('inventoryAuditDialog');
+    if (dialog.open) dialog.close();
+}
+
+async function reopenInventoryTask(taskId) {
+    setWorkspaceStatus('inventoryHistoryStatus', '正在读取 GYJ 最新库存并继续盘点…');
+    try {
+        await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(taskId)}/reopen`, {}
+        );
+        inventoryHistoryTasks = [];
+        inventoryHistoryHasMore = false;
+        lastInventoryVersion = null;
+        await switchInventoryTab('current');
+        await pollInventoryTask({force: true});
+        setInventoryNotice('已恢复历史任务，可继续盘点。', 'success');
+    } catch (error) {
+        setWorkspaceStatus('inventoryHistoryStatus', error.message, 'error');
+    }
+}
+
 function renderInventoryHistory(tasks) {
     const root = inventoryElement('inventoryHistory');
     root.replaceChildren();
@@ -1299,7 +1377,18 @@ function renderInventoryHistory(tasks) {
         );
         const download = inventoryNode('a', 'btn btn-secondary inventory-history-export', '下载 Excel');
         download.href = `/api/inventory/tasks/${encodeURIComponent(task.task_id)}/export`;
-        row.append(title, metrics, download);
+        const actions = inventoryNode('div', 'inventory-history-actions');
+        const audit = inventoryNode('button', 'btn btn-secondary', '修改记录');
+        audit.type = 'button';
+        audit.addEventListener('click', () => openInventoryAudit(task.task_id));
+        actions.append(download, audit);
+        if (CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin) {
+            const reopen = inventoryNode('button', 'btn btn-primary', '继续盘点');
+            reopen.type = 'button';
+            reopen.addEventListener('click', () => reopenInventoryTask(task.task_id));
+            actions.append(reopen);
+        }
+        row.append(title, metrics, actions);
         root.append(row);
     });
 }
@@ -1345,6 +1434,7 @@ function discrepancyKindLabel(kind) {
         other_product_serial: '其他商品',
         already_shipped_serial: '已出库序列号',
         unknown_serial: '未知序列号',
+        serial_unverified: '序列号未核对',
     };
     return labels[kind] || inventoryText(kind);
 }
@@ -1790,6 +1880,9 @@ function initializeInventoryPage() {
     });
     inventoryElement('inventoryCreateTask').addEventListener('click', startInventoryTask);
     inventoryElement('inventoryCompleteTask').addEventListener('click', completeInventoryTask);
+    inventoryElement('inventoryCompletionConfirm').addEventListener('click', () => completeInventoryTask(true));
+    inventoryElement('inventoryCompletionConfirmClose').addEventListener('click', closeCompletionConfirmation);
+    inventoryElement('inventoryCompletionCancel').addEventListener('click', closeCompletionConfirmation);
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
     inventoryElement('inventoryFilters').addEventListener('change', runInventorySearch);
@@ -1797,12 +1890,19 @@ function initializeInventoryPage() {
         if (event.key === 'Enter') addCountEntry();
     });
     inventoryElement('inventoryCountAdd').addEventListener('click', addCountEntry);
+    inventoryElement('inventoryCountAuditButton').addEventListener('click', () => {
+        if (inventoryTask && currentCountItem) {
+            openInventoryAudit(inventoryTask.task_id, currentCountItem.barcode);
+        }
+    });
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
     inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
     inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);
     inventoryElement('inventorySerialCancel').addEventListener('click', closeSerialWorkspace);
+    inventoryElement('inventoryAuditClose').addEventListener('click', closeInventoryAudit);
+    inventoryElement('inventoryAuditDone').addEventListener('click', closeInventoryAudit);
     inventoryElement('inventoryDifferenceSearch').addEventListener('input', handleDifferenceSearch);
     inventoryElement('inventoryDifferenceSearch').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -1829,6 +1929,8 @@ function initializeInventoryPage() {
     });
     bindInventoryDialogBackdrop(inventoryElement('inventoryCountDialog'), closeCountDialog);
     bindInventoryDialogBackdrop(inventoryElement('inventorySerialWorkspace'), closeSerialWorkspace);
+    bindInventoryDialogBackdrop(inventoryElement('inventoryCompletionConfirmDialog'), closeCompletionConfirmation);
+    bindInventoryDialogBackdrop(inventoryElement('inventoryAuditDialog'), closeInventoryAudit);
     bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) {

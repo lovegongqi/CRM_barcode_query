@@ -66,6 +66,41 @@ class InventoryExportTests(unittest.TestCase):
         self.assertEqual(workbook["差异明细"]["I2"].value, "已归档")
         self.assertEqual(workbook["差异明细"]["C2"].number_format, "@")
 
+    def test_unverified_serial_is_labeled_in_both_sheets_and_uncounted_is_omitted(self):
+        items = [
+            {
+                "barcode": "SERIAL", "name": "序列号商品", "has_serial": True,
+                "completed_book_qty": "5", "completed_actual_qty": "4",
+                "diff_qty": "-1", "state": "serial_pending",
+            },
+            {
+                "barcode": "UNCOUNTED", "name": "未盘商品", "has_serial": False,
+                "completed_book_qty": None, "completed_actual_qty": None,
+                "diff_qty": None, "state": "pending",
+            },
+        ]
+        discrepancies = [{
+            "task_id": "T-1", "barcode": "SERIAL", "name": "序列号商品",
+            "serial": None, "kind": "serial_unverified", "state": "open",
+            "book_quantity": "5", "counted_quantity": "4", "difference": "-1",
+        }]
+
+        workbook = load_workbook(
+            build_inventory_workbook(self.task, items, discrepancies),
+            data_only=True,
+        )
+        summary_values = [cell.value for cell in workbook["商品差异汇总"][2]]
+        serial_values = [cell.value for cell in workbook["序列号差异明细"][2]]
+        self.assertIn("序列号未核对", summary_values)
+        self.assertIn("序列号未核对", serial_values)
+        all_values = "|".join(
+            str(cell.value or "")
+            for sheet in workbook for row in sheet.iter_rows() for cell in row
+        )
+        self.assertNotIn("UNCOUNTED", all_values)
+        for forbidden in ("价格", "金额", "成本价", "采购价"):
+            self.assertNotIn(forbidden, all_values)
+
 
 if __name__ == "__main__":
     unittest.main()

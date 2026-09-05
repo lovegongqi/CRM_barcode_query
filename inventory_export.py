@@ -18,6 +18,16 @@ SERIAL_HEADERS = [
 _SUMMARY_WIDTHS = (18, 24, 14, 14, 14, 10, 12, 18, 14, 14, 14, 30)
 _SERIAL_WIDTHS = (18, 24, 24, 20, 22, 14, 16, 22, 14, 30)
 
+_KIND_LABELS = {
+    "product_quantity": "商品数量差异",
+    "system_only_serial": "账面独有",
+    "physical_only_serial": "实物独有",
+    "other_product_serial": "其他商品",
+    "already_shipped_serial": "已出库序列号",
+    "unknown_serial": "未知序列号",
+    "serial_unverified": "序列号未核对",
+}
+
 
 def _text(value):
     """Return a string; workbook finalization marks it as a literal cell."""
@@ -66,6 +76,7 @@ def _save(workbook):
 
 
 def _summary_row(item, discrepancy):
+    discrepancy_kind = _value(discrepancy or {}, "kind")
     return [
         _text(_value(item, "barcode")),
         _text(_value(item, "name")),
@@ -77,7 +88,14 @@ def _summary_row(item, discrepancy):
         _text(_value(item, "completed_book_qty", "completed_book_quantity", "book_quantity")),
         _text(_value(item, "completed_actual_qty", "completed_counted_quantity", "actual_quantity")),
         _text(_value(item, "diff_qty", "difference", "difference_qty")),
-        _text(_value(discrepancy or {}, "state", default=_value(item, "state", "status"))),
+        _text(
+            _KIND_LABELS.get(discrepancy_kind)
+            if discrepancy_kind == "serial_unverified"
+            else _value(
+                discrepancy or {}, "state",
+                default=_value(item, "state", "status"),
+            )
+        ),
         _text(_value(discrepancy or {}, "note", default=_value(item, "note", "remark"))),
     ]
 
@@ -87,7 +105,10 @@ def _serial_row(row, state_label=None, task_id=""):
         _text(_value(row, "barcode")),
         _text(_value(row, "name", "lookup_name")),
         _text(_value(row, "serial")),
-        _text(_value(row, "kind", "classification")),
+        _text(_KIND_LABELS.get(
+            _value(row, "kind", "classification"),
+            _value(row, "kind", "classification"),
+        )),
         _text(_value(row, "task_id", default=task_id)),
         _text(_value(row, "scan_actor", "actor")),
         _text(_value(row, "scan_device", "device_id")),
@@ -117,7 +138,10 @@ def build_inventory_workbook(task, items, discrepancies):
         summary.append(_summary_row(item, product_discrepancies.get(_value(item, "barcode"))))
 
     for row in discrepancies or []:
-        if _value(row, "serial") in ("", None):
+        if (
+            _value(row, "serial") in ("", None)
+            and _value(row, "kind") != "serial_unverified"
+        ):
             continue
         serials.append(_serial_row(row, task_id=_value(task or {}, "task_id")))
     return _save(workbook)
