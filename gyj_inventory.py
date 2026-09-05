@@ -311,6 +311,18 @@ class GYJInventoryReader:
         )
         return page_number, row_signature
 
+    def _query_marker(self, snapshot):
+        page_number, rows = self._page_marker(snapshot)
+        total = snapshot.get("total")
+        total_marker = None if total is None else " ".join(str(total).split())
+        return (
+            page_number,
+            _normalized_headers(snapshot.get("headers") or []),
+            rows,
+            total_marker,
+            bool(snapshot.get("has_next")),
+        )
+
     def _query_snapshot_matches(self, snapshot, expected_field, expected_value):
         if snapshot.get("loading"):
             return False
@@ -339,7 +351,7 @@ class GYJInventoryReader:
         for attempt in range(151):
             snapshot = self._read_table_page(report)
             if self._query_snapshot_matches(snapshot, expected_field, expected_value):
-                marker = self._page_marker(snapshot)
+                marker = self._query_marker(snapshot)
                 stable_samples = stable_samples + 1 if marker == previous_marker else 1
                 previous_marker = marker
                 if stable_samples >= 2:

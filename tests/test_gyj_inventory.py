@@ -508,6 +508,29 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertEqual([row["serial"] for row in result], ["S1"])
         self.assertGreaterEqual(len(page.waits), 4)
 
+    def test_serial_query_waits_for_result_metadata_to_settle(self):
+        rows = [["S1", "10000213", "雷哲", "沈桥仓", "0", "否"]]
+        changed_headers = {
+            **serial_page(rows, 2, True),
+            "headers": [
+                "序列号", "条码", "名称", "仓库", "入库单价", "已出库", "备注",
+            ],
+        }
+        settled = {**changed_headers, "total": 1, "has_next": False}
+        page = SettlingSerialPage([
+            serial_page(rows, 1),
+            serial_page(rows, 2),
+            serial_page(rows, 2, True),
+            changed_headers,
+            settled,
+            settled,
+        ])
+
+        result = GYJInventoryReader(page).read_unshipped_serials("10000213")
+
+        self.assertEqual([row["serial"] for row in result], ["S1"])
+        self.assertGreaterEqual(len(page.waits), 5)
+
     def test_serial_query_rejects_a_result_that_never_settles(self):
         with self.assertRaisesRegex(GYJInventoryReadError, "查询结果未稳定"):
             GYJInventoryReader(NeverSettlingSerialPage()).read_unshipped_serials(
