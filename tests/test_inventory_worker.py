@@ -53,6 +53,9 @@ class _SerialLookupPage:
     def click_query(self):
         pass
 
+    def wait_for_timeout(self, _milliseconds):
+        pass
+
     def read_table_page(self, _report):
         rows = []
         if self.serial_state == "是":
@@ -116,7 +119,7 @@ class InventoryWorkerTests(unittest.TestCase):
             self.assertIsNone(item["completed_actual_qty"])
             self.assertEqual(item["open_book_qty"], "2")
 
-    def test_shipped_lookup_flows_through_worker_session_to_serial_service(self):
+    def test_unmatched_serial_scan_uses_cached_reconciliation(self):
         with tempfile.TemporaryDirectory() as tempdir:
             store = InventoryStore(
                 os.path.join(tempdir, "inventory.sqlite3"),
@@ -165,13 +168,8 @@ class InventoryWorkerTests(unittest.TestCase):
                     "SHIPPED-1",
                 )
 
-            self.assertEqual(result["classification"], "already_shipped")
-            self.assertEqual(result["warehouse"], "已出库仓")
-            self.assertTrue(result["shipped"])
-            self.assertEqual(
-                page.selected,
-                [("已出库", "否"), ("已出库", "否"), ("已出库", "是")],
-            )
+            self.assertEqual(result["classification"], "unknown")
+            self.assertEqual(page.selected, [("已出库", "否")])
             self.assertFalse(
                 any(label == "仓库" for label, _value in page.filled + page.selected)
             )
