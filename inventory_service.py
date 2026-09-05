@@ -392,10 +392,10 @@ class InventoryService:
         expected_version=None,
     ):
         with self._serial_guard(owner, task_id, barcode):
-            refreshed = self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, False,
-                expected_version,
-            )
+            self._serial_item(owner, task_id, barcode)
+            current = self.store.serial_reconciliation(owner, task_id, barcode)
+            if not current["item"].get("serial_synced_at"):
+                raise InventoryConflict("请先刷新账面序列号")
             return self.store.complete_serial_item(
                 owner, task_id, barcode, device_id, actor,
             )

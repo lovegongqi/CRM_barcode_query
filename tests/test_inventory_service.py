@@ -410,6 +410,16 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(finished["item"]["state"], "serial_complete")
         self.assertEqual(self.worker.serial_reads, ["B2"])
 
+    def test_finish_serial_item_requires_cached_serials_without_gyj_read(self):
+        task = self.create_serial_task()
+
+        with self.assertRaises(InventoryConflict):
+            self.service.finish_serial_item(
+                "admin", task["task_id"], "B2", "device-a", "甲"
+            )
+
+        self.assertEqual(self.worker.serial_reads, [])
+
     def test_serial_open_ignores_stale_task_version_without_creating_lock(self):
         task = self.create_serial_task()
         current_version = self.store.get_task_snapshot(
