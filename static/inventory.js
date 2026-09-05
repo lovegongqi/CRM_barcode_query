@@ -36,7 +36,6 @@ let serialOperationQueue = Promise.resolve();
 let serialOperationGeneration = 0;
 let serialRenderedGeneration = 0;
 let serialMutationFailures = new Map();
-let serialRefreshTimer = null;
 
 function inventoryElement(id) {
     return document.getElementById(id);
@@ -972,11 +971,6 @@ function setSerialMessage(message, kind = '') {
     target.className = 'inventory-dialog-message' + (kind ? ` is-${kind}` : '');
 }
 
-function stopSerialRefreshTimer() {
-    if (serialRefreshTimer) clearInterval(serialRefreshTimer);
-    serialRefreshTimer = null;
-}
-
 function resetSerialOperations() {
     serialOperationGeneration += 1;
     serialRenderedGeneration = serialOperationGeneration;
@@ -1019,24 +1013,10 @@ function restoreSerialAfterFailedFinish(message) {
     if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
     const input = inventoryElement('inventorySerialInput');
     input.disabled = false;
+    inventoryElement('inventorySerialRefresh').disabled = false;
     inventoryElement('inventorySerialFinish').disabled = false;
-    if (!document.hidden) startSerialRefreshTimer();
     setSerialMessage(message, 'error');
     input.focus();
-}
-
-async function refreshSerialWorkspace() {
-    if (!serialWorkspaceEditable || serialFinishPending) return;
-    try {
-        await refreshSerialItem();
-    } catch (_error) {
-        // refreshSerialItem already keeps the workspace visible and reports the error.
-    }
-}
-
-function startSerialRefreshTimer() {
-    stopSerialRefreshTimer();
-    serialRefreshTimer = setInterval(refreshSerialWorkspace, 60000);
 }
 
 function serialClassificationLabel(classification) {
@@ -1077,6 +1057,8 @@ function serialListRow(row, canDelete) {
 function renderSerialReconciliation(value) {
     currentSerialData = value || {};
     const item = currentSerialData.item || {};
+    inventoryElement('inventorySerialSyncedAt').textContent =
+        `最近获取：${inventoryText(item.serial_synced_at, '尚未获取')}`;
     const product = inventoryElement('inventorySerialProduct');
     product.replaceChildren();
     product.append(
@@ -1119,7 +1101,6 @@ function renderSerialReconciliation(value) {
 function closeSerialWorkspace() {
     serialWorkspaceRequestId += 1;
     resetSerialOperations();
-    stopSerialRefreshTimer();
     serialWorkspaceOpen = false;
     serialWorkspaceEditable = false;
     currentSerialBarcode = '';
@@ -1139,12 +1120,12 @@ async function openSerialItem(barcode) {
     currentSerialData = null;
     serialWorkspaceOpen = true;
     serialWorkspaceEditable = false;
-    stopSerialRefreshTimer();
     inventoryElement('inventorySerialInput').value = '';
     inventoryElement('inventorySerialInput').disabled = true;
+    inventoryElement('inventorySerialRefresh').disabled = true;
     inventoryElement('inventorySerialFinish').disabled = true;
     renderSerialReconciliation({barcode, item, counts: {}});
-    setSerialMessage('正在从 GYJ 刷新账面序列号…');
+    setSerialMessage('正在读取已缓存的 GYJ 账面序列号…');
     if (!dialog.open) dialog.showModal();
     try {
         const data = await inventoryPost(
@@ -1157,14 +1138,15 @@ async function openSerialItem(barcode) {
         serialWorkspaceEditable = true;
         const input = inventoryElement('inventorySerialInput');
         input.disabled = false;
+        inventoryElement('inventorySerialRefresh').disabled = false;
         inventoryElement('inventorySerialFinish').disabled = false;
-        setSerialMessage('已刷新账面序列号，可以开始扫描。', 'success');
-        startSerialRefreshTimer();
+        setSerialMessage('已读取账面序列号缓存，可以开始扫描。', 'success');
         input.focus();
     } catch (error) {
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
         serialWorkspaceEditable = false;
         inventoryElement('inventorySerialInput').disabled = true;
+        inventoryElement('inventorySerialRefresh').disabled = true;
         inventoryElement('inventorySerialFinish').disabled = true;
         setSerialMessage(error.message, 'error');
     }
@@ -1194,6 +1176,21 @@ function refreshSerialItem(force = false) {
     return queueSerialOperation((requestId, generation) => (
         performSerialRefresh(force, requestId, generation)
     ));
+}
+
+async function manualRefreshSerialItem() {
+    const button = inventoryElement('inventorySerialRefresh');
+    button.disabled = true;
+    setSerialMessage('正在重新获取 GYJ 账面序列号…');
+    try {
+        await refreshSerialItem(true);
+        setSerialMessage('账面序列号已重新获取。', 'success');
+    } catch (error) {
+        setSerialMessage(`重新获取失败：${error.message}。已保留上次数据。`, 'error');
+    } finally {
+        button.disabled = false;
+        inventoryElement('inventorySerialInput').focus();
+    }
 }
 
 async function scanSerial(event) {
@@ -1302,12 +1299,13 @@ function deleteSerialScan(serial) {
 function finishSerialItem() {
     if (!serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask) return;
     serialFinishPending = true;
-    stopSerialRefreshTimer();
     const input = inventoryElement('inventorySerialInput');
+    const refresh = inventoryElement('inventorySerialRefresh');
     const finish = inventoryElement('inventorySerialFinish');
     input.disabled = true;
+    refresh.disabled = true;
     finish.disabled = true;
-    setSerialMessage('正在强制刷新 GYJ 账面序列号并完成核对…');
+    setSerialMessage('正在使用已缓存的 GYJ 账面序列号完成核对…');
     const taskId = inventoryTask.task_id;
     const barcode = currentSerialBarcode;
     return queueSerialOperation(async (requestId, generation) => {
@@ -1979,6 +1977,7 @@ function initializeInventoryPage() {
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
+    inventoryElement('inventorySerialRefresh').addEventListener('click', manualRefreshSerialItem);
     inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
     inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);
     inventoryElement('inventorySerialCancel').addEventListener('click', closeSerialWorkspace);
@@ -2014,18 +2013,10 @@ function initializeInventoryPage() {
     bindInventoryDialogBackdrop(inventoryElement('inventoryAuditDialog'), closeInventoryAudit);
     bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            stopSerialRefreshTimer();
-            return;
-        }
-        if (serialWorkspaceOpen && serialWorkspaceEditable) {
-            refreshSerialItem();
-            startSerialRefreshTimer();
-        }
+        if (document.hidden) return;
         if (inventoryActiveTab === 'current') pollInventoryTask({force: true});
     });
     window.addEventListener('beforeunload', () => {
-        stopSerialRefreshTimer();
         stopGyjLoginPolling();
     });
     renderInventoryTask(null);

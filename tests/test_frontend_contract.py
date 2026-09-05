@@ -879,6 +879,22 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertIn(label, source + script)
         self.assertNotIn("innerHTML", script)
 
+    def test_inventory_serial_dialog_has_manual_refresh_controls(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertIn('id="inventorySerialRefresh"', source)
+        self.assertIn('id="inventorySerialSyncedAt"', source)
+        self.assertIn('重新获取', source)
+        self.assertIn("function manualRefreshSerialItem()", script)
+        self.assertIn(
+            "inventoryElement('inventorySerialRefresh').addEventListener('click', manualRefreshSerialItem)",
+            script,
+        )
+        self.assertIn(".inventory-serial-refresh", css)
+        self.assertNotIn("serialRefreshTimer", script)
+        self.assertNotIn("正在强制刷新 GYJ 账面序列号并完成核对", script)
+
     def test_inventory_serial_history_and_discrepancy_timing_contract(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         for endpoint in (
@@ -888,7 +904,7 @@ class FrontendContractTest(unittest.TestCase):
         ):
             with self.subTest(endpoint=endpoint):
                 self.assertIn(endpoint, script)
-        self.assertRegex(script, r"setInterval\([^,]+,\s*60000\)")
+        self.assertNotRegex(script, r"setInterval\([^,]+,\s*60000\)")
         self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
         self.assertIn("CURRENT_ACCOUNT.is_admin", script)
         self.assertIn("encodeURIComponent(serial)", script)

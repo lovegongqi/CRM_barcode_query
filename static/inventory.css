@@ -460,6 +460,15 @@ article.inventory-item { cursor: default; }
     width: min(960px, calc(100vw - 32px));
 }
 
+.inventory-serial-refresh {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--aurora-muted);
+    font-size: 13px;
+}
+
 .inventory-serial-counts {
     grid-template-columns: repeat(5, minmax(108px, 1fr));
 }

@@ -691,7 +691,6 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     barcode: 'B2', name: '序列商品', state: 'serial_pending', has_serial: true,
                 }]};
                 renderSerialReconciliation = value => { currentSerialData = value; };
-                startSerialRefreshTimer = () => {};
                 renderSerialQueue(inventoryTask);
             `, context);
             assert.equal(element('inventorySerialQueueRoot').hidden, false);
@@ -1372,54 +1371,77 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_serial_workspace_refresh_timer_is_cleaned_on_close_and_tab_switch(self):
+    def test_manual_serial_refresh_is_the_only_forced_refresh(self):
         self.run_node(
             r"""
             const intervals = [];
-            const cleared = [];
-            const refreshEvents = [];
-            const dialog = {
-                open: true, showModal() { this.open = true; }, close() { this.open = false; },
-            };
+            let focusCount = 0;
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.textContent = ''; this.className = '';
+                    this.disabled = false; this.value = '';
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener() {}
+                focus() { focusCount += 1; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const requests = [];
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 CURRENT_ACCOUNT: {is_admin: false},
                 document: {
                     hidden: false, addEventListener() {},
-                    getElementById(id) {
-                        if (id === 'inventorySerialWorkspace') return dialog;
-                        return {hidden: false, classList: {toggle() {}}, setAttribute() {}};
-                    },
+                    createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 4,
+                        serial: {
+                            barcode: 'B2',
+                            item: {barcode: 'B2', name: '序列商品', serial_synced_at: '2026-09-06T12:34:56'},
+                            counts: {}, matched: [], system_only: [], physical_only: [],
+                            other_product: [], duplicates: [],
+                        },
+                    })};
                 },
                 setTimeout, clearTimeout,
                 setInterval(callback, delay) { intervals.push({callback, delay}); return intervals.length; },
-                clearInterval(id) { cleared.push(id); },
-                refreshEvents,
+                clearInterval() {},
             };
             vm.createContext(context);
             vm.runInContext(source, context);
             vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3};
                 serialWorkspaceOpen = true;
                 serialWorkspaceEditable = true;
-                currentSerialBarcode = 'A1';
-                refreshSerialItem = async () => { refreshEvents.push('refresh'); };
-                startSerialRefreshTimer();
+                currentSerialBarcode = 'B2';
             `, context);
             (async () => {
-                assert.equal(intervals[0].delay, 60000);
-                await intervals[0].callback();
-                assert.deepEqual(refreshEvents, ['refresh']);
-                vm.runInContext("closeSerialWorkspace()", context);
-                assert.deepEqual(cleared, [1]);
-                assert.equal(vm.runInContext('serialRefreshTimer', context), null);
-                vm.runInContext(`
-                    serialWorkspaceOpen = true;
-                    currentSerialBarcode = 'A1';
-                    startSerialRefreshTimer();
-                    loadInventoryHistory = async () => {};
-                    switchInventoryTab('history');
-                `, context);
-                assert.deepEqual(cleared, [1, 2]);
+                await vm.runInContext('manualRefreshSerialItem()', context);
+                assert.equal(requests.length, 1);
+                assert.equal(requests.at(-1).url, '/api/inventory/tasks/T1/items/B2/serial/refresh');
+                assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+                    device_id: 'device-a', force: true,
+                });
+                assert.match(element('inventorySerialSyncedAt').textContent, /最近获取/);
+                assert.equal(element('inventorySerialRefresh').disabled, false);
+                assert.equal(focusCount, 1);
+                assert.equal(intervals.length, 0);
+                assert.doesNotMatch(source, /serialRefreshTimer|startSerialRefreshTimer|stopSerialRefreshTimer/);
+                assert.doesNotMatch(
+                    source,
+                    /visibilitychange[\s\S]*refreshSerialItem\([\s\S]*inventoryActiveTab/,
+                );
+                assert.equal((source.match(/refreshSerialItem\(true\)/g) || []).length, 1);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
