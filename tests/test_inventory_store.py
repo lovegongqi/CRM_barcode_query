@@ -493,7 +493,7 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertTrue(result["unlocked"])
         self.assertEqual(result["task_version"], refreshed + 1)
 
-    def test_two_device_stale_count_scan_and_delete_retry_after_refresh(self):
+    def test_two_device_stale_count_conflicts_but_serial_writes_merge(self):
         store = InventoryStore(
             self.db_path, now=lambda: datetime(2026, 9, 1, 10, 0, 0)
         )
@@ -527,43 +527,29 @@ class InventoryStoreTests(unittest.TestCase):
             diff_qty="0", state="matched",
             expected_version=counted_b["task_version"],
         )
-        serial_lock = store.claim_item(
-            task["task_id"], "B2", "device-b", "乙", "serial_check",
-            expected_version=counted_a["task_version"],
-        )
         expected = store.replace_expected_serials(
             "admin", task["task_id"], "B2", "device-b", "乙", [{
                 "serial": "SN-1", "barcode": "B2", "name": "零库存商品",
                 "warehouse": "一仓", "shipped": False,
-            }], expected_version=serial_lock["task_version"],
+            }], expected_version=counted_a["task_version"],
         )
-        other_lock = store.claim_item(
-            task["task_id"], "A1", "device-a", "甲", "serial_check",
-            expected_version=expected["version"],
-        )
-        with self.assertRaises(InventoryVersionConflict):
-            store.add_serial_scan(
-                "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
-                "matched", expected_version=expected["version"],
-            )
         scan = store.add_serial_scan(
             "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
-            "matched", expected_version=other_lock["task_version"],
+            "matched", expected_version=1,
         )
-        unlocked = store.admin_unlock(
-            task["task_id"], "A1", "管理员", True,
-            expected_version=scan["task_version"],
-        )
-        with self.assertRaises(InventoryVersionConflict):
-            store.remove_serial_scan(
-                "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
-                expected_version=scan["task_version"],
-            )
         deleted = store.remove_serial_scan(
-            "admin", task["task_id"], "B2", "device-b", "乙", "SN-1",
-            expected_version=unlocked["task_version"],
+            "admin", task["task_id"], "B2", "device-a", "甲", "SN-1",
+            expected_version=1,
         )
         self.assertEqual(deleted["removed"], "SN-1")
+        self.assertGreater(scan["task_version"], expected["version"])
+        with store.connect() as connection:
+            audit = connection.execute(
+                "SELECT actor, device_id FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'serial_scan_removed'",
+                (task["task_id"],),
+            ).fetchone()
+        self.assertEqual(tuple(audit), ("甲", "device-a"))
 
     def test_two_device_stale_note_archive_and_restore_retry_after_refresh(self):
         store = InventoryStore(
@@ -809,7 +795,7 @@ class InventoryStoreTests(unittest.TestCase):
                 (task["task_id"],),
             ).fetchone()[0], 0)
 
-    def test_serial_store_guards_owner_phase_lock_and_expected_refresh_transaction(self):
+    def test_serial_store_guards_owner_phase_and_allows_any_device(self):
         store = InventoryStore(
             os.path.join(self.tempdir.name, "phase.sqlite3"),
             now=lambda: datetime(2026, 9, 1, 10, 0, 0),
@@ -821,9 +807,6 @@ class InventoryStoreTests(unittest.TestCase):
             )
 
         store, task = self.serial_ready_store()
-        store.claim_item(
-            task["task_id"], "B2", "device-a", "甲", "serial_check"
-        )
         expected = [
             {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
             {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
@@ -849,11 +832,11 @@ class InventoryStoreTests(unittest.TestCase):
                 "other", task["task_id"], "B2", "device-a", "乙",
                 "UNKNOWN-1", "unknown",
             )
-        with self.assertRaises(InventoryConflict):
-            store.add_serial_scan(
-                "admin", task["task_id"], "B2", "device-b", "乙",
-                "UNKNOWN-1", "unknown",
-            )
+        scan = store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-b", "乙",
+            "UNKNOWN-1", "unknown", expected_version=1,
+        )
+        self.assertEqual(scan["device_id"], "device-b")
         with sqlite3.connect(self.db_path) as connection:
             rows = connection.execute(
                 "SELECT serial, warehouse, sync_status FROM inventory_serial_expected "
@@ -868,7 +851,7 @@ class InventoryStoreTests(unittest.TestCase):
             rows,
             [("B-1", "沈桥仓", "active"), ("B-2", "其他仓", "active")],
         )
-        self.assertEqual(scan_count, 0)
+        self.assertEqual(scan_count, 1)
 
     def test_serial_store_delete_rescan_completion_is_versioned_audited_and_immutable(self):
         store, task = self.serial_ready_store()

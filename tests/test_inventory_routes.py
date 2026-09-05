@@ -260,11 +260,11 @@ class InventoryRouteTest(unittest.TestCase):
             ("post", "/api/inventory/tasks", {}, "task"),
             ("get", "/api/inventory/tasks/history", None, "tasks"),
             ("get", "/api/inventory/tasks/task-1", None, "task"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/open", {"device_id": "device-a", "expected_version": 3}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/refresh", {"device_id": "device-a", "expected_version": 3}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1", "expected_version": 3}, "scan"),
-            ("delete", "/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1", {"device_id": "device-a", "expected_version": 3}, "serial"),
-            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/finish", {"device_id": "device-a", "expected_version": 3}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/open", {"device_id": "device-a"}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/refresh", {"device_id": "device-a"}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serials", {"device_id": "device-a", "serial": "SN/1"}, "scan"),
+            ("delete", "/api/inventory/tasks/task-1/items/A%2FB/serials/SN%2F1", {"device_id": "device-a"}, "serial"),
+            ("post", "/api/inventory/tasks/task-1/items/A%2FB/serial/finish", {"device_id": "device-a"}, "serial"),
             ("post", "/api/inventory/tasks/task-1/complete", {"expected_version": 3}, "task"),
             ("post", "/api/inventory/tasks/task-1/items/A%2FB/unlock", {"is_admin": False, "expected_version": 3}, "result"),
             ("get", "/api/inventory/discrepancies?state=open&query=A%2FB", None, "discrepancies"),
@@ -286,23 +286,18 @@ class InventoryRouteTest(unittest.TestCase):
 
         self.service.open_serial_item.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin",
-            expected_version=3,
         )
         self.service.refresh_serial_item.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin", force=False,
-            expected_version=3,
         )
         self.service.scan_serial.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin", "SN/1",
-            expected_version=3,
         )
         self.service.delete_serial_scan.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin", "SN/1",
-            expected_version=3,
         )
         self.service.finish_serial_item.assert_called_once_with(
             "admin", "task-1", "A/B", "device-a", "admin",
-            expected_version=3,
         )
         self.service.complete_task.assert_called_once_with(
             "admin", "task-1", "admin", expected_version=3,

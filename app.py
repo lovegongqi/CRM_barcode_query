@@ -10910,7 +10910,6 @@ def api_inventory_open_serial_item(task_id, barcode):
         _inventory_path_value(barcode, "商品条码"),
         _inventory_device_id(data),
         actor,
-        expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response("serial", result, owner, task_id)
 
@@ -10927,7 +10926,6 @@ def api_inventory_refresh_serial_item(task_id, barcode):
         _inventory_device_id(data),
         actor,
         force=data.get("force") is True,
-        expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response("serial", result, owner, task_id)
 
@@ -10944,7 +10942,6 @@ def api_inventory_scan_serial(task_id, barcode):
         _inventory_device_id(data),
         actor,
         _inventory_path_value(data.get("serial"), "序列号"),
-        expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response("scan", result, owner, task_id)
 
@@ -10961,7 +10958,6 @@ def api_inventory_delete_serial(task_id, barcode, serial):
         _inventory_device_id(data),
         actor,
         _inventory_path_value(serial, "序列号"),
-        expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response("serial", result, owner, task_id)
 
@@ -10977,7 +10973,6 @@ def api_inventory_finish_serial_item(task_id, barcode):
         _inventory_path_value(barcode, "商品条码"),
         _inventory_device_id(data),
         actor,
-        expected_version=_inventory_expected_version(data),
     )
     return _inventory_mutation_response("serial", result, owner, task_id)
 

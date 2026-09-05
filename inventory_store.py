@@ -1397,15 +1397,13 @@ class InventoryStore:
         finally:
             connection.close()
 
-    def _serial_write_context(
-        self, connection, owner, task_id, barcode, device_id, actor, operation,
-        expected_version=None,
+    def _serial_mutation_context(
+        self, connection, owner, task_id, barcode
     ):
         timestamp = self._now_text()
         task = self._task_for_owner(connection, owner, task_id)
-        self._assert_expected_version(connection, task_id, expected_version)
-        if task["phase"] != "serial_check":
-            raise InventoryConflict("当前任务不在序列号核对阶段")
+        if task["phase"] not in {"counting", "serial_check"}:
+            raise InventoryConflict("当前任务不能核对序列号")
         item = connection.execute(
             "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
             (task_id, barcode),
@@ -1414,23 +1412,6 @@ class InventoryStore:
             raise InventoryNotFound("商品不存在")
         if item["status"] != "serial_pending":
             raise InventoryConflict("商品不在待核对序列号状态")
-        self._expire_locks(connection, task_id, timestamp)
-        lock = connection.execute(
-            "SELECT * FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
-            (task_id, barcode),
-        ).fetchone()
-        if (
-            lock is None
-            or lock["device_id"] != device_id
-            or lock["phase"] != "serial_check"
-        ):
-            self._audit(
-                connection, task_id, "lock_conflict", actor,
-                barcode=barcode, device_id=device_id,
-                details=f"{operation}_owner_mismatch", created_at=timestamp,
-            )
-            connection.commit()
-            raise InventoryConflict("设备未持有序列号核对锁")
         return task, item, timestamp
 
     @staticmethod
@@ -1505,9 +1486,8 @@ class InventoryStore:
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            self._serial_write_context(
-                connection, owner, task_id, barcode, device_id, actor,
-                "serial_refresh", expected_version,
+            self._serial_mutation_context(
+                connection, owner, task_id, barcode,
             )
             connection.execute(
                 "UPDATE inventory_serial_expected SET sync_status = 'inactive' "
@@ -1576,9 +1556,8 @@ class InventoryStore:
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            _, _, timestamp = self._serial_write_context(
-                connection, owner, task_id, barcode, device_id, actor,
-                "serial_scan", expected_version,
+            _, _, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
             )
             existing = connection.execute(
                 """SELECT * FROM inventory_serial_scans
@@ -1661,9 +1640,8 @@ class InventoryStore:
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            _, _, timestamp = self._serial_write_context(
-                connection, owner, task_id, barcode, device_id, actor,
-                "serial_delete", expected_version,
+            _, _, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
             )
             scan = connection.execute(
                 """SELECT * FROM inventory_serial_scans
@@ -1769,9 +1747,8 @@ class InventoryStore:
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            _, _, timestamp = self._serial_write_context(
-                connection, owner, task_id, barcode, device_id, actor,
-                "serial_finish", expected_version,
+            _, _, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
             )
             connection.execute(
                 """UPDATE inventory_serial_scans AS scans

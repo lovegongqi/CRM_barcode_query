@@ -3,7 +3,6 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from contextlib import closing
 from datetime import datetime, timedelta
 
 from inventory_service import InventoryService, InventoryServiceError
@@ -180,23 +179,84 @@ class InventoryServiceTests(unittest.TestCase):
                 (task["task_id"],),
             ).fetchone()[0], 1)
 
-    def test_serial_open_claims_before_read_and_failure_releases_without_progress(self):
+    def test_serial_reconciliation_is_immediate_and_lock_free_across_devices(self):
+        task = self.create_task()
+        counted = self.service.add_count_entry(
+            "admin", task["task_id"], "B2", "device-a", "甲", "1"
+        )
+        self.assertEqual(counted["state"], "serial_pending")
+        self.assertEqual(
+            self.store.get_task_snapshot("admin", task["task_id"])["phase"],
+            "counting",
+        )
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+
+        first = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        second = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+        matched = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
+        )
+        duplicate = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-b", "乙", "B-1"
+        )
+        self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "EXTRA-1"
+        )
+        deleted = self.service.delete_serial_scan(
+            "admin", task["task_id"], "B2", "device-b", "乙", "EXTRA-1"
+        )
+        finished = self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+
+        self.assertFalse(first["skipped"])
+        self.assertFalse(second["skipped"])
+        self.assertEqual(matched["classification"], "matched")
+        self.assertEqual(duplicate["classification"], "duplicate")
+        self.assertEqual(deleted["physical_only"], [])
+        self.assertEqual(finished["item"]["state"], "serial_complete")
+        self.assertEqual(self.worker.serial_reads, ["B2", "B2", "B2"])
+        with self.store.connect() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_item_locks WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0], 0)
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_scans "
+                "WHERE task_id = ? AND barcode = 'B2' AND serial = 'B-1' AND active = 1",
+                (task["task_id"],),
+            ).fetchone()[0], 1)
+
+    def test_serial_open_failure_has_no_lock_or_progress(self):
         task = self.create_serial_task()
 
-        def assert_serial_lock(barcode):
+        def assert_no_serial_lock(barcode):
             with sqlite3.connect(self.db_path) as connection:
                 lock = connection.execute(
                     "SELECT device_id, phase FROM inventory_item_locks "
                     "WHERE task_id = ? AND barcode = ?",
                     (task["task_id"], barcode),
                 ).fetchone()
-            self.assertEqual(lock, ("device-a", "serial_check"))
+            self.assertIsNone(lock)
 
-        self.worker.on_serial_read = assert_serial_lock
+        self.worker.on_serial_read = assert_no_serial_lock
         self.worker.serial_failures["B2"] = "序列号报表暂时不可用"
         version_before = self.store.get_task_snapshot(
             "admin", task["task_id"]
         )["version"]
+        with self.store.connect() as connection:
+            lock_events_before = connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type LIKE 'lock_%'",
+                (task["task_id"],),
+            ).fetchone()[0]
 
         with self.assertRaisesRegex(InventoryServiceError, "序列号报表暂时不可用"):
             self.service.open_serial_item(
@@ -209,7 +269,7 @@ class InventoryServiceTests(unittest.TestCase):
             next(row for row in snapshot["items"] if row["barcode"] == "B2")["state"],
             "serial_pending",
         )
-        self.assertEqual(snapshot["version"], version_before + 2)
+        self.assertEqual(snapshot["version"], version_before)
         with sqlite3.connect(self.db_path) as connection:
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM inventory_item_locks WHERE task_id = ? AND barcode = 'B2'",
@@ -219,14 +279,14 @@ class InventoryServiceTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM inventory_serial_expected WHERE task_id = ?",
                 (task["task_id"],),
             ).fetchone()[0], 0)
-            released = connection.execute(
-                "SELECT details FROM inventory_audit_events "
-                "WHERE task_id = ? AND event_type = 'lock_released'",
+            lock_events = connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type LIKE 'lock_%'",
                 (task["task_id"],),
-            ).fetchone()
-        self.assertEqual(released, ("serial_open_failed",))
+            ).fetchone()[0]
+        self.assertEqual(lock_events, lock_events_before)
 
-    def test_serial_guards_reject_invalid_phase_owner_item_and_device_before_reads(self):
+    def test_serial_guards_reject_invalid_owner_and_item_but_allow_other_device(self):
         task = self.create_task()
         with self.assertRaises(InventoryConflict):
             self.service.open_serial_item(
@@ -245,10 +305,10 @@ class InventoryServiceTests(unittest.TestCase):
             self.service.refresh_serial_item(
                 "other", task["task_id"], "B2", "device-a", "乙"
             )
-        with self.assertRaises(InventoryConflict):
-            self.service.refresh_serial_item(
-                "admin", task["task_id"], "B2", "device-b", "乙"
-            )
+        other_device = self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+        self.assertTrue(other_device["skipped"])
         with self.assertRaises(InventoryConflict):
             self.service.open_serial_item(
                 "admin", task["task_id"], "A1", "device-c", "丙"
@@ -406,33 +466,29 @@ class InventoryServiceTests(unittest.TestCase):
         item = next(row for row in snapshot["items"] if row["barcode"] == "B2")
         self.assertEqual(item["state"], "serial_pending")
         self.assertEqual(snapshot["phase"], "serial_check")
-        self.store.assert_item_lock(
-            task["task_id"], "B2", "device-a", "serial_check"
-        )
+        with self.store.connect() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM inventory_item_locks WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0], 0)
 
-    def test_serial_open_conflict_reports_version_after_its_lock_cleanup(self):
+    def test_serial_open_ignores_stale_task_version_without_creating_lock(self):
         task = self.create_serial_task()
         current_version = self.store.get_task_snapshot(
             "admin", task["task_id"]
         )["version"]
+        self.worker.serials["B2"] = []
 
-        def change_task_while_gyj_is_read(_barcode):
-            self.store.claim_item(
-                task["task_id"], "A1", "device-b", "乙", "serial_check"
-            )
-
-        self.worker.on_serial_read = change_task_while_gyj_is_read
-        with self.assertRaises(InventoryVersionConflict) as caught:
-            self.service.open_serial_item(
-                "admin", task["task_id"], "B2", "device-a", "甲",
-                expected_version=current_version,
-            )
+        opened = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲",
+            expected_version=current_version - 1,
+        )
 
         final_version = self.store.get_task_snapshot(
             "admin", task["task_id"]
         )["version"]
-        self.assertEqual(caught.exception.current_version, final_version)
-        with closing(sqlite3.connect(self.db_path)) as connection:
+        self.assertEqual(opened["version"], final_version)
+        with sqlite3.connect(self.db_path) as connection:
             self.assertIsNone(connection.execute(
                 "SELECT 1 FROM inventory_item_locks "
                 "WHERE task_id = ? AND barcode = 'B2'",
