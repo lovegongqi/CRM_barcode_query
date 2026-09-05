@@ -30,6 +30,7 @@ _AUDIT_EVENT_LABELS = {
     "count_entry_deleted": "删除分次数量",
     "serial_expected_refreshed": "刷新账面序列号",
     "serial_scanned": "扫描序列号",
+    "serial_scan_reclassified": "重新分类序列号",
     "serial_scan_removed": "删除序列号",
     "serial_item_completed": "完成序列号核对",
     "task_completed": "完成盘点",
@@ -1438,6 +1439,26 @@ class InventoryStore:
         result["shipped"] = bool(result.pop("is_checked_out", 0))
         return result
 
+    @staticmethod
+    def _serial_audit_snapshot(row):
+        if row is None:
+            return None
+        return {
+            "serial": row["serial"],
+            "classification": row["classification"],
+            "lookup_barcode": row["lookup_barcode"],
+            "lookup_name": row["lookup_name"],
+            "warehouse": row["warehouse"],
+            "shipped": bool(row["is_checked_out"]),
+        }
+
+    @classmethod
+    def _serial_audit_details(cls, before, after):
+        return json.dumps({
+            "before": cls._serial_audit_snapshot(before),
+            "after": cls._serial_audit_snapshot(after),
+        }, ensure_ascii=False, sort_keys=True)
+
     def release_item_lock(
         self, owner, task_id, barcode, device_id, actor, phase, reason
     ):
@@ -1507,6 +1528,13 @@ class InventoryStore:
             self._serial_mutation_context(
                 connection, owner, task_id, barcode,
             )
+            scans_before = {
+                row["scan_id"]: row for row in connection.execute(
+                    """SELECT * FROM inventory_serial_scans
+                       WHERE task_id = ? AND barcode = ? AND active = 1""",
+                    (task_id, barcode),
+                ).fetchall()
+            }
             connection.execute(
                 "UPDATE inventory_serial_expected SET sync_status = 'inactive' "
                 "WHERE task_id = ? AND barcode = ?",
@@ -1553,6 +1581,20 @@ class InventoryStore:
                 barcode=barcode, device_id=device_id,
                 details=f"expected={len(prepared)}", created_at=timestamp,
             )
+            for after in connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                   ORDER BY scan_id""",
+                (task_id, barcode),
+            ).fetchall():
+                before = scans_before.get(after["scan_id"])
+                if before is not None and before["classification"] != after["classification"]:
+                    self._audit(
+                        connection, task_id, "serial_scan_reclassified", actor,
+                        barcode=barcode, device_id=device_id,
+                        details=self._serial_audit_details(before, after),
+                        created_at=timestamp,
+                    )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -1629,18 +1671,18 @@ class InventoryStore:
                     warehouse, is_checked_out, device_id, actor, timestamp,
                 ),
             )
-            self._bump_version(connection, task_id)
-            self._audit(
-                connection, task_id, "serial_scanned", actor,
-                barcode=barcode, device_id=device_id,
-                details=f"serial={serial};classification={classification}",
-                created_at=timestamp,
-            )
-            connection.commit()
             row = connection.execute(
                 "SELECT * FROM inventory_serial_scans WHERE scan_id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_scanned", actor,
+                barcode=barcode, device_id=device_id,
+                details=self._serial_audit_details(None, row),
+                created_at=timestamp,
+            )
+            connection.commit()
             result = self._serial_scan_dict(row)
             result["task_version"] = self._task_version(connection, task_id)
             return result
@@ -1676,7 +1718,8 @@ class InventoryStore:
             self._audit(
                 connection, task_id, "serial_scan_removed", actor,
                 barcode=barcode, device_id=device_id,
-                details=serial, created_at=timestamp,
+                details=self._serial_audit_details(scan, None),
+                created_at=timestamp,
             )
             connection.commit()
         except Exception:
@@ -1949,10 +1992,14 @@ class InventoryStore:
                     discrepancy_count += 1
 
             scans = connection.execute(
-                """SELECT barcode, serial, classification
-                   FROM inventory_serial_scans
-                   WHERE task_id = ? AND active = 1
-                   ORDER BY scan_id""",
+                """SELECT scans.barcode, scans.serial, scans.classification
+                   FROM inventory_serial_scans AS scans
+                   JOIN inventory_items AS items
+                     ON items.task_id = scans.task_id
+                    AND items.barcode = scans.barcode
+                   WHERE scans.task_id = ? AND scans.active = 1
+                     AND items.status = 'serial_complete'
+                   ORDER BY scans.scan_id""",
                 (task_id,),
             ).fetchall()
             for scan in scans:
@@ -2226,7 +2273,17 @@ class InventoryStore:
         for row in rows:
             before_quantity = None
             after_quantity = None
-            if row["event_type"].startswith("count_entry_"):
+            before_serial = None
+            after_serial = None
+            before_classification = None
+            after_classification = None
+            if (
+                row["event_type"].startswith("count_entry_")
+                or row["event_type"] in {
+                    "serial_scanned", "serial_scan_reclassified",
+                    "serial_scan_removed",
+                }
+            ):
                 try:
                     details = json.loads(row["details"] or "{}")
                 except (TypeError, ValueError, json.JSONDecodeError):
@@ -2237,6 +2294,13 @@ class InventoryStore:
                     before_quantity = before.get("quantity")
                 if isinstance(after, dict):
                     after_quantity = after.get("quantity")
+                if row["event_type"].startswith("serial_"):
+                    if isinstance(before, dict):
+                        before_serial = before.get("serial")
+                        before_classification = before.get("classification")
+                    if isinstance(after, dict):
+                        after_serial = after.get("serial")
+                        after_classification = after.get("classification")
             result.append({
                 "id": int(row["event_id"]),
                 "barcode": row["barcode"],
@@ -2247,6 +2311,10 @@ class InventoryStore:
                 "created_at": row["created_at"],
                 "before_quantity": before_quantity,
                 "after_quantity": after_quantity,
+                "before_serial": before_serial,
+                "after_serial": after_serial,
+                "before_classification": before_classification,
+                "after_classification": after_classification,
             })
         return result
 

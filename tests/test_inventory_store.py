@@ -1055,6 +1055,8 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(set(rows[0]), {
             "id", "barcode", "event_type", "event_label", "actor",
             "device_id", "created_at", "before_quantity", "after_quantity",
+            "before_serial", "after_serial", "before_classification",
+            "after_classification",
         })
 
     def completed_difference_store(self):
@@ -1194,6 +1196,101 @@ class InventoryStoreTests(unittest.TestCase):
                 "unverified_serial_items": 1,
             },
         )
+
+    def test_completion_ignores_stale_scans_after_serial_item_returns_to_matched(self):
+        catalog = [{
+            "barcode": "S", "name": "序列号商品", "spec": "", "model": "",
+            "category": "设备", "unit": "台", "has_serial": True,
+            "initial_stock": "1",
+        }]
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", catalog)
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        counted = store.add_count_entry(
+            "admin", task["task_id"], "S", "甲", "device-a", "0", "1"
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "S", "device-a", "甲", "OLD-SCAN",
+            "unknown",
+        )
+        entry = counted["count_entries"][0]
+        store.update_count_entry(
+            "admin", task["task_id"], "S", entry["entry_id"], entry["version"],
+            "乙", "device-b", "1", "1",
+        )
+
+        store.complete_task("admin", task["task_id"], "管理员")
+
+        self.assertEqual(store.list_discrepancies("admin", "open"), [])
+
+    def test_unverified_completion_does_not_emit_incomplete_scan_classifications(self):
+        catalog = [{
+            "barcode": "S", "name": "序列号商品", "spec": "", "model": "",
+            "category": "设备", "unit": "台", "has_serial": True,
+            "initial_stock": "2",
+        }]
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", catalog)
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        store.add_count_entry(
+            "admin", task["task_id"], "S", "甲", "device-a", "1", "2"
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "S", "device-a", "甲", "UNKNOWN-1",
+            "unknown",
+        )
+
+        store.complete_task(
+            "admin", task["task_id"], "管理员",
+            allow_unverified_serials=True,
+        )
+
+        self.assertEqual(
+            {row["kind"] for row in store.list_discrepancies("admin", "open")},
+            {"product_quantity", "serial_unverified"},
+        )
+
+    def test_serial_audit_includes_before_after_for_add_reclassify_and_remove(self):
+        store, task = self.serial_ready_store()
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "device-a", "甲", "SN-1",
+            "unknown",
+        )
+        store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "device-b", "乙", [{
+                "serial": "SN-1", "barcode": "B2", "name": "零库存商品",
+                "warehouse": "沈桥仓", "shipped": False,
+            }],
+        )
+        store.remove_serial_scan(
+            "admin", task["task_id"], "B2", "device-c", "丙", "SN-1"
+        )
+
+        rows = [
+            row for row in store.list_audit_events(
+                "admin", task["task_id"], barcode="B2"
+            ) if row["event_type"] in {
+                "serial_scanned", "serial_scan_reclassified",
+                "serial_scan_removed",
+            }
+        ]
+
+        self.assertEqual(
+            [(row["event_type"], row["actor"], row["device_id"])
+             for row in rows],
+            [
+                ("serial_scanned", "甲", "device-a"),
+                ("serial_scan_reclassified", "乙", "device-b"),
+                ("serial_scan_removed", "丙", "device-c"),
+            ],
+        )
+        self.assertIsNone(rows[0]["before_serial"])
+        self.assertEqual(rows[0]["after_serial"], "SN-1")
+        self.assertEqual(rows[0]["after_classification"], "unknown")
+        self.assertEqual(rows[1]["before_classification"], "unknown")
+        self.assertEqual(rows[1]["after_classification"], "matched")
+        self.assertEqual(rows[2]["before_serial"], "SN-1")
+        self.assertIsNone(rows[2]["after_serial"])
 
     def test_admin_reopens_completed_task_without_losing_entries(self):
         store, task = self.completed_difference_store()

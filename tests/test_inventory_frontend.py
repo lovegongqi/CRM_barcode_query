@@ -133,6 +133,102 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_complete_task_refreshes_cleanly_on_version_conflict(self):
+        self.run_node(
+            r"""
+            const notices = [];
+            const button = {disabled: false, hidden: false, textContent: '完成盘点'};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryCompleteTask') return button;
+                        if (id === 'inventoryNotice') return {textContent: '', className: ''};
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                fetch: async () => ({
+                    ok: false, status: 409, json: async () => ({
+                        success: false, current_version: 9,
+                        error: '盘点数据已更新，请刷新后重试',
+                    }),
+                }),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+                polls: 0,
+                notices,
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', version: 7, phase: 'counting'};
+                lastInventoryVersion = 7;
+                setInventoryNotice = (message, kind) => notices.push({message, kind});
+                pollInventoryTask = async () => { polls += 1; };
+            `, context);
+            (async () => {
+                await vm.runInContext('completeInventoryTask()', context);
+                assert.equal(context.polls, 1);
+                assert.match(context.notices.at(-1).message, /已更新/);
+                assert.equal(button.disabled, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_unverified_completion_adopts_refreshed_version_after_conflict(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            const button = {disabled: false, textContent: '确认完成'};
+            const message = {textContent: ''};
+            const dialog = {open: true, close() { this.open = false; }};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryCompletionConfirm') return button;
+                        if (id === 'inventoryCompletionConfirmMessage') return message;
+                        if (id === 'inventoryCompletionConfirmDialog') return dialog;
+                        if (id === 'inventoryNotice') return {textContent: '', className: ''};
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    if (requests.length === 1) return {
+                        ok: false, status: 409, json: async () => ({
+                            success: false, current_version: 8,
+                            error: '盘点数据已更新',
+                        }),
+                    };
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 9,
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', version: 7, phase: 'counting'};
+                completionConfirmation = {taskId: 'T1', version: 7};
+                pollInventoryTask = async () => { inventoryTask.version = 8; };
+            `, context);
+            (async () => {
+                await vm.runInContext('completeInventoryTask(true)', context);
+                assert.equal(dialog.open, true);
+                assert.equal(vm.runInContext('completionConfirmation.version', context), 8);
+                await vm.runInContext('completeInventoryTask(true)', context);
+                assert.deepEqual(
+                    requests.map(row => JSON.parse(row.options.body).expected_version),
+                    [7, 8],
+                );
+                assert.equal(dialog.open, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_partial_count_rows_render_and_add_without_a_lock(self):
         self.run_node(
             r"""
@@ -214,6 +310,67 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(elements.get('inventoryCountNewQuantity').value, '');
                 assert.equal(elements.get('inventoryCountExpression').textContent, '12 + 13 = 25');
             })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_poll_render_preserves_unsaved_existing_count_entry_draft(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor(tag = 'div') {
+                    this.tagName = tag; this.children = []; this.textContent = '';
+                    this.value = ''; this.disabled = false; this.dataset = {};
+                    this.className = ''; this.listeners = {};
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener(type, handler) { this.listeners[type] = handler; }
+            }
+            const elements = new Map([
+                ['inventoryCountEntries', new FakeNode()],
+                ['inventoryCountExpression', new FakeNode()],
+                ['inventoryCountAuditButton', new FakeNode('button')],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement(tag) { return new FakeNode(tag); },
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, new FakeNode());
+                        return elements.get(id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                countDialogEditable = true;
+                renderCountEntries({barcode: 'A1', count_expression: '12', count_entries: [
+                    {entry_id: 1, quantity: '12', version: 1, created_by: '甲'},
+                ]});
+            `, context);
+            let input = elements.get('inventoryCountEntries').children[0].children[1].children[0];
+            input.value = '99';
+            input.listeners.input({target: input});
+            vm.runInContext(`
+                renderCountEntries({barcode: 'A1', count_expression: '12', count_entries: [
+                    {entry_id: 1, quantity: '12', version: 1, created_by: '甲'},
+                ]});
+            `, context);
+            input = elements.get('inventoryCountEntries').children[0].children[1].children[0];
+            assert.equal(input.value, '99');
+
+            vm.runInContext(`
+                renderCountEntries({barcode: 'A1', count_expression: '13', count_entries: [
+                    {entry_id: 1, quantity: '13', version: 2, created_by: '乙'},
+                ]});
+            `, context);
+            input = elements.get('inventoryCountEntries').children[0].children[1].children[0];
+            assert.equal(input.value, '13');
+            assert.match(elements.get('inventoryCountMessage').textContent, /其他设备.*重新填写/);
             """
         )
 
@@ -2014,6 +2171,15 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             assert.equal(auditRoot.children[0].children[0].textContent, '修改分次数量');
             assert.match(auditRoot.children[0].children[1].textContent, /乙/);
             assert.match(auditRoot.children[0].children[2].textContent, /12.*13/);
+
+            vm.runInContext(`renderInventoryAudit([{
+                event_type: 'serial_scan_reclassified', event_label: '重新分类序列号',
+                actor: '甲', created_at: '2026-09-05T10:01:00',
+                before_quantity: null, after_quantity: null,
+                before_serial: 'SN-1', after_serial: 'SN-1',
+                before_classification: 'unknown', after_classification: 'matched',
+            }])`, context);
+            assert.match(auditRoot.children[0].children[2].textContent, /SN-1.*未知.*账实一致/);
             """
         )
 

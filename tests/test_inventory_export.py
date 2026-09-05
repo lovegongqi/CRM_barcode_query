@@ -79,11 +79,18 @@ class InventoryExportTests(unittest.TestCase):
                 "diff_qty": None, "state": "pending",
             },
         ]
-        discrepancies = [{
-            "task_id": "T-1", "barcode": "SERIAL", "name": "序列号商品",
-            "serial": None, "kind": "serial_unverified", "state": "open",
-            "book_quantity": "5", "counted_quantity": "4", "difference": "-1",
-        }]
+        discrepancies = [
+            {
+                "task_id": "T-1", "barcode": "SERIAL", "name": "序列号商品",
+                "serial": None, "kind": "serial_unverified", "state": "open",
+                "book_quantity": "5", "counted_quantity": "4", "difference": "-1",
+            },
+            {
+                "task_id": "T-1", "barcode": "SERIAL", "name": "序列号商品",
+                "serial": None, "kind": "product_quantity", "state": "open",
+                "book_quantity": "5", "counted_quantity": "4", "difference": "-1",
+            },
+        ]
 
         workbook = load_workbook(
             build_inventory_workbook(self.task, items, discrepancies),

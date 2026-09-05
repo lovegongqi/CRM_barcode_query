@@ -12,6 +12,7 @@ let inventorySearchTimer = null;
 let currentCountItem = null;
 let countDialogEditable = false;
 let countDialogRequestId = 0;
+let countEntryDrafts = new Map();
 let gyjLoginPollTimer = null;
 let gyjLoginSession = 0;
 let inventoryActiveTab = 'current';
@@ -601,9 +602,20 @@ async function completeInventoryTask(allowUnverifiedSerials = false) {
             );
             return;
         }
-        if (isInventoryVersionConflict(error)) await refreshInventoryAfterVersionConflict();
+        const versionConflict = inventoryIsVersionConflict(error);
+        if (versionConflict) {
+            await refreshInventoryAfterVersionConflict();
+            if (
+                allowUnverifiedSerials && completionConfirmation
+                && inventoryTask && inventoryTask.task_id === taskId
+            ) {
+                completionConfirmation.version = inventoryTask.version;
+            }
+        }
         if (allowUnverifiedSerials) {
-            inventoryElement('inventoryCompletionConfirmMessage').textContent = error.message;
+            inventoryElement('inventoryCompletionConfirmMessage').textContent = versionConflict
+                ? `${error.message}，已刷新。请再次确认完成。`
+                : error.message;
         } else {
             setInventoryNotice(error.message, 'error');
         }
@@ -669,6 +681,7 @@ function closeCountDialog() {
     countDialogRequestId += 1;
     countDialogEditable = false;
     currentCountItem = null;
+    countEntryDrafts.clear();
     const dialog = inventoryElement('inventoryCountDialog');
     if (dialog.open) dialog.close();
 }
@@ -677,6 +690,15 @@ function renderCountEntries(item) {
     const entriesRoot = inventoryElement('inventoryCountEntries');
     const expression = inventoryElement('inventoryCountExpression');
     const entries = Array.isArray(item && item.count_entries) ? item.count_entries : [];
+    const barcode = inventoryText(item && item.barcode, '');
+    const currentKeys = new Set(entries.map(
+        (entry) => `${barcode}:${entry.entry_id}`
+    ));
+    for (const key of countEntryDrafts.keys()) {
+        if (key.startsWith(`${barcode}:`) && !currentKeys.has(key)) {
+            countEntryDrafts.delete(key);
+        }
+    }
     inventoryElement('inventoryCountAuditButton').hidden = !item;
     entriesRoot.replaceChildren();
     expression.textContent = item && item.count_expression
@@ -700,8 +722,24 @@ function renderCountEntries(item) {
         input.inputMode = 'decimal';
         input.min = '0';
         input.step = 'any';
-        input.value = inventoryText(entry.quantity, '');
+        const draftKey = `${barcode}:${entry.entry_id}`;
+        const draft = countEntryDrafts.get(draftKey);
+        if (draft && draft.version === entry.version) {
+            input.value = draft.value;
+        } else {
+            input.value = inventoryText(entry.quantity, '');
+            if (draft) {
+                countEntryDrafts.delete(draftKey);
+                setCountMessage('该笔数量已被其他设备修改，已显示最新数值，请核对后重新填写。', 'error');
+            }
+        }
         input.disabled = !countDialogEditable;
+        input.addEventListener('input', () => {
+            countEntryDrafts.set(draftKey, {
+                value: input.value,
+                version: entry.version,
+            });
+        });
         const save = inventoryNode('button', 'btn btn-secondary', '保存');
         save.type = 'button';
         save.disabled = !countDialogEditable;
@@ -767,6 +805,7 @@ async function openCountItem(barcode) {
         return;
     }
     const requestId = ++countDialogRequestId;
+    countEntryDrafts.clear();
     currentCountItem = item;
     countDialogEditable = false;
     renderCountProduct(item);
@@ -845,6 +884,7 @@ async function updateCountEntry(entry, rawQuantity) {
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
             {device_id: inventoryDeviceId, quantity, entry_version: entry.version},
         );
+        countEntryDrafts.delete(`${currentCountItem.barcode}:${entry.entry_id}`);
         applyCountEntryResult(data, '该笔数量已更新。');
     } catch (error) {
         await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
@@ -858,6 +898,7 @@ async function deleteCountEntry(entry) {
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries/${encodeURIComponent(entry.entry_id)}`,
             {device_id: inventoryDeviceId, entry_version: entry.version},
         );
+        countEntryDrafts.delete(`${currentCountItem.barcode}:${entry.entry_id}`);
         applyCountEntryResult(data, '该笔数量已删除。');
     } catch (error) {
         await handleCountEntryError(error, inventoryElement('inventoryCountNewQuantity').value);
@@ -1287,6 +1328,20 @@ function inventoryHistoryCount(value) {
     return Number.isFinite(count) && count >= 0 ? count : 0;
 }
 
+function inventorySerialAuditValue(serial, classification) {
+    if (!serial) return '无';
+    const labels = {
+        matched: '账实一致',
+        system_only: '账面独有',
+        physical_only: '实物独有',
+        other_product: '其他商品',
+        already_shipped: '已出库',
+        unknown: '未知',
+    };
+    const label = labels[classification] || inventoryText(classification, '未分类');
+    return `${serial}（${label}）`;
+}
+
 function renderInventoryAudit(events) {
     const root = inventoryElement('inventoryAuditEvents');
     root.replaceChildren();
@@ -1304,6 +1359,12 @@ function renderInventoryAudit(events) {
             row.append(inventoryNode(
                 'code', '',
                 `数量 ${inventoryText(event.before_quantity, '无')} → ${inventoryText(event.after_quantity, '无')}`,
+            ));
+        }
+        if (event.before_serial !== null || event.after_serial !== null) {
+            row.append(inventoryNode(
+                'code', '',
+                `序列号 ${inventorySerialAuditValue(event.before_serial, event.before_classification)} → ${inventorySerialAuditValue(event.after_serial, event.after_classification)}`,
             ));
         }
         root.append(row);

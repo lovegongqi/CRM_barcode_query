@@ -129,8 +129,13 @@ def build_inventory_workbook(task, items, discrepancies):
 
     product_discrepancies = {}
     for discrepancy in discrepancies or []:
-        if _value(discrepancy, "serial") in ("", None) and _value(discrepancy, "barcode"):
-            product_discrepancies[_value(discrepancy, "barcode")] = discrepancy
+        barcode = _value(discrepancy, "barcode")
+        if _value(discrepancy, "serial") in ("", None) and barcode:
+            if (
+                _value(discrepancy, "kind") == "serial_unverified"
+                or barcode not in product_discrepancies
+            ):
+                product_discrepancies[barcode] = discrepancy
     for item in items or []:
         difference = _value(item, "diff_qty", "difference", "difference_qty", default="0")
         if str(difference) == "0":
