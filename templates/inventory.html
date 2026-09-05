@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
     <link rel="stylesheet" href="/static/inventory.css{{ inventory_css_v }}">
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+    <script defer src="/static/vendor/zxing-browser-0.2.1.min.js"></script>
     <script defer src="/static/inventory.js{{ inventory_js_v }}"></script>
 </head>
 <body data-aurora-page="inventory">
@@ -178,6 +179,14 @@
             <span>扫描序列号</span>
             <input id="inventorySerialInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫描后按 Enter">
         </label>
+        <div class="inventory-camera-actions">
+            <button class="btn btn-primary" id="inventoryCameraStart" type="button" disabled>相机连续扫码</button>
+            <button class="btn btn-secondary" id="inventoryCameraStop" type="button" disabled>停止相机</button>
+        </div>
+        <div id="inventoryCameraPanel" class="inventory-camera-panel" hidden>
+            <video id="inventoryCameraVideo" playsinline muted aria-label="序列号扫码相机预览"></video>
+        </div>
+        <p id="inventoryCameraMessage" class="inventory-camera-message" role="status" aria-live="polite"></p>
         <p id="inventorySerialMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
         <div id="inventorySerialCounts" class="inventory-summary inventory-serial-counts" aria-label="序列号核对摘要"></div>
         <div id="inventorySerialDetails" class="inventory-serial-details" aria-live="polite"></div>

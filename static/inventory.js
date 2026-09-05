@@ -36,6 +36,10 @@ let serialOperationQueue = Promise.resolve();
 let serialOperationGeneration = 0;
 let serialRenderedGeneration = 0;
 let serialMutationFailures = new Map();
+let inventoryCameraControls = null;
+let inventoryCameraGeneration = 0;
+let inventoryCameraLastSerial = '';
+let inventoryCameraLastDecodedAt = 0;
 
 function inventoryElement(id) {
     return document.getElementById(id);
@@ -971,6 +975,105 @@ function setSerialMessage(message, kind = '') {
     target.className = 'inventory-dialog-message' + (kind ? ` is-${kind}` : '');
 }
 
+function setInventoryCameraMessage(message, kind = '') {
+    const target = inventoryElement('inventoryCameraMessage');
+    if (!target) return;
+    target.textContent = message || '';
+    target.className = 'inventory-camera-message' + (kind ? ` is-${kind}` : '');
+}
+
+function inventoryCameraCanUseHttp() {
+    const hostname = window.location && String(window.location.hostname || '').toLowerCase();
+    return window.isSecureContext || hostname === 'localhost' || hostname === '127.0.0.1'
+        || hostname === '::1' || hostname === '[::1]';
+}
+
+function stopInventoryCamera() {
+    inventoryCameraGeneration += 1;
+    const controls = inventoryCameraControls;
+    inventoryCameraControls = null;
+    if (controls && typeof controls.stop === 'function') {
+        try {
+            controls.stop();
+        } catch (_error) {
+            // Media tracks below are the final cleanup path.
+        }
+    }
+    const video = inventoryElement('inventoryCameraVideo');
+    if (video && video.srcObject && typeof video.srcObject.getTracks === 'function') {
+        video.srcObject.getTracks().forEach((track) => track.stop());
+        video.srcObject = null;
+    }
+    const panel = inventoryElement('inventoryCameraPanel');
+    if (panel) panel.hidden = true;
+    const start = inventoryElement('inventoryCameraStart');
+    const stop = inventoryElement('inventoryCameraStop');
+    if (start) start.disabled = false;
+    if (stop) stop.disabled = true;
+    inventoryCameraLastSerial = '';
+    inventoryCameraLastDecodedAt = 0;
+}
+
+async function startInventoryCamera() {
+    stopInventoryCamera();
+    if (!inventoryCameraCanUseHttp()) {
+        setInventoryCameraMessage('相机连续扫码需要 HTTPS；仍可使用扫码枪或键盘输入。', 'error');
+        return;
+    }
+    if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
+    if (!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader) {
+        setInventoryCameraMessage('相机扫码组件未能载入；仍可使用扫码枪或键盘输入。', 'error');
+        return;
+    }
+
+    const generation = ++inventoryCameraGeneration;
+    const start = inventoryElement('inventoryCameraStart');
+    const stop = inventoryElement('inventoryCameraStop');
+    const panel = inventoryElement('inventoryCameraPanel');
+    const video = inventoryElement('inventoryCameraVideo');
+    start.disabled = true;
+    stop.disabled = false;
+    panel.hidden = false;
+    setInventoryCameraMessage('正在启动后置相机…');
+    try {
+        const reader = new window.ZXingBrowser.BrowserMultiFormatReader();
+        const controls = await reader.decodeFromConstraints(
+            {video: {facingMode: {ideal: 'environment'}}},
+            video,
+            (result) => {
+                if (!result || generation !== inventoryCameraGeneration) return;
+                const serial = String(result.getText ? result.getText() : result.text || '').trim();
+                if (!serial) return;
+                const decodedAt = Date.now();
+                if (serial === inventoryCameraLastSerial && decodedAt - inventoryCameraLastDecodedAt < 1500) return;
+                inventoryCameraLastSerial = serial;
+                inventoryCameraLastDecodedAt = decodedAt;
+                submitDecodedSerial(serial);
+            },
+        );
+        if (generation !== inventoryCameraGeneration || !serialWorkspaceOpen) {
+            if (controls && typeof controls.stop === 'function') controls.stop();
+            if (video.srcObject && typeof video.srcObject.getTracks === 'function') {
+                video.srcObject.getTracks().forEach((track) => track.stop());
+                video.srcObject = null;
+            }
+            return;
+        }
+        inventoryCameraControls = controls;
+        setInventoryCameraMessage('相机连续扫码已开启。', 'success');
+    } catch (error) {
+        if (generation !== inventoryCameraGeneration) return;
+        stopInventoryCamera();
+        if (error && error.name === 'NotAllowedError') {
+            setInventoryCameraMessage('无法使用相机：请允许相机权限。仍可使用扫码枪或键盘输入。', 'error');
+        } else if (error && error.name === 'NotFoundError') {
+            setInventoryCameraMessage('未找到可用相机；仍可使用扫码枪或键盘输入。', 'error');
+        } else {
+            setInventoryCameraMessage('相机启动失败；仍可使用扫码枪或键盘输入。', 'error');
+        }
+    }
+}
+
 function resetSerialOperations() {
     serialOperationGeneration += 1;
     serialRenderedGeneration = serialOperationGeneration;
@@ -1099,6 +1202,7 @@ function renderSerialReconciliation(value) {
 }
 
 function closeSerialWorkspace() {
+    stopInventoryCamera();
     serialWorkspaceRequestId += 1;
     resetSerialOperations();
     serialWorkspaceOpen = false;
@@ -1113,6 +1217,7 @@ async function openSerialItem(barcode) {
     if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
     const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
     if (!item || item.state !== 'serial_pending') return;
+    stopInventoryCamera();
     const requestId = ++serialWorkspaceRequestId;
     resetSerialOperations();
     const dialog = inventoryElement('inventorySerialWorkspace');
@@ -1124,6 +1229,7 @@ async function openSerialItem(barcode) {
     inventoryElement('inventorySerialInput').disabled = true;
     inventoryElement('inventorySerialRefresh').disabled = true;
     inventoryElement('inventorySerialFinish').disabled = true;
+    inventoryElement('inventoryCameraStart').disabled = true;
     renderSerialReconciliation({barcode, item, counts: {}});
     setSerialMessage('正在读取已缓存的 GYJ 账面序列号…');
     if (!dialog.open) dialog.showModal();
@@ -1140,6 +1246,7 @@ async function openSerialItem(barcode) {
         input.disabled = false;
         inventoryElement('inventorySerialRefresh').disabled = false;
         inventoryElement('inventorySerialFinish').disabled = false;
+        inventoryElement('inventoryCameraStart').disabled = false;
         setSerialMessage('已读取账面序列号缓存，可以开始扫描。', 'success');
         input.focus();
     } catch (_error) {
@@ -1148,6 +1255,7 @@ async function openSerialItem(barcode) {
         inventoryElement('inventorySerialInput').disabled = true;
         inventoryElement('inventorySerialRefresh').disabled = true;
         inventoryElement('inventorySerialFinish').disabled = true;
+        inventoryElement('inventoryCameraStart').disabled = true;
         setSerialMessage('暂时无法读取账面序列号缓存，请关闭窗口后重试。', 'error');
     }
 }
@@ -1207,6 +1315,16 @@ async function scanSerial(event) {
         return;
     }
     input.value = '';
+    return submitDecodedSerial(serial);
+}
+
+async function submitDecodedSerial(serial) {
+    serial = String(serial || '').trim();
+    const input = inventoryElement('inventorySerialInput');
+    if (!serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask || !serial) {
+        if (input) input.focus();
+        return;
+    }
     const taskId = inventoryTask.task_id;
     const barcode = currentSerialBarcode;
     serialScanQueueLength += 1;
@@ -1224,8 +1342,8 @@ async function scanSerial(event) {
                 acceptInventoryMutationVersion(data);
             } catch (error) {
                 if (serialOperationIsOpen(requestId)) {
-                    serialMutationFailures.set(mutationKey, error.message || '扫码保存失败');
-                    setSerialMessage(error.message, 'error');
+                    serialMutationFailures.set(mutationKey, '扫码保存失败，请重试。');
+                    setSerialMessage('扫码保存失败，请重试。', 'error');
                 }
                 return;
             }
@@ -1257,7 +1375,7 @@ async function scanSerial(event) {
                 serialScanQueueLength = Math.max(0, serialScanQueueLength - 1);
                 serialScanPending = serialScanQueueLength > 0;
             }
-            if (serialOperationIsOpen(requestId) && serialWorkspaceEditable && !serialFinishPending) input.focus();
+            if (serialOperationIsOpen(requestId) && serialWorkspaceEditable && !serialFinishPending && input) input.focus();
         }
     });
 }
@@ -1986,6 +2104,8 @@ function initializeInventoryPage() {
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
+    inventoryElement('inventoryCameraStart').addEventListener('click', startInventoryCamera);
+    inventoryElement('inventoryCameraStop').addEventListener('click', stopInventoryCamera);
     inventoryElement('inventorySerialRefresh').addEventListener('click', manualRefreshSerialItem);
     inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
     inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);
@@ -2022,10 +2142,14 @@ function initializeInventoryPage() {
     bindInventoryDialogBackdrop(inventoryElement('inventoryAuditDialog'), closeInventoryAudit);
     bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
-        if (document.hidden) return;
+        if (document.hidden) {
+            stopInventoryCamera();
+            return;
+        }
         if (inventoryActiveTab === 'current') pollInventoryTask({force: true});
     });
     window.addEventListener('beforeunload', () => {
+        stopInventoryCamera();
         stopGyjLoginPolling();
     });
     renderInventoryTask(null);

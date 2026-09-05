@@ -732,6 +732,25 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source + script)
 
+    def test_inventory_camera_uses_local_pinned_decoder(self):
+        source = self.source("inventory.html")
+        vendor = STATIC / "vendor" / "zxing-browser-0.2.1.min.js"
+        license_file = STATIC / "vendor" / "zxing-browser-LICENSE.txt"
+        self.assertTrue(vendor.is_file())
+        self.assertGreater(vendor.stat().st_size, 400_000)
+        self.assertIn("MIT License", license_file.read_text(encoding="utf-8"))
+        decoder_script = '<script defer src="/static/vendor/zxing-browser-0.2.1.min.js"></script>'
+        inventory_script = '<script defer src="/static/inventory.js{{ inventory_js_v }}"></script>'
+        self.assertIn(decoder_script, source)
+        self.assertLess(source.index(decoder_script), source.index(inventory_script))
+        self.assertNotRegex(source, r"https?://[^\"']*(?:zxing|unpkg|jsdelivr)")
+        for element_id in (
+            "inventoryCameraStart", "inventoryCameraStop", "inventoryCameraPanel",
+            "inventoryCameraVideo", "inventoryCameraMessage",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', source)
+
     def test_inventory_script_uses_exact_live_endpoints_and_timing(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         for endpoint in (

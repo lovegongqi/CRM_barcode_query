@@ -469,6 +469,40 @@ article.inventory-item { cursor: default; }
     font-size: 13px;
 }
 
+.inventory-camera-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.inventory-camera-panel {
+    width: min(100%, 560px);
+    margin-top: 12px;
+    overflow: hidden;
+    border: 1px solid var(--aurora-line-strong);
+    border-radius: 14px;
+    background: #020817;
+}
+
+.inventory-camera-panel[hidden] { display: none; }
+
+.inventory-camera-panel video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+}
+
+.inventory-camera-message {
+    min-height: 20px;
+    margin: 8px 0 0;
+    color: var(--aurora-muted);
+    font-size: 12px;
+}
+
+.inventory-camera-message.is-error { color: #fecaca; }
+.inventory-camera-message.is-success { color: #bbf7d0; }
+
 .inventory-serial-counts {
     grid-template-columns: repeat(5, minmax(108px, 1fr));
 }
@@ -735,6 +769,9 @@ article.inventory-item { cursor: default; }
     .inventory-dialog { width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
     .inventory-dialog-card { max-height: calc(100vh - 16px); padding: 17px 14px; }
     .inventory-dialog-actions .btn { min-height: 44px; flex: 1; }
+    .inventory-camera-actions,
+    .inventory-camera-panel { width: 100%; }
+    .inventory-camera-actions .btn { flex: 1; min-height: 44px; }
     .inventory-serial-details { grid-template-columns: 1fr; }
     .inventory-serial-row,
     .inventory-discrepancy-head,

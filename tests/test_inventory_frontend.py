@@ -1538,6 +1538,186 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_camera_continuously_submits_and_stops(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = false; this.open = true;
+                    this.textContent = ''; this.className = ''; this.value = '';
+                    this.listeners = {}; this.srcObject = null;
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                addEventListener(type, callback) { this.listeners[type] = callback; }
+                focus() {}
+                close() { this.open = false; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const visibilityListeners = [];
+            const submitted = [];
+            const stoppedTracks = [];
+            let decoderCallback = null;
+            let stopCount = 0;
+            class FakeReader {
+                async decodeFromConstraints(constraints, video, callback) {
+                    assert.deepEqual(constraints, {video: {facingMode: {ideal: 'environment'}}});
+                    assert.equal(video, element('inventoryCameraVideo'));
+                    decoderCallback = callback;
+                    const track = {stop() { stoppedTracks.push(track); }};
+                    video.srcObject = {getTracks() { return [track]; }};
+                    return {stop() { stopCount += 1; }};
+                }
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                document: {
+                    hidden: false,
+                    addEventListener(type, callback) {
+                        if (type === 'visibilitychange') visibilityListeners.push(callback);
+                    },
+                    getElementById: element,
+                },
+                fetch: async (url, options = {}) => {
+                    assert.match(url, /\/serials$/);
+                    const serial = JSON.parse(options.body).serial;
+                    submitted.push(serial);
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, scan: {serial, classification: 'duplicate'},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+                localStorage: {getItem() { return 'device-a'; }, setItem() {}},
+                crypto: {randomUUID() { return 'device-a'; }},
+                now: 1000,
+            };
+            context.window = context;
+            context.window.isSecureContext = true;
+            context.window.location = {hostname: 'inventory.example.test'};
+            context.window.addEventListener = () => {};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                Date.now = () => now;
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                currentSerialData = {counts: {}, duplicates: []};
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                renderSerialReconciliation = value => { currentSerialData = value; };
+                bindInventoryTablists = () => {};
+                renderInventoryTask = () => {};
+                pollInventoryTask = async () => {};
+                refreshGyjStatusButton = async () => {};
+                initializeInventoryPage();
+            `, context);
+            (async () => {
+                await vm.runInContext('startInventoryCamera()', context);
+                decoderCallback({getText() { return ' SN-1 '; }}, null);
+                decoderCallback({getText() { return 'SN-1'; }}, null);
+                context.now += 1600;
+                decoderCallback({text: 'SN-2'}, null);
+                await vm.runInContext('serialOperationQueue', context);
+                assert.deepEqual(submitted, ['SN-1', 'SN-2']);
+
+                context.document.hidden = true;
+                visibilityListeners.forEach(callback => callback());
+                assert.equal(stopCount, 1);
+                assert.equal(stoppedTracks.length, 1);
+                assert.equal(element('inventoryCameraVideo').srcObject, null);
+                assert.equal(element('inventoryCameraPanel').hidden, true);
+
+                context.document.hidden = false;
+                await vm.runInContext('startInventoryCamera()', context);
+                const secondTrack = element('inventoryCameraVideo').srcObject.getTracks()[0];
+                vm.runInContext('closeSerialWorkspace()', context);
+                assert.equal(stopCount, 2);
+                assert.equal(stoppedTracks.filter(track => track === secondTrack).length, 1);
+                assert.equal(element('inventoryCameraStart').disabled, false);
+                assert.equal(element('inventoryCameraStop').disabled, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_requires_secure_context(self):
+        self.run_node(
+            r"""
+            let readerCount = 0;
+            const serialInput = {disabled: false, focus() {}};
+            const elements = new Map([
+                ['inventorySerialInput', serialInput],
+                ['inventoryCameraStart', {disabled: false}],
+                ['inventoryCameraStop', {disabled: true}],
+                ['inventoryCameraPanel', {hidden: true}],
+                ['inventoryCameraVideo', {srcObject: null}],
+                ['inventoryCameraMessage', {textContent: '', className: ''}],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                ZXingBrowser: {BrowserMultiFormatReader: class { constructor() { readerCount += 1; }}},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return elements.get(id); },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+                readerCount,
+            };
+            context.window = context;
+            context.window.isSecureContext = false;
+            context.window.location = {hostname: 'inventory.example.test'};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext('startInventoryCamera()', context);
+                assert.match(elements.get('inventoryCameraMessage').textContent, /需要 HTTPS/);
+                assert.equal(readerCount, 0);
+                assert.equal(elements.get('inventoryCameraPanel').hidden, true);
+                assert.equal(elements.get('inventoryCameraStart').disabled, false);
+                assert.equal(serialInput.disabled, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_serial_scan_failure_hides_raw_backend_error(self):
+        self.run_node(
+            r"""
+            const input = {value: 'SN-PRIVATE', disabled: false, focus() {}};
+            const message = {textContent: '', className: ''};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventorySerialInput') return input;
+                        if (id === 'inventorySerialMessage') return message;
+                        return {disabled: false, textContent: '', className: ''};
+                    },
+                },
+                fetch: async () => ({
+                    ok: false, status: 502,
+                    json: async () => ({success: false, error: 'SENTINEL_PRIVATE_GYJ_ERROR'}),
+                }),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a'; inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1'; serialWorkspaceOpen = true; serialWorkspaceEditable = true;
+            `, context);
+            (async () => {
+                await vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
+                assert.equal(message.textContent, '扫码保存失败，请重试。');
+                assert.doesNotMatch(message.textContent, /SENTINEL_PRIVATE_GYJ_ERROR/);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_duplicate_serial_scan_updates_duplicate_count_and_detail(self):
         self.run_node(
             r"""
