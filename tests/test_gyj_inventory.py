@@ -163,6 +163,37 @@ def serial_page(rows, total, has_next=False):
     }
 
 
+class SettlingSerialPage(FakeInventoryPage):
+    def __init__(self, snapshots):
+        super().__init__({GYJ_SERIAL_URL: snapshots})
+        self.snapshot_index = 0
+
+    def read_table_page(self, _report):
+        snapshots = self.reports[GYJ_SERIAL_URL]
+        index = min(self.snapshot_index, len(snapshots) - 1)
+        self.snapshot_index += 1
+        snapshot = dict(snapshots[index])
+        snapshot.setdefault("page_number", 1)
+        snapshot.setdefault("loading", False)
+        return snapshot
+
+
+class NeverSettlingSerialPage(SettlingSerialPage):
+    def __init__(self):
+        super().__init__([
+            serial_page([["S1", "10000213", "雷哲", "沈桥仓", "0", "否"]], 1),
+            serial_page([["S2", "10000213", "雷哲", "沈桥仓", "0", "否"]], 1),
+        ])
+
+    def read_table_page(self, _report):
+        snapshots = self.reports[GYJ_SERIAL_URL]
+        snapshot = dict(snapshots[self.snapshot_index % len(snapshots)])
+        self.snapshot_index += 1
+        snapshot.setdefault("page_number", 1)
+        snapshot.setdefault("loading", False)
+        return snapshot
+
+
 class GYJInventoryReaderTests(unittest.TestCase):
     def test_stock_search_waits_for_delayed_gyj_field_mount(self):
         class SearchField:
@@ -463,6 +494,26 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertFalse(any(label == "仓库" for label, _value in page.selected))
         self.assertNotIn("10", repr(result))
 
+    def test_serial_query_waits_past_transient_empty_and_stale_rows(self):
+        page = SettlingSerialPage([
+            serial_page([["OLD", "OLD", "旧商品", "旧仓", "0", "否"]], 1),
+            {**serial_page([], 0), "loading": True},
+            serial_page([], 0),
+            serial_page([["S1", "10000213", "雷哲", "沈桥仓", "0", "否"]], 1),
+            serial_page([["S1", "10000213", "雷哲", "沈桥仓", "0", "否"]], 1),
+        ])
+
+        result = GYJInventoryReader(page).read_unshipped_serials("10000213")
+
+        self.assertEqual([row["serial"] for row in result], ["S1"])
+        self.assertGreaterEqual(len(page.waits), 4)
+
+    def test_serial_query_rejects_a_result_that_never_settles(self):
+        with self.assertRaisesRegex(GYJInventoryReadError, "查询结果未稳定"):
+            GYJInventoryReader(NeverSettlingSerialPage()).read_unshipped_serials(
+                "10000213"
+            )
+
     def test_serial_reader_uses_the_direct_report_before_selecting_unshipped(self):
         direct_url = (
             "https://cloud.gyjerp.com/plugins/serialNumberStatistics/"
@@ -540,7 +591,6 @@ class GYJInventoryReaderTests(unittest.TestCase):
         page = FakeInventoryPage({
             (GYJ_SERIAL_URL, "否"): [serial_page([], 0)],
             (GYJ_SERIAL_URL, "是"): [
-                serial_page([], 1, True),
                 serial_page([["SHIPPED-1", "B2", "序列商品", "其他仓", "999", "是"]], 1),
             ],
         })
@@ -566,7 +616,7 @@ class GYJInventoryReaderTests(unittest.TestCase):
             (GYJ_SERIAL_URL, "是"): [serial_page([], 0)],
         })
 
-        with self.assertRaisesRegex(GYJInventoryReadError, "查询条件"):
+        with self.assertRaisesRegex(GYJInventoryReadError, "查询结果未稳定"):
             GYJInventoryReader(page).lookup_serial("SHIPPED-1")
 
     def test_rejects_pagination_total_mismatch(self):

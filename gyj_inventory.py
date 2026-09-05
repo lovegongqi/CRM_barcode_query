@@ -311,6 +311,46 @@ class GYJInventoryReader:
         )
         return page_number, row_signature
 
+    def _query_snapshot_matches(self, snapshot, expected_field, expected_value):
+        if snapshot.get("loading"):
+            return False
+        rows = [
+            row for row in (snapshot.get("rows") or [])
+            if not _is_total_row(row)
+            and any(_text(value) for value in (row.values() if isinstance(row, dict) else row))
+        ]
+        if not rows:
+            try:
+                return self._total_count(snapshot.get("total")) == 0
+            except GYJInventoryReadError:
+                return False
+        indexes = _header_indexes(snapshot.get("headers") or [])
+        if expected_field not in indexes:
+            return False
+        return all(
+            _cell(row, indexes, expected_field) == expected_value
+            for row in rows
+        )
+
+    def _wait_for_stable_query_result(self, report, expected_field, expected_value):
+        waiter = self.page if hasattr(self.page, "wait_for_timeout") else self.browser_page
+        previous_marker = None
+        stable_samples = 0
+        for attempt in range(151):
+            snapshot = self._read_table_page(report)
+            if self._query_snapshot_matches(snapshot, expected_field, expected_value):
+                marker = self._page_marker(snapshot)
+                stable_samples = stable_samples + 1 if marker == previous_marker else 1
+                previous_marker = marker
+                if stable_samples >= 2:
+                    return snapshot
+            else:
+                previous_marker = None
+                stable_samples = 0
+            if attempt < 150:
+                waiter.wait_for_timeout(100)
+        raise GYJInventoryReadError("GYJ 序列号查询结果未稳定")
+
     def _wait_for_page_change(self, report, previous):
         previous_page, previous_rows = self._page_marker(previous)
         waiter = self.page if hasattr(self.page, "wait_for_timeout") else self.browser_page
@@ -341,13 +381,13 @@ class GYJInventoryReader:
             raise GYJInventoryReadError("GYJ 报表分页总数无法解析")
         return int(match.group())
 
-    def _collect_pages(self, report):
+    def _collect_pages(self, report, first_snapshot=None):
         headers = None
         normalized_headers = None
         rows = []
         badges = []
         expected_total = None
-        snapshot = self._read_table_page(report)
+        snapshot = first_snapshot if first_snapshot is not None else self._read_table_page(report)
         for _page_number in range(1, 1001):
             page_headers = list(snapshot.get("headers") or [])
             page_normalized_headers = _normalized_headers(page_headers)
@@ -512,10 +552,14 @@ class GYJInventoryReader:
         self._expand_filters()
         self._select_label("已出库", "是" if shipped else "否")
         self._click_query()
-        headers, rows, _badges = self._collect_pages("serial")
+        result_key = "序列号" if field == "序列号" else "条码"
+        first_snapshot = self._wait_for_stable_query_result(
+            "serial", result_key, value
+        )
+        headers, rows, _badges = self._collect_pages("serial", first_snapshot)
         parsed = parse_serial_rows(headers, rows, include_shipped=True)
-        result_key = "serial" if field == "序列号" else "barcode"
-        if any(row[result_key] != value for row in parsed):
+        parsed_key = "serial" if field == "序列号" else "barcode"
+        if any(row[parsed_key] != value for row in parsed):
             raise GYJInventoryReadError(f"GYJ 序列号查询条件未生效：{value}")
         return [
             row for row in parsed
