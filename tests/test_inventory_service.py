@@ -105,16 +105,12 @@ class InventoryServiceTests(unittest.TestCase):
         self.submit(task["task_id"], "A1", "1")
         return task
 
-    def test_serial_phase_classifies_missing_extra_other_and_duplicate(self):
+    def test_serial_phase_classifies_cached_matches_unknowns_and_duplicates(self):
         task = self.create_serial_task()
         self.worker.serials = {"B2": [
             {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
             {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
         ]}
-        self.worker.lookup = {
-            "OTHER-1": {"serial": "OTHER-1", "barcode": "C3", "name": "其他商品", "warehouse": "沈桥仓", "shipped": False},
-        }
-
         detail = self.service.open_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
@@ -132,7 +128,7 @@ class InventoryServiceTests(unittest.TestCase):
             self.service.scan_serial(
                 "admin", task["task_id"], "B2", "device-a", "甲", "OTHER-1"
             )["classification"],
-            "other_product",
+            "unknown",
         )
         duplicate = self.service.scan_serial(
             "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
@@ -218,12 +214,12 @@ class InventoryServiceTests(unittest.TestCase):
         )
 
         self.assertFalse(first["skipped"])
-        self.assertFalse(second["skipped"])
+        self.assertTrue(second["skipped"])
         self.assertEqual(matched["classification"], "matched")
         self.assertEqual(duplicate["classification"], "duplicate")
         self.assertEqual(deleted["physical_only"], [])
         self.assertEqual(finished["item"]["state"], "serial_complete")
-        self.assertEqual(self.worker.serial_reads, ["B2", "B2", "B2"])
+        self.assertEqual(self.worker.serial_reads, ["B2"])
         with self.store.connect() as connection:
             self.assertEqual(connection.execute(
                 "SELECT COUNT(*) FROM inventory_item_locks WHERE task_id = ?",
@@ -316,73 +312,56 @@ class InventoryServiceTests(unittest.TestCase):
             )
         self.assertEqual(len(self.worker.serial_reads), reads_before)
 
-    def test_serial_refresh_uses_59_60_boundary_reclassifies_and_finish_forces(self):
+    def test_serial_open_reuses_successful_cache_until_manual_force(self):
         task = self.create_serial_task()
-        self.worker.serials["B2"] = [
-            {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
-            {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
-        ]
-        opened = self.service.open_serial_item(
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.service.open_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
-        self.assertFalse(opened["skipped"])
-        self.service.scan_serial(
-            "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
-        )
-        self.service.scan_serial(
-            "admin", task["task_id"], "B2", "device-a", "甲", "NEW-1"
-        )
-        self.worker.serials["B2"] = [
-            {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
-            {"serial": "NEW-1", "barcode": "B2", "name": "序列商品", "warehouse": "新仓", "shipped": False},
-        ]
+        self.worker.serials["B2"] = [{
+            "serial": "B-2", "barcode": "B2", "name": "序列商品",
+            "warehouse": "其他仓", "shipped": False,
+        }]
 
-        self.current[0] += timedelta(seconds=59)
+        self.current[0] += timedelta(hours=2)
+        result = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+
+        self.assertEqual(self.worker.serial_reads, ["B2"])
+        self.assertTrue(result["skipped"])
         skipped = self.service.refresh_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
         self.assertTrue(skipped["skipped"])
         self.assertEqual(self.worker.serial_reads, ["B2"])
-        self.assertEqual([row["serial"] for row in skipped["matched"]], ["B-1"])
-        self.assertEqual([row["serial"] for row in skipped["physical_only"]], ["NEW-1"])
 
-        self.current[0] += timedelta(seconds=1)
         refreshed = self.service.refresh_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
+
         self.assertFalse(refreshed["skipped"])
         self.assertEqual(self.worker.serial_reads, ["B2", "B2"])
-        self.assertEqual([row["serial"] for row in refreshed["matched"]], ["NEW-1"])
-        self.assertEqual([row["serial"] for row in refreshed["physical_only"]], ["B-1"])
-        self.assertEqual(
-            [(row["serial"], row["warehouse"]) for row in refreshed["system_only"]],
-            [("B-2", "其他仓")],
-        )
+        self.assertEqual([row["serial"] for row in refreshed["system_only"]], ["B-2"])
 
-        self.current[0] += timedelta(seconds=1)
-        self.worker.serials["B2"] = [
-            {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "完成仓", "shipped": False},
-        ]
-        finished = self.service.finish_serial_item(
+    def test_unmatched_scan_is_saved_without_gyj_lookup(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = []
+        self.service.open_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
-        self.assertEqual(self.worker.serial_reads, ["B2", "B2", "B2"])
-        self.assertEqual(
-            [(row["serial"], row["warehouse"]) for row in finished["system_only"]],
-            [("B-2", "完成仓")],
-        )
-        self.assertEqual(
-            [row["serial"] for row in finished["physical_only"]],
-            ["B-1", "NEW-1"],
-        )
-        self.assertEqual(finished["item"]["state"], "serial_complete")
-        self.assertEqual(finished["phase"], "serial_check")
-        with self.assertRaises(InventoryConflict):
-            self.service.delete_serial_scan(
-                "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
-            )
 
-    def test_serial_delete_rescan_and_lookup_failures_preserve_active_state(self):
+        result = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "NEW"
+        )
+
+        self.assertEqual(result["classification"], "unknown")
+        self.assertEqual(self.worker.lookup_reads, [])
+
+    def test_serial_delete_and_rescan_preserve_active_state(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
         self.service.open_serial_item(
@@ -400,57 +379,23 @@ class InventoryServiceTests(unittest.TestCase):
             "admin", task["task_id"], "B2", "device-a", "甲", "UNKNOWN-1"
         )
         self.assertEqual(second["classification"], "unknown")
-        self.assertEqual(self.worker.lookup_reads, ["UNKNOWN-1", "UNKNOWN-1"])
-
-        version_before_error = self.store.get_task_snapshot(
-            "admin", task["task_id"]
-        )["version"]
-        self.worker.lookup_failures["BROKEN-1"] = "序列号查询失败"
-        with self.assertRaisesRegex(InventoryServiceError, "序列号查询失败"):
-            self.service.scan_serial(
-                "admin", task["task_id"], "B2", "device-a", "甲", "BROKEN-1"
-            )
-        self.assertEqual(
-            self.store.get_task_snapshot("admin", task["task_id"])["version"],
-            version_before_error,
+        self.assertEqual(self.worker.lookup_reads, [])
+        broken = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "BROKEN-1"
         )
+        self.assertEqual(broken["classification"], "unknown")
         with sqlite3.connect(self.db_path) as connection:
             rows = connection.execute(
                 "SELECT serial, active FROM inventory_serial_scans "
                 "WHERE task_id = ? ORDER BY scan_id",
                 (task["task_id"],),
             ).fetchall()
-        self.assertEqual(rows, [("UNKNOWN-1", 0), ("UNKNOWN-1", 1)])
-
-    def test_serial_lookup_categories_retain_source_fields(self):
-        task = self.create_serial_task()
-        self.worker.serials["B2"] = []
-        self.worker.lookup = {
-            "OTHER-1": {"serial": "OTHER-1", "barcode": "C3", "name": "其他商品", "warehouse": "其他商品仓", "shipped": False},
-            "SHIPPED-1": {"serial": "SHIPPED-1", "barcode": "B2", "name": "序列商品", "warehouse": "已出库仓", "shipped": True},
-        }
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
-        )
-        other = self.service.scan_serial(
-            "admin", task["task_id"], "B2", "device-a", "甲", "OTHER-1"
-        )
-        shipped = self.service.scan_serial(
-            "admin", task["task_id"], "B2", "device-a", "甲", "SHIPPED-1"
-        )
         self.assertEqual(
-            (other["classification"], other["lookup_barcode"], other["lookup_name"], other["warehouse"], other["shipped"]),
-            ("other_product", "C3", "其他商品", "其他商品仓", False),
+            rows,
+            [("UNKNOWN-1", 0), ("UNKNOWN-1", 1), ("BROKEN-1", 1)],
         )
-        self.assertEqual(
-            (shipped["classification"], shipped["lookup_barcode"], shipped["warehouse"], shipped["shipped"]),
-            ("already_shipped", "B2", "已出库仓", True),
-        )
-        detail = self.store.serial_reconciliation("admin", task["task_id"], "B2")
-        self.assertEqual([row["serial"] for row in detail["other_product"]], ["OTHER-1"])
-        self.assertEqual([row["serial"] for row in detail["physical_only"]], ["SHIPPED-1"])
 
-    def test_finish_serial_item_refuses_stale_data_when_forced_refresh_fails(self):
+    def test_finish_serial_item_uses_cached_serials_without_gyj_read(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
         self.service.open_serial_item(
@@ -458,20 +403,12 @@ class InventoryServiceTests(unittest.TestCase):
         )
         self.worker.serial_failures["B2"] = "完成前刷新失败"
 
-        with self.assertRaisesRegex(InventoryServiceError, "完成前刷新失败"):
-            self.service.finish_serial_item(
-                "admin", task["task_id"], "B2", "device-a", "甲"
-            )
+        finished = self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
 
-        snapshot = self.store.get_task_snapshot("admin", task["task_id"])
-        item = next(row for row in snapshot["items"] if row["barcode"] == "B2")
-        self.assertEqual(item["state"], "serial_pending")
-        self.assertEqual(snapshot["phase"], "serial_check")
-        with self.store.connect() as connection:
-            self.assertEqual(connection.execute(
-                "SELECT COUNT(*) FROM inventory_item_locks WHERE task_id = ?",
-                (task["task_id"],),
-            ).fetchone()[0], 0)
+        self.assertEqual(finished["item"]["state"], "serial_complete")
+        self.assertEqual(self.worker.serial_reads, ["B2"])
 
     def test_serial_open_ignores_stale_task_version_without_creating_lock(self):
         task = self.create_serial_task()
@@ -708,22 +645,12 @@ class InventoryServiceTests(unittest.TestCase):
             {("B2", "product_quantity"), ("B2", "serial_unverified")},
         )
 
-    def test_completion_preserves_service_serial_classifications(self):
+    def test_completion_records_unmatched_serials_as_unknown(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = [{
             "serial": "SYSTEM-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.worker.lookup = {
-            "OTHER-1": {
-                "serial": "OTHER-1", "barcode": "C3", "name": "其他商品",
-                "warehouse": "其他仓", "shipped": False,
-            },
-            "SHIPPED-1": {
-                "serial": "SHIPPED-1", "barcode": "B2", "name": "序列商品",
-                "warehouse": "沈桥仓", "shipped": True,
-            },
-        }
         self.service.open_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
@@ -739,8 +666,7 @@ class InventoryServiceTests(unittest.TestCase):
         rows = self.store.list_discrepancies("admin", "open")
 
         self.assertTrue({
-            "product_quantity", "system_only_serial", "other_product_serial",
-            "already_shipped_serial", "unknown_serial",
+            "product_quantity", "system_only_serial", "unknown_serial",
         }.issubset({row["kind"] for row in rows}))
 
     def test_history_is_owner_scoped_newest_first_and_survives_restart(self):

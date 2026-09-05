@@ -300,29 +300,6 @@ class InventoryService:
             })
         return rows
 
-    @staticmethod
-    def _validated_serial_lookup(value, serial):
-        if value is None:
-            return None
-        allowed_keys = {"serial", "barcode", "name", "warehouse", "shipped"}
-        if not isinstance(value, dict) or set(value) != allowed_keys:
-            raise InventoryServiceError("GYJ 序列号查询结果格式不正确")
-        result_serial = str(value["serial"] or "").strip()
-        result_barcode = str(value["barcode"] or "").strip()
-        if (
-            result_serial != serial
-            or not result_barcode
-            or not isinstance(value["shipped"], bool)
-        ):
-            raise InventoryServiceError("GYJ 序列号查询结果内容不正确")
-        return {
-            "serial": result_serial,
-            "barcode": result_barcode,
-            "name": str(value["name"] or ""),
-            "warehouse": str(value["warehouse"] or ""),
-            "shipped": value["shipped"],
-        }
-
     def _serial_item(self, owner, task_id, barcode):
         snapshot = self._snapshot(owner, task_id, {"counting", "serial_check"})
         item = self._item(snapshot, barcode)
@@ -336,13 +313,10 @@ class InventoryService:
     ):
         self._serial_item(owner, task_id, barcode)
         current = self.store.serial_reconciliation(owner, task_id, barcode)
-        check_time = self.now()
         last_sync_at = current["item"].get("serial_synced_at")
         if not force and last_sync_at:
-            last_sync = datetime.fromisoformat(last_sync_at)
-            if (check_time - last_sync).total_seconds() < 60:
-                current["skipped"] = True
-                return current
+            current["skipped"] = True
+            return current
 
         value = self._call_worker(owner, "read_inventory_serials", barcode)
         rows = self._validated_expected_serials(value, barcode)
@@ -359,7 +333,7 @@ class InventoryService:
     ):
         with self._serial_guard(owner, task_id, barcode):
             return self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, True,
+                owner, task_id, barcode, device_id, actor, False,
             )
 
     def refresh_serial_item(
@@ -397,25 +371,10 @@ class InventoryService:
             expected = {
                 row["serial"] for row in current["expected"]
             }
-            lookup = None
-            if serial in expected:
-                classification = "matched"
-            else:
-                value = self._call_worker(
-                    owner, "lookup_inventory_serial", serial
-                )
-                lookup = self._validated_serial_lookup(value, serial)
-                if lookup is None:
-                    classification = "unknown"
-                elif lookup["barcode"] != barcode:
-                    classification = "other_product"
-                elif lookup["shipped"]:
-                    classification = "already_shipped"
-                else:
-                    classification = "unknown"
+            classification = "matched" if serial in expected else "unknown"
             return self.store.add_serial_scan(
                 owner, task_id, barcode, device_id, actor, serial,
-                classification, lookup,
+                classification,
             )
 
     def delete_serial_scan(
@@ -434,7 +393,7 @@ class InventoryService:
     ):
         with self._serial_guard(owner, task_id, barcode):
             refreshed = self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, True,
+                owner, task_id, barcode, device_id, actor, False,
                 expected_version,
             )
             return self.store.complete_serial_item(
