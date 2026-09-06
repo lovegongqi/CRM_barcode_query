@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (\`- [ ]\`) syntax for tracking.
 
-**Goal:** Add persistent carton presets, atomic whole-carton serial entry and correction, category filtering, collapsible serial groups, and compact expandable mobile product cards.
+**Goal:** Add persistent carton presets, cached-ledger validation and atomic whole-carton serial entry grouped by barcode range, category filtering, collapsible serial groups, and compact expandable mobile product cards.
 
-**Architecture:** Extend the SQLite inventory model with global product presets and task-scoped carton groups; retain scans in \`inventory_serial_scans\` through a nullable carton link. Validate and commit a whole carton in one \`BEGIN IMMEDIATE\` transaction using only cached expected serials. Extend the existing vanilla-JavaScript dialog, poller, and ZXing controller without adding a framework or GYJ calls during carton operations.
+**Architecture:** Extend the SQLite inventory model with global product presets and task-scoped internal carton groups; retain scans in \`inventory_serial_scans\` through a nullable carton link, without storing a user-facing carton code. Compare the editable generated preview with cached expected serials, then commit a confirmed whole carton in one \`BEGIN IMMEDIATE\` transaction. Extend the existing vanilla-JavaScript dialog, poller, and ZXing controller without adding a framework or GYJ calls during carton operations.
 
 **Tech Stack:** Python 3, Flask, SQLite, vanilla JavaScript/CSS, Python \`unittest\`, Node \`vm\`, existing local \`@zxing/browser\` 0.2.1
 
@@ -15,14 +15,16 @@
 - Any inventory user may save a shared carton quantity from 1 through 999; every successful change is audited.
 - Preset changes affect only new cartons. Edited previews may contain a different actual count, which must be shown before confirmation.
 - Generation increments only the trailing digit run and preserves its prefix and leading zeroes.
-- Whole-carton writes are atomic and reject duplicate carton codes or active task serials.
+- No business carton number is accepted, persisted, or displayed; groups use only internal IDs and derive their labels from active serial ranges.
+- Whole-carton writes are atomic and reject duplicate active task serials.
 - Carton operations use the successful local expected-serial cache and never call GYJ.
+- Generated and edited previews compare every serial with the current product's cached expected set; mismatches are highlighted and require a second confirmation rather than being blocked.
 - Existing ungrouped scans remain valid.
 - Every serial group is collapsed by default and retains its expanded state while the dialog remains open.
 - Active scans show newest first; normal matched rows omit duplicate product copy; delete is inline with the serial.
 - Category filtering is client-side and does not change task summary figures.
 - Mobile product cards are compact until explicitly expanded; desktop cards remain complete.
-- Ordinary camera scanning stays continuous; carton fields use one-shot capture and release the camera after one decode.
+- Ordinary camera scanning stays continuous; the carton start-serial field uses one-shot capture and releases the camera after one decode.
 
 ---
 
@@ -64,7 +66,7 @@ Expected: FAIL because the methods and tables do not exist.
 
 - [ ] **Step 3: Implement the minimal schema and methods**
 
-Create \`inventory_carton_presets(barcode, carton_quantity CHECK 1..999, created_by, created_at, updated_by, updated_at)\` and \`inventory_cartons(carton_id, task_id, barcode, carton_code, preset_quantity, confirmed_quantity, start_serial, created_by, created_device_id, created_at, active, deleted_by, deleted_device_id, deleted_at)\`. Use the existing \`PRAGMA table_info\` migration pattern for \`carton_id\`, add \`idx_inventory_serial_scans_task_active ON (task_id, serial) WHERE active=1\`, upsert the preset, bump task version, and audit \`carton_preset_changed\` with before/after quantities.
+Create \`inventory_carton_presets(barcode, carton_quantity CHECK 1..999, created_by, created_at, updated_by, updated_at)\` and \`inventory_cartons(carton_id, task_id, barcode, preset_quantity, confirmed_quantity, start_serial, created_by, created_device_id, created_at, active, deleted_by, deleted_device_id, deleted_at)\`. Use the existing \`PRAGMA table_info\` migration pattern for \`carton_id\`, enforce task-wide active serial uniqueness for all future writes without invalidating legacy duplicates, upsert the preset, bump task version, and audit \`carton_preset_changed\` with before/after quantities.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -83,7 +85,7 @@ git commit -m "feat(inventory): persist carton presets"
 - Test: \`tests/test_inventory_store.py\`
 
 **Interfaces:**
-- Produces \`create_serial_carton(owner, task_id, barcode, device_id, actor, carton_code, preset_quantity, start_serial, serials) -> dict\`.
+- Produces \`create_serial_carton(owner, task_id, barcode, device_id, actor, preset_quantity, start_serial, serials) -> dict\`.
 - Produces \`add_carton_serial(...)\`, \`remove_carton_serial(...)\`, and \`delete_serial_carton(...) -> dict\`.
 - Extends reconciliation with \`carton_preset\`, \`cartons\`, and \`ungrouped\`.
 
@@ -104,7 +106,7 @@ def test_duplicate_serial_rolls_back_the_entire_carton(self):
     with self.assertRaisesRegex(InventoryConflict, "S001"):
         store.create_serial_carton(
             "admin", task["task_id"], "B2", "d2", "乙",
-            "BOX-1", 2, "S001", ["S001", "S002"],
+            2, "S001", ["S001", "S002"],
         )
     with store.connect() as connection:
         count = connection.execute(
@@ -114,7 +116,7 @@ def test_duplicate_serial_rolls_back_the_entire_carton(self):
     self.assertEqual(count, 0)
 \`\`\`
 
-Also test cached matched/unknown classification, newest-first carton scans, legacy \`ungrouped\`, individual add/delete by another device, whole deletion, retained carton-code uniqueness, and audit rows.
+Also test cached matched/unknown classification, newest-first carton scans, legacy \`ungrouped\`, individual add/delete by another device, whole deletion, no persisted business carton number, and audit rows.
 
 - [ ] **Step 2: Verify RED**
 
@@ -128,7 +130,7 @@ Within \`BEGIN IMMEDIATE\`, call \`_serial_mutation_context\`, require \`serial_
 
 - [ ] **Step 4: Extend reconciliation and audit allowlists**
 
-Return active cartons with nested scans ordered \`scan_id DESC\`, ungrouped scans newest-first, and preserve existing classification arrays for compatibility. Add labels for preset change, carton create, carton serial add/remove, and carton delete. Return only \`carton_id\`, \`carton_code\`, preset before/after, confirmed quantity, affected count, and serial list from audit details.
+Return active cartons with nested scans ordered \`scan_id DESC\`, ungrouped scans newest-first, and preserve existing classification arrays for compatibility. Add labels for preset change, carton create, carton serial add/remove, and carton delete. Return only \`carton_id\`, preset before/after, confirmed quantity, affected count, start/end serial summary, and serial list from audit details; never return a carton code.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -164,7 +166,7 @@ def test_carton_create_uses_cache_without_worker_calls(self):
     reads = list(self.worker.serial_reads)
     result = self.service.create_serial_carton(
         "admin", task["task_id"], "B2", "d2", "乙",
-        "BOX-1", 2, "S001", ["S001", "S002"],
+        2, "S001", ["S001", "S002"],
     )
     self.assertEqual(result["counts"]["matched"], 2)
     self.assertEqual(self.worker.serial_reads, reads)
@@ -208,7 +210,7 @@ git commit -m "feat(inventory): validate carton serial entry"
 
 - [ ] **Step 1: Write failing route tests**
 
-Assert encoded slash handling, authenticated actor/owner, ordinary inventory-user access, task-version responses, malformed IDs/JSON, wrong methods, 409 conflicts, and sanitized errors. Carton create accepts exactly \`{device_id, carton_code, preset_quantity, start_serial, serials}\`.
+Assert encoded slash handling, authenticated actor/owner, ordinary inventory-user access, task-version responses, malformed IDs/JSON, wrong methods, 409 conflicts, and sanitized errors. Carton create accepts exactly \`{device_id, preset_quantity, start_serial, serials}\`; reject an unexpected \`carton_code\` field.
 
 - [ ] **Step 2: Verify RED**
 
@@ -329,7 +331,8 @@ git commit -m "feat(inventory): compact mobile product cards"
 
 **Interfaces:**
 - Produces \`generateCartonSerials(startSerial, quantity) -> string[]\`.
-- Produces state \`cartonPreview\`, \`expandedSerialGroups\`, and camera modes \`continuous|carton-code|carton-start\`.
+- Produces state \`cartonPreview\`, \`expandedSerialGroups\`, and camera modes \`continuous|carton-start\`.
+- Produces \`compareCartonPreview(serials, expectedSerials)\` and \`formatCartonRange(serials)\`.
 - Produces \`renderCartonEntry()\`, \`renderCartonPreview()\`, \`submitSerialCarton()\`, and \`toggleSerialGroup(key)\`.
 
 - [ ] **Step 1: Write failing generation and preview tests**
@@ -344,7 +347,7 @@ assert.deepEqual(Array.from(generateCartonSerials('SN0099', 3)), [
 assert.throws(() => generateCartonSerials('NO-SUFFIX', 20), /末尾数字/);
 \`\`\`
 
-Prove scan capture only fills an editable field; preview edits/adds/deletes form the submitted array; one confirmation makes one atomic request; failure retains preview.
+Prove scan capture only fills an editable field; preview edits/adds/deletes rerun cached-ledger comparison and form the submitted array; matching preview makes one atomic request, mismatching preview requires a second confirmation, and failure retains preview. Prove a missing successful cache blocks generation/save.
 
 - [ ] **Step 2: Write failing grouped-list tests**
 
@@ -358,18 +361,17 @@ Expected: FAIL because carton controls, generation, and collapsible group render
 
 - [ ] **Step 4: Add carton form and editable preview**
 
-Add preset, carton-code, and start-serial inputs; two one-shot camera buttons; generate; editable preview rows; add/delete row controls; \`箱规 N，实际录入 M\`; and atomic confirm. Disable only during submission.
+Add preset and start-serial inputs; one one-shot camera button; generate; editable preview rows; add/delete row controls; \`箱规 N，实际录入 M\`; cached-ledger match state per row; mismatch summary; and atomic confirm. Never render or submit a business carton number. Disable only during submission.
 
 - [ ] **Step 5: Render saved cartons and all serial groups collapsed**
 
-Use stable keys such as \`carton:17\`, \`ungrouped\`, and \`classification:system_only\`. Carton headers show carton code, active count, range, actor/time, expand, and confirmed whole-delete. Expanded groups support single correction. Replace the old permanently open grids.
+Use stable keys such as \`carton:17\`, \`ungrouped\`, and \`classification:system_only\`. Carton headers show the derived active serial range, active count, actor/time, expand, and confirmed whole-delete. A consecutive numeric suffix range abbreviates the shared prefix, for example \`1422608126281～6300（20条）\`; edited nonconsecutive sets show first/last, count, and \`含不连续条码\`. Expanded groups support single correction. Replace the old permanently open grids.
 
 - [ ] **Step 6: Add one-shot camera routing**
 
 \`\`\`javascript
-if (inventoryCameraMode === 'carton-code' || inventoryCameraMode === 'carton-start') {
-    const targetId = inventoryCameraMode === 'carton-code'
-        ? 'inventoryCartonCode' : 'inventoryCartonStartSerial';
+if (inventoryCameraMode === 'carton-start') {
+    const targetId = 'inventoryCartonStartSerial';
     inventoryElement(targetId).value = serial;
     stopInventoryCamera(false);
     inventoryElement(targetId).focus();
@@ -404,11 +406,11 @@ git commit -m "feat(inventory): add carton serial workspace"
 
 - [ ] **Step 1: Write failing audit-render tests**
 
-Render preset change, carton create, single add/delete, and carton delete. Assert titles name the carton and show affected count or serial, without exposing raw details JSON.
+Render preset change, carton create, single add/delete, and carton delete. Assert titles identify the group by derived serial range and show affected count or serial, without exposing a carton number or raw details JSON.
 
 - [ ] **Step 2: Implement compact audit copy**
 
-Render \`整箱录入 · BOX-1\`, \`箱内补录 · BOX-1\`, and \`删除整箱 · BOX-1\`, followed by the affected count or serial. Preserve existing count and ordinary serial audit rendering.
+Render \`整箱录入 · 1422608126281～6300\`, \`箱内补录 · 1422608126281～6301\`, and \`删除整箱 · 1422608126281～6301\`, followed by the affected count or serial. Preserve existing count and ordinary serial audit rendering.
 
 - [ ] **Step 3: Run focused inventory verification**
 
