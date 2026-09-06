@@ -821,6 +821,23 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", css)
         self.assertIn("min-height: 44px", css)
 
+    def test_inventory_mobile_summary_cards_are_compact(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-summary\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-serial-counts\s*\{[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)",
+        )
+        self.assertRegex(mobile_css, r"\.inventory-summary-card\s*\{[^}]*padding:\s*8px\s+6px")
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-serial-counts \.inventory-metric\s*\{[^}]*padding:\s*6px\s+4px",
+        )
+
     def test_inventory_gyj_captcha_accepts_alphanumeric_codes(self):
         source = self.source("inventory.html")
         self.assertRegex(

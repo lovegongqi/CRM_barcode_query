@@ -756,8 +756,35 @@ article.inventory-item { cursor: default; }
     .inventory-current { padding: 16px 12px; border-radius: 16px; }
     .inventory-section-head { align-items: flex-start; }
     .inventory-section-head .btn { min-height: 44px; }
-    .inventory-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .inventory-serial-counts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .inventory-summary {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 6px;
+        margin: 8px 0 12px;
+    }
+    .inventory-summary-card {
+        padding: 8px 6px;
+        border-radius: 10px;
+    }
+    .inventory-summary-card span { font-size: 10px; }
+    .inventory-summary-card strong { margin-top: 3px; font-size: 18px; }
+    .inventory-serial-counts {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 4px;
+        margin: 8px 0 10px;
+    }
+    .inventory-serial-counts .inventory-metric {
+        padding: 6px 4px;
+        border-radius: 8px;
+        text-align: center;
+    }
+    .inventory-serial-counts .inventory-metric span {
+        font-size: 10px;
+        white-space: nowrap;
+    }
+    .inventory-serial-counts .inventory-metric strong {
+        margin-top: 2px;
+        font-size: 15px;
+    }
     .inventory-toolbar { grid-template-columns: 1fr; }
     .inventory-item-top,
     .inventory-item-product,
