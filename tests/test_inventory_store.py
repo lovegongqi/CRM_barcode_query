@@ -284,6 +284,14 @@ class InventoryStoreTests(unittest.TestCase):
                     active INTEGER NOT NULL DEFAULT 1
                 )"""
             )
+            connection.executemany(
+                """INSERT INTO inventory_serial_scans
+                   (task_id, barcode, serial, classification, device_id, actor,
+                    scanned_at, active)
+                   VALUES (?, ?, 'LEGACY-DUPLICATE', 'unknown', 'd1', '甲',
+                           '2026-09-06T10:00:00', 1)""",
+                [("legacy-task", "B2"), ("legacy-task", "C3")],
+            )
         InventoryStore(self.db_path).initialize()
         with sqlite3.connect(self.db_path) as connection:
             columns = {
@@ -291,8 +299,17 @@ class InventoryStoreTests(unittest.TestCase):
                     "PRAGMA table_info(inventory_serial_scans)"
                 )
             }
+            active_duplicates = connection.execute(
+                """SELECT barcode, serial FROM inventory_serial_scans
+                   WHERE task_id = 'legacy-task' AND active = 1
+                   ORDER BY barcode"""
+            ).fetchall()
         self.assertIn("carton_id", columns)
         self.assertEqual(columns["carton_id"][3], 0)
+        self.assertEqual(
+            active_duplicates,
+            [("B2", "LEGACY-DUPLICATE"), ("C3", "LEGACY-DUPLICATE")],
+        )
 
     def test_carton_preset_is_shared_editable_and_audited(self):
         store = InventoryStore(self.db_path)
@@ -316,31 +333,49 @@ class InventoryStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(json.loads(details), {"after": 12, "before": 20})
 
-    def test_active_serial_is_unique_across_products_in_a_task(self):
+    def test_cross_product_active_duplicate_is_controlled(self):
         catalog = self.catalog() + [{
             "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
             "category": "配件", "unit": "个", "has_serial": True,
             "initial_stock": "0",
         }]
-        store = InventoryStore(self.db_path)
-        task = store.create_task("admin", "管理员", catalog)
-        timestamp = "2026-09-06T10:00:00"
+        store, task = self.serial_ready_store(catalog)
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "d1", "甲", "DUPLICATE", "unknown"
+        )
+        duplicate = store.add_serial_scan(
+            "admin", task["task_id"], "C3", "d2", "乙", "DUPLICATE", "unknown"
+        )
+        self.assertEqual(duplicate["classification"], "duplicate")
+        self.assertEqual(duplicate["barcode"], "B2")
         with store.connect() as connection:
-            connection.execute(
-                """INSERT INTO inventory_serial_scans
-                   (task_id, barcode, serial, classification, device_id, actor,
-                    scanned_at, active)
-                   VALUES (?, 'B2', 'DUPLICATE', 'unknown', 'd1', '甲', ?, 1)""",
-                (task["task_id"], timestamp),
+            count = connection.execute(
+                """SELECT COUNT(*) FROM inventory_serial_scans
+                   WHERE task_id = ? AND serial = 'DUPLICATE' AND active = 1""",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_system_scan_cross_product_duplicate_is_controlled(self):
+        catalog = self.catalog() + [{
+            "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
+            "category": "配件", "unit": "个", "has_serial": True,
+            "initial_stock": "0",
+        }]
+        store, task = self.serial_ready_store(catalog)
+        store.replace_expected_serials(
+            "admin", task["task_id"], "C3", "d1", "甲", [{
+                "serial": "DUPLICATE", "barcode": "C3", "name": "另一序列商品",
+                "warehouse": "沈桥仓", "shipped": False,
+            }],
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "d1", "甲", "DUPLICATE", "unknown"
+        )
+        with self.assertRaisesRegex(InventoryConflict, "DUPLICATE"):
+            store.complete_serial_item(
+                "admin", task["task_id"], "C3", "d2", "乙"
             )
-            with self.assertRaises(sqlite3.IntegrityError):
-                connection.execute(
-                    """INSERT INTO inventory_serial_scans
-                       (task_id, barcode, serial, classification, device_id, actor,
-                        scanned_at, active)
-                       VALUES (?, 'C3', 'DUPLICATE', 'unknown', 'd2', '乙', ?, 1)""",
-                    (task["task_id"], timestamp),
-                )
 
     def test_initialize_creates_count_entries_and_backfills_legacy_count_once(self):
         store = InventoryStore(self.db_path)

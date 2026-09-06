@@ -373,9 +373,32 @@ class InventoryStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_active
                     ON inventory_serial_scans(task_id, barcode, serial)
                     WHERE active = 1;
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_task_active
-                    ON inventory_serial_scans(task_id, serial)
-                    WHERE active = 1;
+                DROP INDEX IF EXISTS idx_inventory_serial_scans_task_active;
+                CREATE TRIGGER IF NOT EXISTS inventory_serial_scans_task_active_insert
+                    BEFORE INSERT ON inventory_serial_scans
+                    WHEN NEW.active = 1
+                     AND EXISTS (
+                         SELECT 1 FROM inventory_serial_scans
+                          WHERE task_id = NEW.task_id
+                            AND serial = NEW.serial
+                            AND active = 1
+                     )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'task_active_serial_duplicate');
+                    END;
+                CREATE TRIGGER IF NOT EXISTS inventory_serial_scans_task_active_update
+                    BEFORE UPDATE OF task_id, serial, active ON inventory_serial_scans
+                    WHEN NEW.active = 1
+                     AND EXISTS (
+                         SELECT 1 FROM inventory_serial_scans
+                          WHERE task_id = NEW.task_id
+                            AND serial = NEW.serial
+                            AND active = 1
+                            AND scan_id <> NEW.scan_id
+                     )
+                    BEGIN
+                        SELECT RAISE(ABORT, 'task_active_serial_duplicate');
+                    END;
                 CREATE INDEX IF NOT EXISTS idx_inventory_discrepancies_status
                     ON inventory_discrepancies(status);
                 """
@@ -1552,6 +1575,15 @@ class InventoryStore:
         return task, item, timestamp
 
     @staticmethod
+    def _active_task_serial_scan(connection, task_id, serial):
+        return connection.execute(
+            """SELECT * FROM inventory_serial_scans
+               WHERE task_id = ? AND serial = ? AND active = 1
+               ORDER BY scan_id LIMIT 1""",
+            (task_id, serial),
+        ).fetchone()
+
+    @staticmethod
     def _serial_scan_dict(row):
         result = dict(row)
         result["shipped"] = bool(result.pop("is_checked_out", 0))
@@ -1737,11 +1769,9 @@ class InventoryStore:
             _, _, timestamp = self._serial_mutation_context(
                 connection, owner, task_id, barcode,
             )
-            existing = connection.execute(
-                """SELECT * FROM inventory_serial_scans
-                   WHERE task_id = ? AND barcode = ? AND serial = ? AND active = 1""",
-                (task_id, barcode, serial),
-            ).fetchone()
+            existing = self._active_task_serial_scan(
+                connection, task_id, serial
+            )
             if existing is not None:
                 self._audit(
                     connection, task_id, "serial_scan_duplicate", actor,
@@ -1961,6 +1991,12 @@ class InventoryStore:
                 (task_id, barcode),
             ).fetchall()
             for expected in missing:
+                if self._active_task_serial_scan(
+                    connection, task_id, expected["serial"]
+                ) is not None:
+                    raise InventoryConflict(
+                        f"任务内序列号重复：{expected['serial']}"
+                    )
                 connection.execute(
                     """INSERT INTO inventory_serial_scans
                        (task_id, barcode, serial, classification,
