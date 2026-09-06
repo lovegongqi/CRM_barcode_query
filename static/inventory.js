@@ -251,11 +251,11 @@ function inventoryBookQuantity(item) {
 
 function inventoryActualQuantity(item) {
     if (!item) return null;
-    if (item.count_total !== null && item.count_total !== undefined) {
-        return item.count_total;
-    }
     if (item.completed_actual_qty !== null && item.completed_actual_qty !== undefined) {
         return item.completed_actual_qty;
+    }
+    if (item.count_total !== null && item.count_total !== undefined) {
+        return item.count_total;
     }
     return item.counted_quantity;
 }
@@ -668,6 +668,7 @@ function showCompletionConfirmation(taskId, version, pendingCount) {
 }
 
 async function completeInventoryTask(allowUnverifiedSerials = false) {
+    allowUnverifiedSerials = allowUnverifiedSerials === true;
     if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
     const confirmation = allowUnverifiedSerials ? completionConfirmation : null;
     const button = inventoryElement(
@@ -1523,6 +1524,7 @@ function serialListRow(row, canDelete, options = {}) {
 function serialGroupSection(key, label, rows, options = {}) {
     const expanded = expandedSerialGroups.has(key);
     const section = inventoryNode('section', `inventory-serial-group${expanded ? ' is-expanded' : ''}`);
+    const header = inventoryNode('div', 'inventory-serial-group-head');
     const toggle = inventoryNode('button', 'inventory-serial-group-toggle');
     toggle.type = 'button';
     if (typeof toggle.setAttribute === 'function') {
@@ -1530,11 +1532,16 @@ function serialGroupSection(key, label, rows, options = {}) {
     } else {
         toggle.ariaExpanded = expanded ? 'true' : 'false';
     }
-    const title = inventoryNode('strong', '', `${label} (${rows.length})`);
+    const count = options.count === undefined ? rows.length : options.count;
+    const title = inventoryNode('strong', '', `${label} (${count})`);
     const hint = inventoryNode('span', '', expanded ? '收起' : '展开');
     toggle.append(title, hint);
     if (typeof toggle.addEventListener === 'function') {
         toggle.addEventListener('click', () => toggleSerialGroup(key));
+    }
+    header.append(toggle);
+    if (typeof options.headerAction === 'function') {
+        header.append(options.headerAction());
     }
     const list = inventoryNode('ul', 'inventory-serial-list');
     list.hidden = !expanded;
@@ -1543,7 +1550,7 @@ function serialGroupSection(key, label, rows, options = {}) {
     } else {
         list.append(inventoryNode('li', 'inventory-empty', '暂无记录'));
     }
-    section.append(toggle, list);
+    section.append(header, list);
     if (expanded && typeof options.appendExpanded === 'function') {
         options.appendExpanded(section);
     }
@@ -1632,17 +1639,25 @@ function renderSerialReconciliation(value) {
     const details = inventoryElement('inventorySerialDetails');
     details.replaceChildren();
     const cartons = Array.isArray(currentSerialData.cartons) ? currentSerialData.cartons : [];
-    cartons.forEach((carton) => {
+    const appendCartons = (section) => cartons.forEach((carton) => {
         const rows = Array.isArray(carton.scans) ? carton.scans : [];
         const key = `carton:${carton.carton_id}`;
         const mismatchCount = rows.filter((row) => row.classification !== 'matched').length;
         const label = `${formatCartonRange(rows.map((row) => row.serial))}${
             mismatchCount ? ` · ${mismatchCount}条不匹配` : ''
         }`;
-        details.append(serialGroupSection(key, label, rows, {
+        section.append(serialGroupSection(key, label, rows, {
             canDelete: true,
             showLookup: false,
             onDelete: (serial) => removeSerialFromCarton(carton.carton_id, serial),
+            headerAction: () => {
+                const remove = inventoryNode(
+                    'button', 'btn btn-secondary inventory-carton-delete', '删除整箱'
+                );
+                remove.type = 'button';
+                remove.addEventListener('click', () => deleteSerialCarton(carton.carton_id, label));
+                return remove;
+            },
             appendExpanded: (section) => {
                 const correction = inventoryNode('div', 'inventory-carton-group-correction');
                 const input = inventoryNode('input', 'inventory-carton-group-input');
@@ -1654,10 +1669,7 @@ function renderSerialReconciliation(value) {
                 input.addEventListener('keydown', (event) => {
                     if (event.key === 'Enter') addSerialToCarton(carton.carton_id, input);
                 });
-                const remove = inventoryNode('button', 'btn btn-secondary inventory-carton-delete', '删除整组');
-                remove.type = 'button';
-                remove.addEventListener('click', () => deleteSerialCarton(carton.carton_id, label));
-                correction.append(input, add, remove);
+                correction.append(input, add);
                 section.append(correction);
             },
         }));
@@ -1668,6 +1680,9 @@ function renderSerialReconciliation(value) {
         details.append(serialGroupSection(`classification:${key}`, label, rows, {
             canDelete,
             showLookup: key !== 'matched',
+            count: currentSerialData.counts && currentSerialData.counts[key] !== undefined
+                ? currentSerialData.counts[key] : rows.length,
+            appendExpanded: key === 'matched' ? appendCartons : undefined,
         }));
     });
 }

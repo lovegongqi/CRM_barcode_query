@@ -2265,7 +2265,7 @@ class InventoryStore:
         connection = self.connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
-            _, _, timestamp = self._serial_mutation_context(
+            _, item, timestamp = self._serial_mutation_context(
                 connection, owner, task_id, barcode,
             )
             connection.execute(
@@ -2319,11 +2319,29 @@ class InventoryStore:
                         device_id, actor, timestamp,
                     ),
                 )
+            physical_count = connection.execute(
+                """SELECT COUNT(*) FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                     AND classification IN (
+                         'matched', 'unknown', 'already_shipped', 'physical_only'
+                     )""",
+                (task_id, barcode),
+            ).fetchone()[0]
+            book_quantity = normalize_quantity(
+                item["latest_book_quantity"] or item["completed_book_quantity"]
+            )
+            actual_quantity = normalize_quantity(physical_count)
+            difference = quantity_difference(actual_quantity, book_quantity)
             connection.execute(
                 """UPDATE inventory_items
-                   SET status = 'serial_complete', completed_at = ?, updated_at = ?
+                   SET counted_quantity = ?, completed_counted_quantity = ?,
+                       expected_current_quantity = ?, difference = ?,
+                       status = 'serial_complete', completed_at = ?, updated_at = ?
                    WHERE task_id = ? AND barcode = ?""",
-                (timestamp, timestamp, task_id, barcode),
+                (
+                    actual_quantity, actual_quantity, actual_quantity, difference,
+                    timestamp, timestamp, task_id, barcode,
+                ),
             )
             connection.execute(
                 "DELETE FROM inventory_item_locks WHERE task_id = ? AND barcode = ?",
@@ -2333,7 +2351,10 @@ class InventoryStore:
             self._audit(
                 connection, task_id, "serial_item_completed", actor,
                 barcode=barcode, device_id=device_id,
-                details=f"system_only={len(missing)}", created_at=timestamp,
+                details=(
+                    f"system_only={len(missing)};actual_quantity={actual_quantity}"
+                ),
+                created_at=timestamp,
             )
             connection.commit()
         except Exception:

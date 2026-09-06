@@ -1463,7 +1463,7 @@ class InventoryStoreTests(unittest.TestCase):
                 product_rows[0]["barcode"], product_rows[0]["book_quantity"],
                 product_rows[0]["counted_quantity"], product_rows[0]["difference"],
             ),
-            ("B2", "0", "1", "1"),
+            ("B2", "0", "3", "3"),
         )
         self.assertNotIn("price", "|".join(
             key.lower() for row in first_rows for key in row
@@ -1655,9 +1655,9 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(items["A1"]["count_expression"], "2")
         self.assertEqual(items["A1"]["latest_book_qty"], "3")
         self.assertEqual(items["A1"]["diff_qty"], "-1")
-        self.assertEqual(items["B2"]["count_expression"], "1")
+        self.assertEqual(items["B2"]["count_expression"], "3")
         self.assertEqual(items["B2"]["latest_book_qty"], "1")
-        self.assertEqual(items["B2"]["state"], "matched")
+        self.assertEqual(items["B2"]["state"], "serial_pending")
         self.assertEqual(store.list_discrepancies("admin", "open"), [])
         with closing(sqlite3.connect(self.db_path)) as connection:
             self.assertEqual(connection.execute(

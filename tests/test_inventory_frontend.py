@@ -3,12 +3,63 @@ import subprocess
 import textwrap
 import unittest
 
+from playwright.sync_api import sync_playwright
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "static" / "inventory.js"
+STYLE = ROOT / "static" / "inventory.css"
 
 
 class InventoryFrontendBehaviorTests(unittest.TestCase):
+    def test_mobile_category_and_state_filters_share_one_row(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <div class="inventory-toolbar">
+                        <label class="inventory-search-field"><span>搜索或扫描商品</span><input></label>
+                        <label class="inventory-filter-field"><span>产品类别</span><select></select></label>
+                        <label class="inventory-filter-field"><span>查看范围</span><select></select></label>
+                    </div>
+                    """
+                )
+                search = page.locator(".inventory-search-field").bounding_box()
+                filters = page.locator(".inventory-filter-field")
+                category = filters.nth(0).bounding_box()
+                state = filters.nth(1).bounding_box()
+
+                self.assertAlmostEqual(category["y"], state["y"], delta=1)
+                self.assertAlmostEqual(category["width"], state["width"], delta=1)
+                self.assertGreater(search["width"], category["width"] + 20)
+                self.assertLess(search["y"], category["y"])
+            finally:
+                browser.close()
+
+    def test_mobile_summary_cards_share_one_row(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                cards = "".join(
+                    f'<div class="inventory-summary-card"><span>指标{index}</span><strong>{index}</strong></div>'
+                    for index in range(8)
+                )
+                page.set_content(
+                    f"<style>{STYLE.read_text(encoding='utf-8')}</style>"
+                    f'<div class="inventory-summary">{cards}</div>'
+                )
+                tops = page.locator(".inventory-summary-card").evaluate_all(
+                    "nodes => nodes.map(node => node.getBoundingClientRect().top)"
+                )
+                self.assertEqual(len(tops), 8)
+                self.assertLess(max(tops) - min(tops), 1)
+            finally:
+                browser.close()
+
     def run_node(self, body):
         program = textwrap.dedent(
             f"""
@@ -294,7 +345,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 pollInventoryTask = async () => {};
             `, context);
             (async () => {
-                await vm.runInContext('completeInventoryTask()', context);
+                await vm.runInContext("completeInventoryTask({type: 'click'})", context);
                 assert.equal(confirmDialog.open, true);
                 assert.match(confirmMessage.textContent, /2/);
                 assert.equal(requests.length, 1);
@@ -311,6 +362,83 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(confirmDialog.open, false);
                 assert.equal(notices.at(-1).message, '盘点已完成，未盘商品未计入差异报告。');
             })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_completed_serial_quantity_overrides_original_manual_count(self):
+        self.run_node(
+            r"""
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            assert.equal(vm.runInContext(`inventoryActualQuantity({
+                state: 'serial_complete', count_total: '33', completed_actual_qty: '34'
+            })`, context), '34');
+            """
+        )
+
+    def test_saved_cartons_render_inside_matching_group_with_header_delete(self):
+        self.run_node(
+            r"""
+            function makeNode(tag = 'div') {
+                return {
+                    tag, className: '', textContent: '', value: '', disabled: false,
+                    hidden: false, dataset: {}, children: [], attributes: {}, listeners: {},
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    setAttribute(name, value) { this.attributes[name] = String(value); },
+                    addEventListener(name, callback) { this.listeners[name] = callback; },
+                };
+            }
+            const elements = {
+                inventorySerialSyncedAt: makeNode(), inventorySerialProduct: makeNode(),
+                inventorySerialCounts: makeNode(), inventorySerialDetails: makeNode(),
+            };
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) { return elements[id] || null; },
+                },
+                window: {confirm() { return true; }},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                serialWorkspaceEditable = true;
+                renderCartonEntry = () => {};
+                expandedSerialGroups.add('classification:matched');
+                currentSerialData = {
+                    barcode: 'B2', item: {barcode: 'B2', name: '序列商品', serial_synced_at: 'now'},
+                    counts: {matched: 2, system_only: 0, physical_only: 0, other_product: 0, duplicates: 0},
+                    matched: [
+                        {serial: 'S001', classification: 'matched', carton_id: 7},
+                        {serial: 'S002', classification: 'matched', carton_id: 7},
+                    ],
+                    system_only: [], physical_only: [], other_product: [], duplicates: [],
+                    cartons: [{carton_id: 7, scans: [
+                        {serial: 'S001', classification: 'matched', carton_id: 7},
+                        {serial: 'S002', classification: 'matched', carton_id: 7},
+                    ]}],
+                };
+                renderSerialReconciliation(currentSerialData);
+            `, context);
+            const matchingGroup = elements.inventorySerialDetails.children[0];
+            function allText(node) {
+                return [node.textContent || '', ...(node.children || []).map(allText)].join(' ');
+            }
+            const text = allText(matchingGroup);
+            assert.match(text, /匹配 \(2\)/);
+            assert.match(text, /S001.*02/);
+            assert.match(text, /删除整箱/);
+            assert(!elements.inventorySerialDetails.children.slice(1).some(
+                node => allText(node).includes('S001')
+            ));
             """
         )
 

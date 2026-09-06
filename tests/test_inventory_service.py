@@ -339,6 +339,43 @@ class InventoryServiceTests(unittest.TestCase):
                 (task["task_id"],),
             ).fetchone()[0], 1)
 
+    def test_finishing_serial_item_replaces_manual_count_with_scanned_quantity(self):
+        self.worker.stock["B2"] = "2"
+        self.worker.catalog[1]["initial_stock"] = "2"
+        task = self.create_task()
+        self.submit(task["task_id"], "B2", "1", device_id="device-b")
+        self.submit(task["task_id"], "A1", "2")
+        self.worker.serials["B2"] = [
+            {
+                "serial": serial,
+                "barcode": "B2",
+                "name": "序列商品",
+                "warehouse": "沈桥仓",
+                "shipped": False,
+            }
+            for serial in ("B-1", "B-2")
+        ]
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        for serial in ("B-1", "B-2"):
+            self.service.scan_serial(
+                "admin", task["task_id"], "B2", "device-a", "甲", serial
+            )
+
+        finished = self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+
+        self.assertEqual(finished["item"]["completed_actual_qty"], "2")
+        self.assertEqual(finished["item"]["diff_qty"], "0")
+        item = next(
+            row for row in self.store.get_task_snapshot("admin", task["task_id"])["items"]
+            if row["barcode"] == "B2"
+        )
+        self.assertEqual(item["completed_actual_qty"], "2")
+        self.assertEqual(item["diff_qty"], "0")
+
     def test_serial_open_failure_has_no_lock_or_progress(self):
         task = self.create_serial_task()
 
