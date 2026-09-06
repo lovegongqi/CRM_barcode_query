@@ -261,7 +261,86 @@ class InventoryStoreTests(unittest.TestCase):
             "inventory_serial_expected", "inventory_serial_scans",
             "inventory_stock_movements", "inventory_discrepancies",
             "inventory_notes", "inventory_audit_events",
+            "inventory_carton_presets", "inventory_cartons",
         }.issubset(names))
+
+    def test_initialize_adds_carton_link_to_serial_scans(self):
+        with sqlite3.connect(self.db_path) as connection:
+            connection.execute(
+                """CREATE TABLE inventory_serial_scans (
+                    scan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    barcode TEXT NOT NULL,
+                    serial TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    source_classification TEXT NOT NULL DEFAULT '',
+                    lookup_barcode TEXT NOT NULL DEFAULT '',
+                    lookup_name TEXT NOT NULL DEFAULT '',
+                    warehouse TEXT NOT NULL DEFAULT '',
+                    is_checked_out INTEGER NOT NULL DEFAULT 0,
+                    device_id TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1
+                )"""
+            )
+        InventoryStore(self.db_path).initialize()
+        with sqlite3.connect(self.db_path) as connection:
+            columns = {
+                row[1]: row for row in connection.execute(
+                    "PRAGMA table_info(inventory_serial_scans)"
+                )
+            }
+        self.assertIn("carton_id", columns)
+        self.assertEqual(columns["carton_id"][3], 0)
+
+    def test_carton_preset_is_shared_editable_and_audited(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        store.save_carton_preset("admin", task["task_id"], "B2", "d1", "甲", 20)
+        result = store.save_carton_preset(
+            "admin", task["task_id"], "B2", "d2", "乙", 12
+        )
+        self.assertEqual(result["carton_quantity"], 12)
+        self.assertEqual(
+            store.get_carton_preset("admin", task["task_id"], "B2")["updated_by"],
+            "乙",
+        )
+        with sqlite3.connect(self.db_path) as connection:
+            details = connection.execute(
+                "SELECT details FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'carton_preset_changed' "
+                "ORDER BY event_id DESC LIMIT 1",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(json.loads(details), {"after": 12, "before": 20})
+
+    def test_active_serial_is_unique_across_products_in_a_task(self):
+        catalog = self.catalog() + [{
+            "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
+            "category": "配件", "unit": "个", "has_serial": True,
+            "initial_stock": "0",
+        }]
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", catalog)
+        timestamp = "2026-09-06T10:00:00"
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_serial_scans
+                   (task_id, barcode, serial, classification, device_id, actor,
+                    scanned_at, active)
+                   VALUES (?, 'B2', 'DUPLICATE', 'unknown', 'd1', '甲', ?, 1)""",
+                (task["task_id"], timestamp),
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    """INSERT INTO inventory_serial_scans
+                       (task_id, barcode, serial, classification, device_id, actor,
+                        scanned_at, active)
+                       VALUES (?, 'C3', 'DUPLICATE', 'unknown', 'd2', '乙', ?, 1)""",
+                    (task["task_id"], timestamp),
+                )
 
     def test_initialize_creates_count_entries_and_backfills_legacy_count_once(self):
         store = InventoryStore(self.db_path)

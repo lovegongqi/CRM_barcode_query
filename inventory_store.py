@@ -242,6 +242,36 @@ class InventoryStore:
                         REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS inventory_carton_presets (
+                    barcode TEXT PRIMARY KEY,
+                    carton_quantity INTEGER NOT NULL
+                        CHECK (carton_quantity BETWEEN 1 AND 999),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS inventory_cartons (
+                    carton_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    barcode TEXT NOT NULL,
+                    carton_code TEXT NOT NULL,
+                    preset_quantity INTEGER NOT NULL,
+                    confirmed_quantity INTEGER NOT NULL,
+                    start_serial TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_device_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    deleted_by TEXT,
+                    deleted_device_id TEXT,
+                    deleted_at TEXT,
+                    UNIQUE (task_id, carton_code),
+                    FOREIGN KEY (task_id, barcode)
+                        REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS inventory_serial_expected (
                     task_id TEXT NOT NULL,
                     barcode TEXT NOT NULL,
@@ -271,8 +301,11 @@ class InventoryStore:
                     actor TEXT NOT NULL,
                     scanned_at TEXT NOT NULL,
                     active INTEGER NOT NULL DEFAULT 1,
+                    carton_id INTEGER,
                     FOREIGN KEY (task_id, barcode)
-                        REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
+                        REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE,
+                    FOREIGN KEY (carton_id)
+                        REFERENCES inventory_cartons(carton_id) ON DELETE SET NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS inventory_stock_movements (
@@ -340,6 +373,9 @@ class InventoryStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_active
                     ON inventory_serial_scans(task_id, barcode, serial)
                     WHERE active = 1;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_serial_scans_task_active
+                    ON inventory_serial_scans(task_id, serial)
+                    WHERE active = 1;
                 CREATE INDEX IF NOT EXISTS idx_inventory_discrepancies_status
                     ON inventory_discrepancies(status);
                 """
@@ -383,6 +419,10 @@ class InventoryStore:
                     connection.execute(
                         f"ALTER TABLE inventory_serial_scans ADD COLUMN {name} {definition}"
                     )
+            if "carton_id" not in scan_columns:
+                connection.execute(
+                    "ALTER TABLE inventory_serial_scans ADD COLUMN carton_id INTEGER"
+                )
             connection.execute(
                 """INSERT INTO inventory_count_entries
                    (task_id, barcode, quantity, version,
@@ -651,6 +691,77 @@ class InventoryStore:
         with closing(self.connect()) as connection:
             self._task_for_owner(connection, owner, task_id)
             return self._task_version(connection, task_id)
+
+    def get_carton_preset(self, owner, task_id, barcode):
+        with closing(self.connect()) as connection:
+            self._task_for_owner(connection, owner, task_id)
+            item = connection.execute(
+                "SELECT 1 FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            return self._row_dict(connection.execute(
+                "SELECT * FROM inventory_carton_presets WHERE barcode = ?",
+                (barcode,),
+            ).fetchone())
+
+    def save_carton_preset(
+        self, owner, task_id, barcode, device_id, actor, carton_quantity
+    ):
+        if (
+            isinstance(carton_quantity, bool)
+            or not isinstance(carton_quantity, int)
+            or not 1 <= carton_quantity <= 999
+        ):
+            raise ValueError("每箱数量必须是1至999之间的整数")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._task_for_owner(connection, owner, task_id)
+            item = connection.execute(
+                "SELECT 1 FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            before = connection.execute(
+                "SELECT carton_quantity FROM inventory_carton_presets WHERE barcode = ?",
+                (barcode,),
+            ).fetchone()
+            timestamp = self._now_text()
+            connection.execute(
+                """INSERT INTO inventory_carton_presets
+                   (barcode, carton_quantity, created_by, created_at,
+                    updated_by, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(barcode) DO UPDATE SET
+                       carton_quantity = excluded.carton_quantity,
+                       updated_by = excluded.updated_by,
+                       updated_at = excluded.updated_at""",
+                (barcode, carton_quantity, actor, timestamp, actor, timestamp),
+            )
+            result = self._row_dict(connection.execute(
+                "SELECT * FROM inventory_carton_presets WHERE barcode = ?",
+                (barcode,),
+            ).fetchone())
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "carton_preset_changed", actor,
+                barcode=barcode, device_id=device_id,
+                details=json.dumps({
+                    "before": before["carton_quantity"] if before else None,
+                    "after": carton_quantity,
+                }, ensure_ascii=False, sort_keys=True),
+                created_at=timestamp,
+            )
+            connection.commit()
+            return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _expire_locks(self, connection, task_id, now_text):
         expired = connection.execute(
