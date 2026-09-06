@@ -333,6 +333,168 @@ class InventoryStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(json.loads(details), {"after": 12, "before": 20})
 
+    def test_duplicate_serial_rolls_back_the_entire_carton(self):
+        store, task = self.serial_ready_store()
+        store.replace_expected_serials(
+            "admin", task["task_id"], "B2", "d1", "甲", [{
+                "serial": "S001", "barcode": "B2", "name": "零库存商品",
+                "warehouse": "沈桥仓", "shipped": False,
+            }],
+        )
+        store.add_serial_scan(
+            "admin", task["task_id"], "B2", "d1", "甲", "S001", "matched"
+        )
+
+        with self.assertRaisesRegex(InventoryConflict, "S001"):
+            store.create_serial_carton(
+                "admin", task["task_id"], "B2", "d2", "乙",
+                "BOX-1", 2, "S001", ["S001", "S002"],
+            )
+
+        with store.connect() as connection:
+            carton_count = connection.execute(
+                "SELECT COUNT(*) FROM inventory_cartons WHERE task_id = ?",
+                (task["task_id"],),
+            ).fetchone()[0]
+            carton_scan_count = connection.execute(
+                """SELECT COUNT(*) FROM inventory_serial_scans
+                   WHERE task_id = ? AND carton_id IS NOT NULL""",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(carton_count, 0)
+        self.assertEqual(carton_scan_count, 0)
+
+    def test_carton_mutations_group_and_order_active_scans(self):
+        catalog = self.catalog() + [{
+            "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
+            "category": "配件", "unit": "个", "has_serial": True,
+            "initial_stock": "0",
+        }]
+        store, task = self.serial_ready_store(catalog)
+        task_id = task["task_id"]
+        with self.assertRaisesRegex(InventoryConflict, "账面序列号"):
+            store.create_serial_carton(
+                "admin", task_id, "B2", "d1", "甲",
+                "BOX-0", 1, "S000", ["S000"],
+            )
+        store.replace_expected_serials(
+            "admin", task_id, "B2", "d1", "甲", [
+                {"serial": "S001", "barcode": "B2", "name": "零库存商品", "warehouse": "沈桥仓", "shipped": False},
+                {"serial": "S003", "barcode": "B2", "name": "零库存商品", "warehouse": "沈桥仓", "shipped": False},
+                {"serial": "S005", "barcode": "B2", "name": "零库存商品", "warehouse": "沈桥仓", "shipped": False},
+                {"serial": "S004", "barcode": "B2", "name": "零库存商品", "warehouse": "沈桥仓", "shipped": False},
+            ],
+        )
+        store.replace_expected_serials(
+            "admin", task_id, "C3", "d1", "甲", [],
+        )
+        store.save_carton_preset("admin", task_id, "B2", "d1", "甲", 2)
+        store.add_serial_scan(
+            "admin", task_id, "B2", "d1", "甲", "LEGACY-1", "unknown"
+        )
+
+        created = store.create_serial_carton(
+            "admin", task_id, "B2", "d2", "乙",
+            "BOX-1", 2, "S001", ["S001", "S002"],
+        )
+        carton_id = created["cartons"][0]["carton_id"]
+        self.assertEqual(created["carton_preset"]["carton_quantity"], 2)
+        self.assertEqual(
+            [(row["serial"], row["classification"])
+             for row in created["cartons"][0]["scans"]],
+            [("S002", "unknown"), ("S001", "matched")],
+        )
+        self.assertEqual([row["serial"] for row in created["ungrouped"]], ["LEGACY-1"])
+
+        added = store.add_carton_serial(
+            "admin", task_id, "B2", "d3", "丙", carton_id, "S003"
+        )
+        self.assertEqual(
+            [row["serial"] for row in added["cartons"][0]["scans"]],
+            ["S003", "S002", "S001"],
+        )
+        self.assertEqual(added["cartons"][0]["confirmed_quantity"], 2)
+        with self.assertRaisesRegex(InventoryNotFound, "箱"):
+            store.add_carton_serial(
+                "admin", task_id, "C3", "d3", "丙", carton_id, "C-1"
+            )
+        store.remove_carton_serial(
+            "admin", task_id, "B2", "d4", "丁", carton_id, "S002"
+        )
+        store.add_serial_scan(
+            "admin", task_id, "B2", "d5", "戊", "LEGACY-2", "unknown"
+        )
+        reconciled = store.serial_reconciliation("admin", task_id, "B2")
+        self.assertEqual(
+            [row["serial"] for row in reconciled["cartons"][0]["scans"]],
+            ["S003", "S001"],
+        )
+        self.assertEqual(
+            [row["serial"] for row in reconciled["ungrouped"]],
+            ["LEGACY-2", "LEGACY-1"],
+        )
+        self.assertEqual(
+            [row["serial"] for row in reconciled["matched"]],
+            ["S003", "S001"],
+        )
+        self.assertEqual(
+            [row["serial"] for row in reconciled["system_only"]],
+            ["S004", "S005"],
+        )
+
+        deleted = store.delete_serial_carton(
+            "admin", task_id, "B2", "d6", "己", carton_id
+        )
+        self.assertEqual(deleted["cartons"], [])
+        self.assertEqual(
+            [row["serial"] for row in deleted["ungrouped"]],
+            ["LEGACY-2", "LEGACY-1"],
+        )
+        with self.assertRaisesRegex(InventoryConflict, "BOX-1"):
+            store.create_serial_carton(
+                "admin", task_id, "B2", "d7", "庚",
+                "BOX-1", 1, "S004", ["S004"],
+            )
+
+        audit_rows = [
+            row for row in store.list_audit_events("admin", task_id, barcode="B2")
+            if row["event_type"].startswith("carton_")
+        ]
+        self.assertEqual(
+            [(row["event_type"], row["actor"], row["device_id"])
+             for row in audit_rows],
+            [
+                ("carton_preset_changed", "甲", "d1"),
+                ("carton_created", "乙", "d2"),
+                ("carton_serial_added", "丙", "d3"),
+                ("carton_serial_removed", "丁", "d4"),
+                ("carton_deleted", "己", "d6"),
+            ],
+        )
+        self.assertEqual(audit_rows[0]["before_preset_quantity"], None)
+        self.assertEqual(audit_rows[0]["after_preset_quantity"], 2)
+        self.assertEqual(audit_rows[1]["carton_code"], "BOX-1")
+        self.assertEqual(audit_rows[1]["confirmed_quantity"], 2)
+        self.assertEqual(audit_rows[1]["affected_count"], 2)
+        self.assertEqual(audit_rows[1]["serials"], ["S001", "S002"])
+        self.assertEqual(audit_rows[2]["serials"], ["S003"])
+        self.assertEqual(audit_rows[3]["serials"], ["S002"])
+        self.assertEqual(audit_rows[4]["affected_count"], 2)
+        self.assertEqual(audit_rows[4]["serials"], ["S001", "S003"])
+        with store.connect() as connection:
+            carton = connection.execute(
+                "SELECT active, deleted_by, deleted_device_id FROM inventory_cartons "
+                "WHERE carton_id = ?",
+                (carton_id,),
+            ).fetchone()
+            active_linked = connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_scans "
+                "WHERE carton_id = ? AND active = 1",
+                (carton_id,),
+            ).fetchone()[0]
+        self.assertEqual(tuple(carton), (0, "己", "d6"))
+        self.assertEqual(active_linked, 0)
+
     def test_cross_product_active_duplicate_is_controlled(self):
         catalog = self.catalog() + [{
             "barcode": "C3", "name": "另一序列商品", "spec": "", "model": "",
@@ -1171,7 +1333,9 @@ class InventoryStoreTests(unittest.TestCase):
             "id", "barcode", "event_type", "event_label", "entry_number", "actor",
             "device_id", "created_at", "before_quantity", "after_quantity",
             "before_serial", "after_serial", "before_classification",
-            "after_classification",
+            "after_classification", "carton_id", "carton_code",
+            "before_preset_quantity", "after_preset_quantity",
+            "confirmed_quantity", "affected_count", "serials",
         })
 
     def test_audit_view_numbers_count_entries_stably(self):

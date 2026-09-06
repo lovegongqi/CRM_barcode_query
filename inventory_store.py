@@ -28,6 +28,11 @@ _AUDIT_EVENT_LABELS = {
     "count_entry_added": "新增分次数量",
     "count_entry_updated": "修改分次数量",
     "count_entry_deleted": "删除分次数量",
+    "carton_preset_changed": "修改商品箱规",
+    "carton_created": "整箱录入",
+    "carton_serial_added": "箱内补录",
+    "carton_serial_removed": "箱内删除",
+    "carton_deleted": "删除整箱",
     "serial_expected_refreshed": "刷新账面序列号",
     "serial_scanned": "扫描序列号",
     "serial_scan_reclassified": "重新分类序列号",
@@ -1609,6 +1614,65 @@ class InventoryStore:
             "after": cls._serial_audit_snapshot(after),
         }, ensure_ascii=False, sort_keys=True)
 
+    @staticmethod
+    def _active_carton(connection, task_id, barcode, carton_id):
+        carton = connection.execute(
+            """SELECT * FROM inventory_cartons
+               WHERE carton_id = ? AND task_id = ? AND barcode = ? AND active = 1""",
+            (carton_id, task_id, barcode),
+        ).fetchone()
+        if carton is None:
+            raise InventoryNotFound("箱组不存在或已变更，请刷新")
+        return carton
+
+    @staticmethod
+    def _carton_scan_values(connection, task_id, barcode, serial):
+        expected = connection.execute(
+            """SELECT * FROM inventory_serial_expected
+               WHERE task_id = ? AND barcode = ? AND serial = ?
+                 AND sync_status = 'active'""",
+            (task_id, barcode, serial),
+        ).fetchone()
+        if expected is None:
+            return ("unknown", "unknown", "", "", "", 0)
+        return (
+            "matched", "matched", barcode, expected["name"],
+            expected["warehouse"], 0,
+        )
+
+    def _insert_carton_scan(
+        self, connection, task_id, barcode, carton_id, device_id, actor,
+        serial, timestamp,
+    ):
+        existing = self._active_task_serial_scan(connection, task_id, serial)
+        if existing is not None:
+            raise InventoryConflict(f"任务内序列号重复：{serial}")
+        values = self._carton_scan_values(connection, task_id, barcode, serial)
+        cursor = connection.execute(
+            """INSERT INTO inventory_serial_scans
+               (task_id, barcode, serial, classification,
+                source_classification, lookup_barcode, lookup_name,
+                warehouse, is_checked_out, device_id, actor, scanned_at,
+                active, carton_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+            (task_id, barcode, serial, *values, device_id, actor, timestamp,
+             carton_id),
+        )
+        return connection.execute(
+            "SELECT * FROM inventory_serial_scans WHERE scan_id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+
+    @staticmethod
+    def _carton_audit_details(carton, affected_count, serials):
+        return json.dumps({
+            "carton_id": int(carton["carton_id"]),
+            "carton_code": carton["carton_code"],
+            "confirmed_quantity": int(carton["confirmed_quantity"]),
+            "affected_count": int(affected_count),
+            "serials": list(serials),
+        }, ensure_ascii=False, sort_keys=True)
+
     def release_item_lock(
         self, owner, task_id, barcode, device_id, actor, phase, reason
     ):
@@ -1879,6 +1943,210 @@ class InventoryStore:
         result["removed"] = serial
         return result
 
+    def create_serial_carton(
+        self, owner, task_id, barcode, device_id, actor, carton_code,
+        preset_quantity, start_serial, serials,
+    ):
+        carton_code = str(carton_code or "").strip()
+        start_serial = str(start_serial or "").strip()
+        if not carton_code or not start_serial:
+            raise ValueError("箱号和起始序列号不能为空")
+        if (
+            isinstance(preset_quantity, bool)
+            or not isinstance(preset_quantity, int)
+            or not 1 <= preset_quantity <= 999
+        ):
+            raise ValueError("每箱数量必须是1至999之间的整数")
+        if not isinstance(serials, list) or not serials:
+            raise ValueError("本箱序列号不能为空")
+        prepared = [str(serial or "").strip() for serial in serials]
+        if any(not serial for serial in prepared):
+            raise ValueError("序列号不能为空")
+        if len(set(prepared)) != len(prepared):
+            raise ValueError("本箱序列号存在重复")
+
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, item, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
+            )
+            if not item["serial_synced_at"]:
+                raise InventoryConflict("请先获取账面序列号后再录入整箱")
+            existing_carton = connection.execute(
+                "SELECT 1 FROM inventory_cartons WHERE task_id = ? AND carton_code = ?",
+                (task_id, carton_code),
+            ).fetchone()
+            if existing_carton is not None:
+                raise InventoryConflict(f"任务内箱号已存在：{carton_code}")
+            for serial in prepared:
+                if self._active_task_serial_scan(connection, task_id, serial) is not None:
+                    raise InventoryConflict(f"任务内序列号重复：{serial}")
+            cursor = connection.execute(
+                """INSERT INTO inventory_cartons
+                   (task_id, barcode, carton_code, preset_quantity,
+                    confirmed_quantity, start_serial, created_by,
+                    created_device_id, created_at, active)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                (
+                    task_id, barcode, carton_code, preset_quantity,
+                    len(prepared), start_serial, actor, device_id, timestamp,
+                ),
+            )
+            carton_id = cursor.lastrowid
+            for serial in prepared:
+                self._insert_carton_scan(
+                    connection, task_id, barcode, carton_id, device_id, actor,
+                    serial, timestamp,
+                )
+            carton = connection.execute(
+                "SELECT * FROM inventory_cartons WHERE carton_id = ?",
+                (carton_id,),
+            ).fetchone()
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "carton_created", actor,
+                barcode=barcode, device_id=device_id,
+                details=self._carton_audit_details(
+                    carton, len(prepared), prepared,
+                ),
+                created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
+
+    def add_carton_serial(
+        self, owner, task_id, barcode, device_id, actor, carton_id, serial,
+    ):
+        serial = str(serial or "").strip()
+        if not serial:
+            raise ValueError("序列号不能为空")
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, item, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
+            )
+            if not item["serial_synced_at"]:
+                raise InventoryConflict("请先获取账面序列号后再补录")
+            carton = self._active_carton(
+                connection, task_id, barcode, carton_id,
+            )
+            self._insert_carton_scan(
+                connection, task_id, barcode, carton_id, device_id, actor,
+                serial, timestamp,
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "carton_serial_added", actor,
+                barcode=barcode, device_id=device_id,
+                details=self._carton_audit_details(carton, 1, [serial]),
+                created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
+
+    def remove_carton_serial(
+        self, owner, task_id, barcode, device_id, actor, carton_id, serial,
+    ):
+        serial = str(serial or "").strip()
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, _, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
+            )
+            carton = self._active_carton(
+                connection, task_id, barcode, carton_id,
+            )
+            scan = connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND carton_id = ?
+                     AND serial = ? AND active = 1""",
+                (task_id, barcode, carton_id, serial),
+            ).fetchone()
+            if scan is None:
+                raise InventoryNotFound("箱内序列号不存在或已变更，请刷新")
+            connection.execute(
+                "UPDATE inventory_serial_scans SET active = 0 WHERE scan_id = ?",
+                (scan["scan_id"],),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "carton_serial_removed", actor,
+                barcode=barcode, device_id=device_id,
+                details=self._carton_audit_details(carton, 1, [serial]),
+                created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
+
+    def delete_serial_carton(
+        self, owner, task_id, barcode, device_id, actor, carton_id,
+    ):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            _, _, timestamp = self._serial_mutation_context(
+                connection, owner, task_id, barcode,
+            )
+            carton = self._active_carton(
+                connection, task_id, barcode, carton_id,
+            )
+            scans = connection.execute(
+                """SELECT * FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND carton_id = ?
+                     AND active = 1
+                   ORDER BY scan_id""",
+                (task_id, barcode, carton_id),
+            ).fetchall()
+            connection.execute(
+                """UPDATE inventory_serial_scans SET active = 0
+                   WHERE task_id = ? AND barcode = ? AND carton_id = ?
+                     AND active = 1""",
+                (task_id, barcode, carton_id),
+            )
+            connection.execute(
+                """UPDATE inventory_cartons
+                   SET active = 0, deleted_by = ?, deleted_device_id = ?,
+                       deleted_at = ?
+                   WHERE carton_id = ? AND task_id = ? AND barcode = ?
+                     AND active = 1""",
+                (actor, device_id, timestamp, carton_id, task_id, barcode),
+            )
+            serials = [scan["serial"] for scan in scans]
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "carton_deleted", actor,
+                barcode=barcode, device_id=device_id,
+                details=self._carton_audit_details(
+                    carton, len(serials), serials,
+                ),
+                created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
+
     def serial_reconciliation(self, owner, task_id, barcode):
         connection = self.connect()
         try:
@@ -1900,9 +2168,21 @@ class InventoryStore:
             active_scans = [self._serial_scan_dict(row) for row in connection.execute(
                 """SELECT * FROM inventory_serial_scans
                    WHERE task_id = ? AND barcode = ? AND active = 1
-                   ORDER BY scan_id""",
+                   ORDER BY scan_id DESC""",
                 (task_id, barcode),
             )]
+            cartons = [dict(row) for row in connection.execute(
+                """SELECT * FROM inventory_cartons
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                   ORDER BY carton_id DESC""",
+                (task_id, barcode),
+            )]
+            for carton in cartons:
+                carton["active"] = bool(carton["active"])
+                carton["scans"] = [
+                    row for row in active_scans
+                    if row["carton_id"] == carton["carton_id"]
+                ]
             matched_serials = {
                 row["serial"] for row in active_scans
                 if row["classification"] == "matched"
@@ -1919,6 +2199,14 @@ class InventoryStore:
                 "phase": task["phase"],
                 "version": task["version"],
                 "item": self._item_dict(item),
+                "carton_preset": self._row_dict(connection.execute(
+                    "SELECT * FROM inventory_carton_presets WHERE barcode = ?",
+                    (barcode,),
+                ).fetchone()),
+                "cartons": cartons,
+                "ungrouped": [
+                    row for row in active_scans if row["carton_id"] is None
+                ],
                 "expected": expected_rows,
                 "matched": [
                     row for row in active_scans
@@ -2433,6 +2721,17 @@ class InventoryStore:
             before_classification = None
             after_classification = None
             entry_number = None
+            carton_id = None
+            carton_code = None
+            before_preset_quantity = None
+            after_preset_quantity = None
+            confirmed_quantity = None
+            affected_count = None
+            serials = []
+            try:
+                details = json.loads(row["details"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                details = {}
             if (
                 row["event_type"].startswith("count_entry_")
                 or row["event_type"] in {
@@ -2440,10 +2739,6 @@ class InventoryStore:
                     "serial_scan_removed",
                 }
             ):
-                try:
-                    details = json.loads(row["details"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    details = {}
                 before = details.get("before") if isinstance(details, dict) else None
                 after = details.get("after") if isinstance(details, dict) else None
                 if row["event_type"].startswith("count_entry_"):
@@ -2462,6 +2757,32 @@ class InventoryStore:
                     if isinstance(after, dict):
                         after_serial = after.get("serial")
                         after_classification = after.get("classification")
+            if row["event_type"] == "carton_preset_changed" and isinstance(details, dict):
+                before_preset_quantity = details.get("before")
+                after_preset_quantity = details.get("after")
+            if row["event_type"] in {
+                "carton_created", "carton_serial_added",
+                "carton_serial_removed", "carton_deleted",
+            } and isinstance(details, dict):
+                if isinstance(details.get("carton_id"), int) and not isinstance(
+                    details.get("carton_id"), bool
+                ):
+                    carton_id = details["carton_id"]
+                if isinstance(details.get("carton_code"), str):
+                    carton_code = details["carton_code"]
+                if isinstance(details.get("confirmed_quantity"), int) and not isinstance(
+                    details.get("confirmed_quantity"), bool
+                ):
+                    confirmed_quantity = details["confirmed_quantity"]
+                if isinstance(details.get("affected_count"), int) and not isinstance(
+                    details.get("affected_count"), bool
+                ):
+                    affected_count = details["affected_count"]
+                if isinstance(details.get("serials"), list):
+                    serials = [
+                        serial for serial in details["serials"]
+                        if isinstance(serial, str)
+                    ]
             result.append({
                 "id": int(row["event_id"]),
                 "barcode": row["barcode"],
@@ -2477,6 +2798,13 @@ class InventoryStore:
                 "after_serial": after_serial,
                 "before_classification": before_classification,
                 "after_classification": after_classification,
+                "carton_id": carton_id,
+                "carton_code": carton_code,
+                "before_preset_quantity": before_preset_quantity,
+                "after_preset_quantity": after_preset_quantity,
+                "confirmed_quantity": confirmed_quantity,
+                "affected_count": affected_count,
+                "serials": serials,
             })
         return result
 
