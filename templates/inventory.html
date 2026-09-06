@@ -193,6 +193,31 @@
             <video id="inventoryCameraVideo" playsinline muted aria-label="序列号扫码相机预览"></video>
         </div>
         <p id="inventoryCameraMessage" class="inventory-camera-message" role="status" aria-live="polite"></p>
+        <details class="inventory-carton-entry">
+            <summary>整箱快捷录入</summary>
+            <div class="inventory-carton-fields">
+                <label class="inventory-count-field" for="inventoryCartonQuantity">
+                    <span>每箱数量</span>
+                    <input id="inventoryCartonQuantity" type="number" inputmode="numeric" min="1" max="999" step="1" autocomplete="off">
+                </label>
+                <button class="btn btn-secondary" id="inventoryCartonPresetSave" type="button">长期保存箱规</button>
+            </div>
+            <label class="inventory-count-field" for="inventoryCartonStartSerial">
+                <span>本箱第一个序列号（可修改）</span>
+                <input id="inventoryCartonStartSerial" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫描或输入首个产品序列号">
+            </label>
+            <div class="inventory-carton-actions">
+                <button class="btn btn-secondary" id="inventoryCartonCameraStart" type="button" disabled>相机扫首码</button>
+                <button class="btn btn-primary" id="inventoryCartonGenerate" type="button" disabled>生成本箱条码</button>
+            </div>
+            <p id="inventoryCartonMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
+            <div id="inventoryCartonPreview" class="inventory-carton-preview" aria-live="polite"></div>
+            <div class="inventory-carton-add">
+                <input id="inventoryCartonExtraSerial" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="补加一条序列号">
+                <button class="btn btn-secondary" id="inventoryCartonAddSerial" type="button">添加条码</button>
+            </div>
+            <button class="btn btn-primary inventory-carton-save" id="inventoryCartonSave" type="button" disabled>保存本箱</button>
+        </details>
         <p id="inventorySerialMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
         <div id="inventorySerialCounts" class="inventory-summary inventory-serial-counts" aria-label="序列号核对摘要"></div>
         <div id="inventorySerialDetails" class="inventory-serial-details" aria-live="polite"></div>

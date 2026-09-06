@@ -896,6 +896,22 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn(".inventory-item:not(.is-expanded) .inventory-item-full-only", style)
         self.assertIn(".inventory-item-toggle", style)
 
+    def test_inventory_serial_dialog_has_carton_controls(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for element_id in (
+            "inventoryCartonQuantity", "inventoryCartonPresetSave",
+            "inventoryCartonStartSerial", "inventoryCartonCameraStart",
+            "inventoryCartonGenerate", "inventoryCartonPreview",
+            "inventoryCartonAddSerial", "inventoryCartonSave",
+        ):
+            self.assertIn(f'id="{element_id}"', source)
+        self.assertNotIn('id="inventoryCartonCode"', source)
+        self.assertIn("function generateCartonSerials(startSerial, quantity)", script)
+        self.assertIn("function formatCartonRange(serials)", script)
+        self.assertIn("function toggleSerialGroup(key)", script)
+        self.assertIn("inventoryCameraMode === 'carton-start'", script)
+
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         self.assertIn("const requestId = ++countDialogRequestId;", script)

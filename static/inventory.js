@@ -44,9 +44,22 @@ let inventoryCameraGeneration = 0;
 let inventoryCameraActiveGeneration = 0;
 let inventoryCameraLastSerial = '';
 let inventoryCameraLastDecodedAt = 0;
+let inventoryCameraMode = 'continuous';
+let cartonPreview = [];
+let cartonPreviewQuantity = 0;
+let cartonSubmissionPending = false;
+let expandedSerialGroups = new Set();
 
 function inventoryElement(id) {
     return document.getElementById(id);
+}
+
+function inventoryOptionalElement(id) {
+    try {
+        return document.getElementById(id);
+    } catch (_error) {
+        return null;
+    }
 }
 
 function inventoryText(value, fallback = '—') {
@@ -1080,16 +1093,20 @@ function stopInventoryCamera(showStatus = true) {
     const panel = inventoryElement('inventoryCameraPanel');
     if (panel) panel.hidden = true;
     const start = inventoryElement('inventoryCameraStart');
+    const cartonStart = inventoryOptionalElement('inventoryCartonCameraStart');
     const stop = inventoryElement('inventoryCameraStop');
     if (start) start.disabled = false;
+    if (cartonStart) cartonStart.disabled = false;
     if (stop) stop.disabled = true;
     inventoryCameraLastSerial = '';
     inventoryCameraLastDecodedAt = 0;
+    inventoryCameraMode = 'continuous';
     if (showStatus) setInventoryCameraMessage('相机已停止。');
 }
 
-async function startInventoryCamera() {
+async function startInventoryCamera(mode = 'continuous') {
     stopInventoryCamera(false);
+    inventoryCameraMode = mode === 'carton-start' ? 'carton-start' : 'continuous';
     const generation = ++inventoryCameraGeneration;
     const previousStart = inventoryCameraStartPromise;
     const pending = (async () => {
@@ -1106,11 +1123,19 @@ async function startInventoryCamera() {
         }
 
         inventoryCameraActiveGeneration = generation;
-        const start = inventoryElement('inventoryCameraStart');
+        const start = inventoryElement(
+            inventoryCameraMode === 'carton-start'
+                ? 'inventoryCartonCameraStart' : 'inventoryCameraStart'
+        );
+        const otherStart = inventoryOptionalElement(
+            inventoryCameraMode === 'carton-start'
+                ? 'inventoryCameraStart' : 'inventoryCartonCameraStart'
+        );
         const stop = inventoryElement('inventoryCameraStop');
         const panel = inventoryElement('inventoryCameraPanel');
         const video = inventoryElement('inventoryCameraVideo');
         start.disabled = true;
+        if (otherStart) otherStart.disabled = true;
         stop.disabled = false;
         panel.hidden = false;
         setInventoryCameraMessage('正在启动后置相机…');
@@ -1127,6 +1152,14 @@ async function startInventoryCamera() {
                     if (serial === inventoryCameraLastSerial && decodedAt - inventoryCameraLastDecodedAt < 1500) return;
                     inventoryCameraLastSerial = serial;
                     inventoryCameraLastDecodedAt = decodedAt;
+                    if (inventoryCameraMode === 'carton-start') {
+                        const target = inventoryElement('inventoryCartonStartSerial');
+                        target.value = serial;
+                        stopInventoryCamera(false);
+                        setCartonMessage('已填入首个序列号，可修改后再生成。', 'success');
+                        target.focus();
+                        return;
+                    }
                     submitDecodedSerial(serial);
                 },
             );
@@ -1210,6 +1243,244 @@ function restoreSerialAfterFailedFinish(message) {
     input.focus();
 }
 
+function generateCartonSerials(startSerial, quantity) {
+    const start = String(startSerial || '').trim();
+    const count = Number(quantity);
+    if (!Number.isInteger(count) || count < 1 || count > 999) {
+        throw new Error('每箱数量必须是1至999之间的整数');
+    }
+    const match = start.match(/^(.*?)(\d+)$/);
+    if (!match) throw new Error('起始序列号必须以末尾数字结尾');
+    const prefix = match[1];
+    const digits = match[2];
+    const first = BigInt(digits);
+    return Array.from({length: count}, (_value, index) => {
+        const suffix = String(first + BigInt(index)).padStart(digits.length, '0');
+        return `${prefix}${suffix}`;
+    });
+}
+
+function cartonSerialParts(serial) {
+    const match = String(serial || '').trim().match(/^(.*?)(\d+)$/);
+    if (!match) return null;
+    return {prefix: match[1], digits: match[2], number: BigInt(match[2])};
+}
+
+function sortedCartonSerials(serials) {
+    return (Array.isArray(serials) ? serials : [])
+        .map((serial) => String(serial || '').trim())
+        .filter(Boolean)
+        .sort((left, right) => {
+            const a = cartonSerialParts(left);
+            const b = cartonSerialParts(right);
+            if (a && b && a.prefix === b.prefix && a.digits.length === b.digits.length) {
+                return a.number < b.number ? -1 : (a.number > b.number ? 1 : 0);
+            }
+            return left.localeCompare(right);
+        });
+}
+
+function abbreviatedCartonEnd(first, last) {
+    let common = 0;
+    while (common < first.length && common < last.length && first[common] === last[common]) {
+        common += 1;
+    }
+    return common > 1 ? last.slice(common - 1) : last;
+}
+
+function formatCartonRange(serials) {
+    const values = sortedCartonSerials(serials);
+    if (!values.length) return '空箱组（0条）';
+    if (values.length === 1) return `${values[0]}（1条）`;
+    const parts = values.map(cartonSerialParts);
+    const comparable = parts.every(Boolean)
+        && parts.every((part) => (
+            part.prefix === parts[0].prefix && part.digits.length === parts[0].digits.length
+        ));
+    const consecutive = comparable && parts.every((part, index) => (
+        part.number === parts[0].number + BigInt(index)
+    ));
+    const first = values[0];
+    const last = values[values.length - 1];
+    const suffix = consecutive ? '' : '，含不连续条码';
+    return `${first}～${abbreviatedCartonEnd(first, last)}（${values.length}条${suffix}）`;
+}
+
+function compareCartonPreview(serials, expectedRows) {
+    const expected = new Set((Array.isArray(expectedRows) ? expectedRows : []).map((row) => (
+        String(row && row.serial !== undefined ? row.serial : row || '').trim()
+    )).filter(Boolean));
+    return (Array.isArray(serials) ? serials : []).map((serial) => ({
+        serial: String(serial || '').trim(),
+        matched: expected.has(String(serial || '').trim()),
+    }));
+}
+
+function hasSuccessfulSerialCache() {
+    return Boolean(currentSerialData && currentSerialData.item
+        && currentSerialData.item.serial_synced_at);
+}
+
+function setCartonMessage(message, kind = '') {
+    const target = inventoryOptionalElement('inventoryCartonMessage');
+    if (!target) return;
+    target.textContent = message || '';
+    target.className = 'inventory-dialog-message' + (kind ? ` is-${kind}` : '');
+}
+
+function renderCartonPreview() {
+    const root = inventoryOptionalElement('inventoryCartonPreview');
+    if (!root) return;
+    root.replaceChildren();
+    const compared = compareCartonPreview(cartonPreview, currentSerialData && currentSerialData.expected);
+    compared.forEach((entry, index) => {
+        const row = inventoryNode('div', `inventory-carton-preview-row ${entry.matched ? 'is-match' : 'is-mismatch'}`);
+        const input = inventoryNode('input', 'inventory-carton-preview-input');
+        input.value = entry.serial;
+        input.setAttribute('aria-label', `本箱第 ${index + 1} 条序列号`);
+        input.addEventListener('change', () => {
+            cartonPreview[index] = input.value.trim();
+            const start = inventoryOptionalElement('inventoryCartonStartSerial');
+            if (index === 0 && start) start.value = cartonPreview[index];
+            renderCartonPreview();
+        });
+        const status = inventoryNode('span', 'inventory-carton-preview-status', entry.matched ? '账面匹配' : '账面不匹配');
+        const remove = inventoryNode('button', 'btn btn-secondary inventory-carton-preview-remove', '删除');
+        remove.type = 'button';
+        remove.addEventListener('click', () => {
+            cartonPreview.splice(index, 1);
+            renderCartonPreview();
+        });
+        row.append(input, status, remove);
+        root.append(row);
+    });
+    const save = inventoryOptionalElement('inventoryCartonSave');
+    if (save) save.disabled = cartonSubmissionPending || !cartonPreview.length;
+    if (!cartonPreview.length) {
+        root.append(inventoryNode('div', 'inventory-empty', '尚未生成本箱条码。'));
+        return;
+    }
+    const mismatchCount = compared.filter((entry) => !entry.matched).length;
+    setCartonMessage(
+        mismatchCount
+            ? `本箱 ${cartonPreview.length} 条，其中 ${mismatchCount} 条与账面未出库序列号不匹配，请立即核对。`
+            : `本箱 ${cartonPreview.length} 条全部与账面序列号匹配。`,
+        mismatchCount ? 'error' : 'success',
+    );
+}
+
+function renderCartonEntry() {
+    const preset = currentSerialData && currentSerialData.carton_preset;
+    const quantity = inventoryOptionalElement('inventoryCartonQuantity');
+    if (quantity && !quantity.value) quantity.value = preset ? preset.carton_quantity : '';
+    const enabled = serialWorkspaceEditable && hasSuccessfulSerialCache();
+    ['inventoryCartonQuantity', 'inventoryCartonPresetSave', 'inventoryCartonStartSerial',
+        'inventoryCartonCameraStart', 'inventoryCartonGenerate', 'inventoryCartonExtraSerial',
+        'inventoryCartonAddSerial'].forEach((id) => {
+        const element = inventoryOptionalElement(id);
+        if (element) element.disabled = !enabled || cartonSubmissionPending;
+    });
+    renderCartonPreview();
+}
+
+function generateCartonPreview() {
+    if (!hasSuccessfulSerialCache()) {
+        setCartonMessage('请先点击“重新获取”，成功取得账面序列号后再生成整箱条码。', 'error');
+        return;
+    }
+    try {
+        const quantity = Number(inventoryElement('inventoryCartonQuantity').value);
+        const start = inventoryElement('inventoryCartonStartSerial').value.trim();
+        cartonPreview = generateCartonSerials(start, quantity);
+        cartonPreviewQuantity = quantity;
+        renderCartonPreview();
+    } catch (error) {
+        setCartonMessage(error.message, 'error');
+    }
+}
+
+async function saveCartonPreset() {
+    if (!serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return;
+    const quantity = Number(inventoryElement('inventoryCartonQuantity').value);
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/carton-preset`,
+            {device_id: inventoryDeviceId, carton_quantity: quantity},
+        );
+        acceptInventoryMutationVersion(data);
+        if (currentSerialData) currentSerialData.carton_preset = data.preset;
+        setCartonMessage(`箱规已长期保存：每箱 ${quantity} 条。`, 'success');
+    } catch (error) {
+        setCartonMessage(error.message || '箱规保存失败，请重试。', 'error');
+    }
+}
+
+function addCartonPreviewSerial() {
+    const input = inventoryElement('inventoryCartonExtraSerial');
+    const serial = input.value.trim();
+    if (!serial) return;
+    cartonPreview.push(serial);
+    input.value = '';
+    renderCartonPreview();
+    input.focus();
+}
+
+async function submitSerialCarton() {
+    if (cartonSubmissionPending || !currentSerialBarcode || !inventoryTask || !cartonPreview.length) return;
+    if (!hasSuccessfulSerialCache()) {
+        setCartonMessage('账面序列号缓存不可用，请先点击“重新获取”。', 'error');
+        return;
+    }
+    const prepared = cartonPreview.map((serial) => String(serial || '').trim());
+    if (prepared.some((serial) => !serial) || new Set(prepared).size !== prepared.length) {
+        setCartonMessage('本箱存在空白或重复序列号，请修正后再保存。', 'error');
+        return;
+    }
+    const mismatches = compareCartonPreview(prepared, currentSerialData.expected)
+        .filter((entry) => !entry.matched);
+    if (mismatches.length && !window.confirm(
+        `有 ${mismatches.length} 条序列号与账面未出库数据不匹配。请先核对整箱；确认仍要保存吗？`
+    )) return;
+    const button = inventoryElement('inventoryCartonSave');
+    cartonSubmissionPending = true;
+    if (button) {
+        button.disabled = true;
+        button.textContent = '正在保存…';
+    }
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/cartons`,
+            {
+                device_id: inventoryDeviceId,
+                preset_quantity: cartonPreviewQuantity || prepared.length,
+                start_serial: prepared[0],
+                serials: prepared,
+            },
+        );
+        acceptInventoryMutationVersion(data);
+        cartonPreview = [];
+        cartonPreviewQuantity = 0;
+        renderSerialReconciliation(data.serial);
+        setSerialMessage(`整箱已保存：${formatCartonRange(prepared)}`, 'success');
+    } catch (error) {
+        setCartonMessage(error.message || '整箱保存失败，预览已保留，请重试。', 'error');
+    } finally {
+        cartonSubmissionPending = false;
+        if (button) button.textContent = '保存本箱';
+        renderCartonPreview();
+    }
+}
+
+function toggleSerialGroup(key) {
+    if (expandedSerialGroups.has(key)) expandedSerialGroups.delete(key);
+    else expandedSerialGroups.add(key);
+    renderSerialReconciliation(currentSerialData);
+}
+
+function resetSerialGroupState() {
+    expandedSerialGroups.clear();
+}
+
 function serialClassificationLabel(classification) {
     const labels = {
         matched: '匹配',
@@ -1223,26 +1494,108 @@ function serialClassificationLabel(classification) {
     return labels[classification] || inventoryText(classification);
 }
 
-function serialListRow(row, canDelete) {
+function serialListRow(row, canDelete, options = {}) {
     const item = inventoryNode('li', 'inventory-serial-row');
     const copy = inventoryNode('div', 'inventory-serial-copy');
+    const showLookup = options.showLookup !== false;
     copy.append(
         inventoryNode('strong', '', row.serial),
         inventoryNode('span', '', [
-            row.lookup_barcode ? `查询商品 ${row.lookup_barcode}` : '',
-            row.lookup_name ? row.lookup_name : '',
+            showLookup && row.lookup_barcode ? `查询商品 ${row.lookup_barcode}` : '',
+            showLookup && row.lookup_name ? row.lookup_name : '',
             row.warehouse ? `仓库 ${row.warehouse}` : '',
             row.shipped ? '已出库' : '',
         ].filter(Boolean).join(' · ')),
     );
     item.append(copy);
     if (canDelete) {
-        const remove = inventoryNode('button', 'btn btn-secondary inventory-serial-remove', '删除误扫');
+        const remove = inventoryNode('button', 'btn btn-secondary inventory-serial-remove', '删除');
         remove.type = 'button';
-        remove.addEventListener('click', () => deleteSerialScan(row.serial));
+        remove.addEventListener('click', () => {
+            if (typeof options.onDelete === 'function') options.onDelete(row.serial);
+            else deleteSerialScan(row.serial);
+        });
         item.append(remove);
     }
     return item;
+}
+
+function serialGroupSection(key, label, rows, options = {}) {
+    const expanded = expandedSerialGroups.has(key);
+    const section = inventoryNode('section', `inventory-serial-group${expanded ? ' is-expanded' : ''}`);
+    const toggle = inventoryNode('button', 'inventory-serial-group-toggle');
+    toggle.type = 'button';
+    if (typeof toggle.setAttribute === 'function') {
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    } else {
+        toggle.ariaExpanded = expanded ? 'true' : 'false';
+    }
+    const title = inventoryNode('strong', '', `${label} (${rows.length})`);
+    const hint = inventoryNode('span', '', expanded ? '收起' : '展开');
+    toggle.append(title, hint);
+    if (typeof toggle.addEventListener === 'function') {
+        toggle.addEventListener('click', () => toggleSerialGroup(key));
+    }
+    const list = inventoryNode('ul', 'inventory-serial-list');
+    list.hidden = !expanded;
+    if (rows.length) {
+        rows.forEach((row) => list.append(serialListRow(row, options.canDelete, options)));
+    } else {
+        list.append(inventoryNode('li', 'inventory-empty', '暂无记录'));
+    }
+    section.append(toggle, list);
+    if (expanded && typeof options.appendExpanded === 'function') {
+        options.appendExpanded(section);
+    }
+    return section;
+}
+
+function cartonMutation(path, method, body, successMessage) {
+    if (!serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask) {
+        return Promise.resolve(null);
+    }
+    const taskId = inventoryTask.task_id;
+    const barcode = currentSerialBarcode;
+    return queueSerialOperation(async (requestId, generation) => {
+        try {
+            const url = `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/${path}`;
+            const data = method === 'DELETE'
+                ? await inventoryDelete(url, {device_id: inventoryDeviceId, ...(body || {})})
+                : await inventoryPost(url, {device_id: inventoryDeviceId, ...(body || {})});
+            acceptInventoryMutationVersion(data);
+            if (!renderSerialOperation(data.serial, requestId, generation)) return null;
+            setSerialMessage(successMessage, 'success');
+            return data.serial;
+        } catch (error) {
+            if (serialOperationIsOpen(requestId)) {
+                setSerialMessage(error.message || '箱组修改失败，请重试。', 'error');
+            }
+            return null;
+        }
+    });
+}
+
+async function addSerialToCarton(cartonId, input) {
+    const serial = String(input && input.value || '').trim();
+    if (!serial) return;
+    const result = await cartonMutation(
+        `cartons/${cartonId}/serials`, 'POST', {serial}, `${serial} 已加入本箱。`
+    );
+    if (result) input.value = '';
+    return result;
+}
+
+function removeSerialFromCarton(cartonId, serial) {
+    return cartonMutation(
+        `cartons/${cartonId}/serials/${encodeURIComponent(serial)}`,
+        'DELETE', null, `${serial} 已从本箱删除。`,
+    );
+}
+
+function deleteSerialCarton(cartonId, label) {
+    if (!window.confirm(`确认删除整组 ${label} 吗？组内条码将全部移除并记录修改历史。`)) return;
+    expandedSerialGroups.delete(`carton:${cartonId}`);
+    return cartonMutation(`cartons/${cartonId}`, 'DELETE', null, `整组 ${label} 已删除。`);
 }
 
 function renderSerialReconciliation(value) {
@@ -1257,6 +1610,7 @@ function renderSerialReconciliation(value) {
         inventoryNode('div', 'inventory-item-barcode', currentSerialData.barcode || item.barcode),
         inventoryNode('div', '', inventoryDetailText(item)),
     );
+    renderCartonEntry();
 
     const groups = [
         ['matched', '匹配', true],
@@ -1277,15 +1631,44 @@ function renderSerialReconciliation(value) {
 
     const details = inventoryElement('inventorySerialDetails');
     details.replaceChildren();
+    const cartons = Array.isArray(currentSerialData.cartons) ? currentSerialData.cartons : [];
+    cartons.forEach((carton) => {
+        const rows = Array.isArray(carton.scans) ? carton.scans : [];
+        const key = `carton:${carton.carton_id}`;
+        const mismatchCount = rows.filter((row) => row.classification !== 'matched').length;
+        const label = `${formatCartonRange(rows.map((row) => row.serial))}${
+            mismatchCount ? ` · ${mismatchCount}条不匹配` : ''
+        }`;
+        details.append(serialGroupSection(key, label, rows, {
+            canDelete: true,
+            showLookup: false,
+            onDelete: (serial) => removeSerialFromCarton(carton.carton_id, serial),
+            appendExpanded: (section) => {
+                const correction = inventoryNode('div', 'inventory-carton-group-correction');
+                const input = inventoryNode('input', 'inventory-carton-group-input');
+                input.placeholder = '补加一条序列号';
+                input.setAttribute('aria-label', `向 ${label} 补加序列号`);
+                const add = inventoryNode('button', 'btn btn-secondary', '添加条码');
+                add.type = 'button';
+                add.addEventListener('click', () => addSerialToCarton(carton.carton_id, input));
+                input.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') addSerialToCarton(carton.carton_id, input);
+                });
+                const remove = inventoryNode('button', 'btn btn-secondary inventory-carton-delete', '删除整组');
+                remove.type = 'button';
+                remove.addEventListener('click', () => deleteSerialCarton(carton.carton_id, label));
+                correction.append(input, add, remove);
+                section.append(correction);
+            },
+        }));
+    });
     groups.forEach(([key, label, canDelete]) => {
-        const rows = Array.isArray(currentSerialData[key]) ? currentSerialData[key] : [];
-        const section = inventoryNode('section', 'inventory-serial-group');
-        const heading = inventoryNode('h3', '', `${label} (${rows.length})`);
-        const list = inventoryNode('ul', 'inventory-serial-list');
-        if (rows.length) rows.forEach((row) => list.append(serialListRow(row, canDelete)));
-        else list.append(inventoryNode('li', 'inventory-empty', '暂无记录'));
-        section.append(heading, list);
-        details.append(section);
+        const rows = (Array.isArray(currentSerialData[key]) ? currentSerialData[key] : [])
+            .filter((row) => row.carton_id === null || row.carton_id === undefined);
+        details.append(serialGroupSection(`classification:${key}`, label, rows, {
+            canDelete,
+            showLookup: key !== 'matched',
+        }));
     });
 }
 
@@ -1297,6 +1680,10 @@ function closeSerialWorkspace() {
     serialWorkspaceEditable = false;
     currentSerialBarcode = '';
     currentSerialData = null;
+    cartonPreview = [];
+    cartonPreviewQuantity = 0;
+    cartonSubmissionPending = false;
+    resetSerialGroupState();
     const dialog = inventoryElement('inventorySerialWorkspace');
     if (dialog.open) dialog.close();
 }
@@ -1311,6 +1698,10 @@ async function openSerialItem(barcode) {
     const dialog = inventoryElement('inventorySerialWorkspace');
     currentSerialBarcode = barcode;
     currentSerialData = null;
+    cartonPreview = [];
+    cartonPreviewQuantity = 0;
+    resetSerialGroupState();
+    setCartonMessage('');
     serialWorkspaceOpen = true;
     serialWorkspaceEditable = false;
     inventoryElement('inventorySerialInput').value = '';
@@ -1318,6 +1709,11 @@ async function openSerialItem(barcode) {
     inventoryElement('inventorySerialRefresh').disabled = true;
     inventoryElement('inventorySerialFinish').disabled = true;
     inventoryElement('inventoryCameraStart').disabled = true;
+    ['inventoryCartonStartSerial', 'inventoryCartonQuantity', 'inventoryCartonExtraSerial']
+        .forEach((id) => {
+            const element = inventoryOptionalElement(id);
+            if (element) element.value = '';
+        });
     renderSerialReconciliation({barcode, item, counts: {}});
     setSerialMessage('正在读取已缓存的 GYJ 账面序列号…');
     if (!dialog.open) dialog.showModal();
@@ -1328,8 +1724,8 @@ async function openSerialItem(barcode) {
         );
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
         acceptInventoryMutationVersion(data);
-        renderSerialReconciliation(data.serial);
         serialWorkspaceEditable = true;
+        renderSerialReconciliation(data.serial);
         const input = inventoryElement('inventorySerialInput');
         input.disabled = false;
         inventoryElement('inventorySerialRefresh').disabled = false;
@@ -2207,6 +2603,21 @@ function initializeInventoryPage() {
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
     inventoryElement('inventoryCameraStart').addEventListener('click', startInventoryCamera);
     inventoryElement('inventoryCameraStop').addEventListener('click', stopInventoryCamera);
+    const cartonBindings = [
+        ['inventoryCartonPresetSave', 'click', saveCartonPreset],
+        ['inventoryCartonCameraStart', 'click', () => startInventoryCamera('carton-start')],
+        ['inventoryCartonGenerate', 'click', generateCartonPreview],
+        ['inventoryCartonAddSerial', 'click', addCartonPreviewSerial],
+        ['inventoryCartonSave', 'click', submitSerialCarton],
+    ];
+    cartonBindings.forEach(([id, eventName, handler]) => {
+        const element = inventoryOptionalElement(id);
+        if (element) element.addEventListener(eventName, handler);
+    });
+    const cartonExtra = inventoryOptionalElement('inventoryCartonExtraSerial');
+    if (cartonExtra) cartonExtra.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') addCartonPreviewSerial();
+    });
     inventoryElement('inventorySerialRefresh').addEventListener('click', manualRefreshSerialItem);
     inventoryElement('inventorySerialFinish').addEventListener('click', finishSerialItem);
     inventoryElement('inventorySerialClose').addEventListener('click', closeSerialWorkspace);

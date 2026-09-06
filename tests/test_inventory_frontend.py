@@ -141,6 +141,107 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_carton_generation_preserves_suffix_width(self):
+        self.run_node(
+            r"""
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            assert.deepEqual(Array.from(vm.runInContext("generateCartonSerials('REG202609160521', 3)", context)), [
+                'REG202609160521', 'REG202609160522', 'REG202609160523',
+            ]);
+            assert.deepEqual(Array.from(vm.runInContext("generateCartonSerials('SN0099', 3)", context)), [
+                'SN0099', 'SN0100', 'SN0101',
+            ]);
+            assert.throws(
+                () => vm.runInContext("generateCartonSerials('NO-SUFFIX', 20)", context),
+                /末尾数字/,
+            );
+            assert.equal(
+                vm.runInContext("formatCartonRange(['1422608126281','1422608126300'])", context),
+                '1422608126281～6300（2条，含不连续条码）',
+            );
+            assert.equal(
+                vm.runInContext("formatCartonRange(generateCartonSerials('1422608126281', 20))", context),
+                '1422608126281～6300（20条）',
+            );
+            """
+        )
+
+    def test_carton_preview_submits_edited_serials_once(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            let confirmations = 0;
+            const elements = {
+                inventoryCartonSave: {disabled: false, textContent: '保存本箱'},
+                inventorySerialMessage: {textContent: '', className: ''},
+            };
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return elements[id] || null; },
+                },
+                window: {confirm() { confirmations += 1; return confirmations > 1; }},
+                fetch: async (url, options) => {
+                    requests.push({url, body: JSON.parse(options.body)});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, version: 3, serial: {expected: [], cartons: []},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', version: 2};
+                currentSerialBarcode = 'B1';
+                currentSerialData = {item: {serial_synced_at: 'now'}, expected: [{serial: 'S001'}]};
+                cartonPreview = ['S001', 'S999'];
+                cartonPreviewQuantity = 2;
+                renderCartonPreview = () => {};
+                renderSerialReconciliation = value => { currentSerialData = value; };
+            `, context);
+            (async () => {
+                await vm.runInContext('submitSerialCarton()', context);
+                assert.equal(requests.length, 0);
+                assert.deepEqual(Array.from(vm.runInContext('cartonPreview', context)), ['S001', 'S999']);
+                await vm.runInContext('submitSerialCarton()', context);
+                assert.equal(requests.length, 1);
+                assert.deepEqual(requests[0].body, {
+                    device_id: '', preset_quantity: 2,
+                    start_serial: 'S001', serials: ['S001', 'S999'],
+                });
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_serial_groups_collapse_and_preserve_expansion(self):
+        self.run_node(
+            r"""
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext('currentSerialData = {}; renderSerialReconciliation = () => {}', context);
+            assert.deepEqual(Array.from(vm.runInContext('expandedSerialGroups', context)), []);
+            vm.runInContext("toggleSerialGroup('classification:matched')", context);
+            assert.deepEqual(Array.from(vm.runInContext('expandedSerialGroups', context)), ['classification:matched']);
+            vm.runInContext('renderSerialReconciliation(currentSerialData)', context);
+            assert.deepEqual(Array.from(vm.runInContext('expandedSerialGroups', context)), ['classification:matched']);
+            vm.runInContext('resetSerialGroupState()', context);
+            assert.deepEqual(Array.from(vm.runInContext('expandedSerialGroups', context)), []);
+            """
+        )
+
     def test_complete_task_warns_once_then_confirms_unverified_serials(self):
         self.run_node(
             r"""
@@ -1812,6 +1913,56 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(stoppedTracks.filter(track => track === secondTrack).length, 1);
                 assert.equal(element('inventoryCameraStart').disabled, false);
                 assert.equal(element('inventoryCameraStop').disabled, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_carton_camera_fills_editable_start_without_saving(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = true; this.textContent = '';
+                    this.className = ''; this.value = ''; this.srcObject = null; this.focused = 0;
+                }
+                focus() { this.focused += 1; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            let decoderCallback = null;
+            let stopCount = 0;
+            let fetchCount = 0;
+            class FakeReader {
+                async decodeFromConstraints(_constraints, video, callback) {
+                    decoderCallback = callback;
+                    video.srcObject = {getTracks() { return [{stop() {}}]; }};
+                    return {stop() { stopCount += 1; }};
+                }
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                fetch: async () => { fetchCount += 1; throw new Error('must not save'); },
+                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            context.window.isSecureContext = true;
+            context.window.location = {hostname: 'inventory.example.test'};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext('serialWorkspaceOpen = true; serialWorkspaceEditable = true', context);
+            (async () => {
+                await vm.runInContext("startInventoryCamera('carton-start')", context);
+                decoderCallback({getText() { return ' 1422608126281 '; }}, null);
+                assert.equal(element('inventoryCartonStartSerial').value, '1422608126281');
+                assert.equal(element('inventoryCartonStartSerial').focused, 1);
+                assert.equal(stopCount, 1);
+                assert.equal(fetchCount, 0);
+                assert.equal(vm.runInContext('cartonPreview.length', context), 0);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
