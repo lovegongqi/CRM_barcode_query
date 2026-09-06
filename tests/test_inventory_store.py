@@ -1,4 +1,5 @@
 import os
+import inspect
 import json
 import sqlite3
 import tempfile
@@ -264,6 +265,21 @@ class InventoryStoreTests(unittest.TestCase):
             "inventory_carton_presets", "inventory_cartons",
         }.issubset(names))
 
+    def test_carton_groups_do_not_have_a_business_carton_code(self):
+        store = InventoryStore(self.db_path)
+        store.initialize()
+        with sqlite3.connect(self.db_path) as connection:
+            columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(inventory_cartons)"
+                )
+            }
+        self.assertNotIn("carton_code", columns)
+        self.assertNotIn(
+            "carton_code",
+            inspect.signature(store.create_serial_carton).parameters,
+        )
+
     def test_initialize_adds_carton_link_to_serial_scans(self):
         with sqlite3.connect(self.db_path) as connection:
             connection.execute(
@@ -348,7 +364,7 @@ class InventoryStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryConflict, "S001"):
             store.create_serial_carton(
                 "admin", task["task_id"], "B2", "d2", "乙",
-                "BOX-1", 2, "S001", ["S001", "S002"],
+                2, "S001", ["S001", "S002"],
             )
 
         with store.connect() as connection:
@@ -375,7 +391,7 @@ class InventoryStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryConflict, "账面序列号"):
             store.create_serial_carton(
                 "admin", task_id, "B2", "d1", "甲",
-                "BOX-0", 1, "S000", ["S000"],
+                1, "S000", ["S000"],
             )
         store.replace_expected_serials(
             "admin", task_id, "B2", "d1", "甲", [
@@ -395,7 +411,7 @@ class InventoryStoreTests(unittest.TestCase):
 
         created = store.create_serial_carton(
             "admin", task_id, "B2", "d2", "乙",
-            "BOX-1", 2, "S001", ["S001", "S002"],
+            2, "S001", ["S001", "S002"],
         )
         carton_id = created["cartons"][0]["carton_id"]
         self.assertEqual(created["carton_preset"]["carton_quantity"], 2)
@@ -450,12 +466,6 @@ class InventoryStoreTests(unittest.TestCase):
             [row["serial"] for row in deleted["ungrouped"]],
             ["LEGACY-2", "LEGACY-1"],
         )
-        with self.assertRaisesRegex(InventoryConflict, "BOX-1"):
-            store.create_serial_carton(
-                "admin", task_id, "B2", "d7", "庚",
-                "BOX-1", 1, "S004", ["S004"],
-            )
-
         audit_rows = [
             row for row in store.list_audit_events("admin", task_id, barcode="B2")
             if row["event_type"].startswith("carton_")
@@ -473,7 +483,8 @@ class InventoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(audit_rows[0]["before_preset_quantity"], None)
         self.assertEqual(audit_rows[0]["after_preset_quantity"], 2)
-        self.assertEqual(audit_rows[1]["carton_code"], "BOX-1")
+        self.assertEqual(audit_rows[1]["start_serial"], "S001")
+        self.assertEqual(audit_rows[1]["end_serial"], "S002")
         self.assertEqual(audit_rows[1]["confirmed_quantity"], 2)
         self.assertEqual(audit_rows[1]["affected_count"], 2)
         self.assertEqual(audit_rows[1]["serials"], ["S001", "S002"])
@@ -1333,7 +1344,7 @@ class InventoryStoreTests(unittest.TestCase):
             "id", "barcode", "event_type", "event_label", "entry_number", "actor",
             "device_id", "created_at", "before_quantity", "after_quantity",
             "before_serial", "after_serial", "before_classification",
-            "after_classification", "carton_id", "carton_code",
+            "after_classification", "carton_id", "start_serial", "end_serial",
             "before_preset_quantity", "after_preset_quantity",
             "confirmed_quantity", "affected_count", "serials",
         })

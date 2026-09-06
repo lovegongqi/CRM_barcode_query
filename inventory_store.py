@@ -261,7 +261,6 @@ class InventoryStore:
                     carton_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_id TEXT NOT NULL,
                     barcode TEXT NOT NULL,
-                    carton_code TEXT NOT NULL,
                     preset_quantity INTEGER NOT NULL,
                     confirmed_quantity INTEGER NOT NULL,
                     start_serial TEXT NOT NULL,
@@ -272,7 +271,6 @@ class InventoryStore:
                     deleted_by TEXT,
                     deleted_device_id TEXT,
                     deleted_at TEXT,
-                    UNIQUE (task_id, carton_code),
                     FOREIGN KEY (task_id, barcode)
                         REFERENCES inventory_items(task_id, barcode) ON DELETE CASCADE
                 );
@@ -1665,12 +1663,14 @@ class InventoryStore:
 
     @staticmethod
     def _carton_audit_details(carton, affected_count, serials):
+        serials = list(serials)
         return json.dumps({
             "carton_id": int(carton["carton_id"]),
-            "carton_code": carton["carton_code"],
             "confirmed_quantity": int(carton["confirmed_quantity"]),
             "affected_count": int(affected_count),
-            "serials": list(serials),
+            "start_serial": serials[0] if serials else None,
+            "end_serial": serials[-1] if serials else None,
+            "serials": serials,
         }, ensure_ascii=False, sort_keys=True)
 
     def release_item_lock(
@@ -1944,13 +1944,12 @@ class InventoryStore:
         return result
 
     def create_serial_carton(
-        self, owner, task_id, barcode, device_id, actor, carton_code,
-        preset_quantity, start_serial, serials,
+        self, owner, task_id, barcode, device_id, actor, preset_quantity,
+        start_serial, serials,
     ):
-        carton_code = str(carton_code or "").strip()
         start_serial = str(start_serial or "").strip()
-        if not carton_code or not start_serial:
-            raise ValueError("箱号和起始序列号不能为空")
+        if not start_serial:
+            raise ValueError("起始序列号不能为空")
         if (
             isinstance(preset_quantity, bool)
             or not isinstance(preset_quantity, int)
@@ -1973,24 +1972,18 @@ class InventoryStore:
             )
             if not item["serial_synced_at"]:
                 raise InventoryConflict("请先获取账面序列号后再录入整箱")
-            existing_carton = connection.execute(
-                "SELECT 1 FROM inventory_cartons WHERE task_id = ? AND carton_code = ?",
-                (task_id, carton_code),
-            ).fetchone()
-            if existing_carton is not None:
-                raise InventoryConflict(f"任务内箱号已存在：{carton_code}")
             for serial in prepared:
                 if self._active_task_serial_scan(connection, task_id, serial) is not None:
                     raise InventoryConflict(f"任务内序列号重复：{serial}")
             cursor = connection.execute(
                 """INSERT INTO inventory_cartons
-                   (task_id, barcode, carton_code, preset_quantity,
-                    confirmed_quantity, start_serial, created_by,
+                   (task_id, barcode, preset_quantity, confirmed_quantity,
+                    start_serial, created_by,
                     created_device_id, created_at, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)""",
                 (
-                    task_id, barcode, carton_code, preset_quantity,
-                    len(prepared), start_serial, actor, device_id, timestamp,
+                    task_id, barcode, preset_quantity, len(prepared),
+                    start_serial, actor, device_id, timestamp,
                 ),
             )
             carton_id = cursor.lastrowid
@@ -2722,7 +2715,8 @@ class InventoryStore:
             after_classification = None
             entry_number = None
             carton_id = None
-            carton_code = None
+            start_serial = None
+            end_serial = None
             before_preset_quantity = None
             after_preset_quantity = None
             confirmed_quantity = None
@@ -2768,8 +2762,10 @@ class InventoryStore:
                     details.get("carton_id"), bool
                 ):
                     carton_id = details["carton_id"]
-                if isinstance(details.get("carton_code"), str):
-                    carton_code = details["carton_code"]
+                if isinstance(details.get("start_serial"), str):
+                    start_serial = details["start_serial"]
+                if isinstance(details.get("end_serial"), str):
+                    end_serial = details["end_serial"]
                 if isinstance(details.get("confirmed_quantity"), int) and not isinstance(
                     details.get("confirmed_quantity"), bool
                 ):
@@ -2799,7 +2795,8 @@ class InventoryStore:
                 "before_classification": before_classification,
                 "after_classification": after_classification,
                 "carton_id": carton_id,
-                "carton_code": carton_code,
+                "start_serial": start_serial,
+                "end_serial": end_serial,
                 "before_preset_quantity": before_preset_quantity,
                 "after_preset_quantity": after_preset_quantity,
                 "confirmed_quantity": confirmed_quantity,
