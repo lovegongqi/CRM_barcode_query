@@ -88,6 +88,59 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_product_card_expansion_survives_poll_render(self):
+        self.run_node(
+            r"""
+            function makeNode(tag = 'div') {
+                return {
+                    tag, className: '', textContent: '', value: '', disabled: false,
+                    dataset: {}, children: [], attributes: {}, listeners: {},
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    setAttribute(name, value) { this.attributes[name] = String(value); },
+                    addEventListener(name, callback) { this.listeners[name] = callback; },
+                };
+            }
+            const root = makeNode('div');
+            const filter = {value: ''};
+            const search = {value: ''};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    querySelector() { return null; },
+                    getElementById(id) {
+                        if (id === 'inventoryItems') return root;
+                        if (id === 'inventoryFilters') return filter;
+                        if (id === 'inventorySearch') return search;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            const items = [
+                {barcode: 'A', name: '甲', state: 'matched', book_qty: 1, actual_qty: 1, diff_qty: 0},
+                {barcode: 'B', name: '乙', state: 'serial_pending', has_serial: true, book_qty: 2, actual_qty: 1, diff_qty: -1},
+            ];
+            vm.runInContext(`inventoryTask = {items: ${JSON.stringify(items)}}`, context);
+            vm.runInContext("inventoryExpandedBarcodes.add('A'); renderInventoryItems(inventoryTask.items)", context);
+            assert(root.children[0].className.includes('is-expanded'));
+            assert.equal(root.children[0].children[0].children.at(-1).attributes['aria-expanded'], 'true');
+
+            vm.runInContext('renderInventoryItems(inventoryTask.items)', context);
+            assert(root.children[0].className.includes('is-expanded'));
+
+            filter.value = 'variance';
+            vm.runInContext('renderInventoryItems(inventoryTask.items)', context);
+            assert.deepEqual(Array.from(vm.runInContext('inventoryExpandedBarcodes', context)), []);
+            assert.equal(root.children.length, 1);
+            const actionRow = root.children[0].children.at(-1);
+            assert(actionRow.children.some(node => node.className.includes('inventory-item-primary-action') && node.textContent === '核对序列号'));
+            """
+        )
+
     def test_complete_task_warns_once_then_confirms_unverified_serials(self):
         self.run_node(
             r"""

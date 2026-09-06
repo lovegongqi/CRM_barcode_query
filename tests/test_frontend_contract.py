@@ -886,6 +886,16 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("setCountReadOnly", script)
         self.assertNotIn("sendInventoryHeartbeat", script)
 
+    def test_inventory_mobile_product_cards_are_collapsible(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        style = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertIn("let inventoryExpandedBarcodes = new Set();", script)
+        self.assertIn("function toggleInventoryItemDetails(barcode)", script)
+        self.assertIn("inventory-item-toggle", script)
+        self.assertIn("inventory-item-primary-action", script)
+        self.assertIn(".inventory-item:not(.is-expanded) .inventory-item-full-only", style)
+        self.assertIn(".inventory-item-toggle", style)
+
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         self.assertIn("const requestId = ++countDialogRequestId;", script)

@@ -10,6 +10,7 @@ let inventoryQueryGeneration = 0;
 let inventoryPollTimer = null;
 let inventorySearchTimer = null;
 let inventorySelectedCategory = '';
+let inventoryExpandedBarcodes = new Set();
 let currentCountItem = null;
 let countDialogEditable = false;
 let countMutationPending = false;
@@ -372,10 +373,21 @@ function replaceInventoryItem(item) {
     else inventoryTask.items.push(item);
 }
 
+function toggleInventoryItemDetails(barcode) {
+    const key = inventoryText(barcode, '');
+    if (inventoryExpandedBarcodes.has(key)) inventoryExpandedBarcodes.delete(key);
+    else inventoryExpandedBarcodes.add(key);
+    renderInventoryItems((inventoryTask && inventoryTask.items) || []);
+}
+
 function renderInventoryItems(items) {
     const root = inventoryElement('inventoryItems');
     root.replaceChildren();
     const visible = inventoryVisibleItems(Array.isArray(items) ? items : []);
+    const visibleBarcodes = new Set(visible.map((item) => inventoryText(item.barcode, '')));
+    Array.from(inventoryExpandedBarcodes).forEach((barcode) => {
+        if (!visibleBarcodes.has(barcode)) inventoryExpandedBarcodes.delete(barcode);
+    });
     if (!visible.length) {
         const query = inventoryElement('inventorySearch').value.trim();
         root.append(inventoryNode('div', 'inventory-empty', query ? '没有找到对应商品，请核对条码或名称。' : '当前范围内没有需要显示的商品。'));
@@ -383,8 +395,10 @@ function renderInventoryItems(items) {
     }
     visible.forEach((item) => {
         const completed = inventoryIsCompleted(item);
-        const row = inventoryNode('article', 'inventory-item');
-        row.dataset.barcode = inventoryText(item.barcode, '');
+        const barcode = inventoryText(item.barcode, '');
+        const expanded = inventoryExpandedBarcodes.has(barcode);
+        const row = inventoryNode('article', `inventory-item${expanded ? ' is-expanded' : ''}`);
+        row.dataset.barcode = barcode;
         row.setAttribute('aria-label', `${inventoryText(item.name, '未命名商品')}，${inventoryStateLabel(item)}`);
 
         const top = inventoryNode('div', 'inventory-item-top');
@@ -394,11 +408,19 @@ function renderInventoryItems(items) {
             inventoryNode('strong', 'inventory-item-name', item.name),
         );
         const serialBadge = inventoryNode(
-            'span', `inventory-serial-badge${item.has_serial ? '' : ' is-off'}`,
+            'span', `inventory-serial-badge inventory-item-full-only${item.has_serial ? '' : ' is-off'}`,
             item.data_error ? '序列号资料未知' : (item.has_serial ? '序列号商品' : '无序列号'),
         );
         product.append(serialBadge);
-        top.append(product, inventoryNode('span', 'inventory-state-badge', inventoryStateLabel(item)));
+        const stateBadge = inventoryNode('span', 'inventory-state-badge', inventoryStateLabel(item));
+        const toggle = inventoryNode(
+            'button', 'btn btn-secondary inventory-item-toggle', expanded ? '收起' : '展开'
+        );
+        toggle.type = 'button';
+        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        toggle.setAttribute('aria-label', `${expanded ? '收起' : '展开'} ${inventoryText(item.name, barcode)} 详情`);
+        toggle.addEventListener('click', () => toggleInventoryItemDetails(barcode));
+        top.append(product, stateBadge, toggle);
 
         const metrics = inventoryNode('div', 'inventory-item-metrics');
         const direction = decimalDirection(item.diff_qty);
@@ -408,21 +430,24 @@ function renderInventoryItems(items) {
             inventoryMetric('差异', item.diff_qty, direction > 0 ? 'is-positive' : (direction < 0 ? 'is-negative' : '')),
         );
 
-        const foot = inventoryNode('div', 'inventory-item-foot');
+        const foot = inventoryNode('div', 'inventory-item-foot inventory-item-full-only');
         foot.append(
             inventoryNode('span', '', completed ? '可继续追加或修改分次数量' : '尚未记录实盘数量'),
             inventoryNode('span', '', `更新时间：${inventoryText(item.updated_at)}`),
         );
         const actions = inventoryNode('div', 'inventory-item-actions');
-        const count = inventoryNode(
-            'button', 'btn btn-secondary', completed ? '修改数量' : '盘点数量'
-        );
+        const countClass = item.state === 'serial_pending'
+            ? 'btn btn-secondary inventory-item-secondary-action inventory-item-full-only'
+            : 'btn btn-secondary inventory-item-primary-action';
+        const count = inventoryNode('button', countClass, completed ? '修改数量' : '盘点数量');
         count.type = 'button';
         count.disabled = Boolean(item.data_error);
         count.addEventListener('click', () => openCountItem(item.barcode));
         actions.append(count);
         if (item.state === 'serial_pending') {
-            const serial = inventoryNode('button', 'btn btn-primary', '核对序列号');
+            const serial = inventoryNode(
+                'button', 'btn btn-primary inventory-item-primary-action', '核对序列号'
+            );
             serial.type = 'button';
             serial.addEventListener('click', () => openSerialItem(item.barcode));
             actions.append(serial);
@@ -430,7 +455,7 @@ function renderInventoryItems(items) {
         row.append(
             top,
             inventoryNode(
-                'p', 'inventory-item-details',
+                'p', 'inventory-item-details inventory-item-full-only',
                 item.data_error
                     ? `资料异常，不可盘：${item.data_error}`
                     : inventoryDetailText(item),
