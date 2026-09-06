@@ -5,6 +5,10 @@ body[data-aurora-page="inventory"] .status-bar {
     justify-content: space-between;
 }
 
+body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
+    margin: 0 0 0 auto;
+}
+
 .inventory-shell {
     margin-top: 16px;
 }
@@ -88,6 +92,8 @@ body[data-aurora-page="inventory"] .status-bar {
     font-size: 13px;
 }
 
+.inventory-notice:empty { display: none; }
+
 .inventory-notice.is-error,
 .inventory-dialog-message.is-error {
     color: var(--aurora-red);
@@ -166,6 +172,8 @@ body[data-aurora-page="inventory"] .status-bar {
     display: grid;
     gap: 10px;
 }
+
+.inventory-scroll-region { min-height: 0; }
 
 .inventory-serial-queue {
     margin-top: 20px;
@@ -845,10 +853,83 @@ article.inventory-item { cursor: default; }
 }
 
 @media (max-width: 720px) {
-    body[data-aurora-page="inventory"] .container { padding-inline: 12px; }
-    .inventory-current { padding: 16px 12px; border-radius: 16px; }
-    .inventory-section-head { align-items: flex-start; }
-    .inventory-section-head .btn { min-height: 44px; }
+    body[data-aurora-page="inventory"] {
+        height: 100dvh;
+        overflow: hidden;
+    }
+    body[data-aurora-page="inventory"] .container {
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: calc(100dvh - 84px - env(safe-area-inset-bottom));
+        min-height: 0 !important;
+        padding: 8px 8px 0 !important;
+        overflow: hidden;
+    }
+    body[data-aurora-page="inventory"] .header {
+        flex: 0 0 auto;
+        margin-bottom: 6px !important;
+    }
+    body[data-aurora-page="inventory"] .status-bar {
+        display: grid;
+        flex: 0 0 auto;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px 8px;
+        height: auto !important;
+        min-height: 0;
+        max-height: none !important;
+        padding: 6px 8px !important;
+        margin-bottom: 6px !important;
+    }
+    body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
+        display: grid;
+        grid-column: 1 / -1;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 5px;
+        width: 100%;
+        margin: 0;
+        overflow: visible;
+    }
+    body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tab {
+        min-height: 32px;
+        padding: 5px 6px;
+        border-radius: 9px;
+        font-size: 11px;
+    }
+    .inventory-shell {
+        flex: 1 1 auto;
+        min-height: 0;
+        margin-top: 0;
+        overflow: hidden;
+    }
+    .inventory-current:not([hidden]) {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+        min-height: 0;
+        padding: 10px 10px 8px;
+        border-radius: 16px;
+    }
+    .inventory-section-head { flex: 0 0 auto; align-items: center; gap: 7px; }
+    .inventory-section-head h2 { font-size: 20px; line-height: 1.1; }
+    .inventory-section-head .inventory-eyebrow { display: none; }
+    .inventory-section-head .muted {
+        margin-top: 3px;
+        font-size: 10.5px;
+        line-height: 1.25;
+    }
+    .inventory-section-head .btn { min-height: 34px; padding: 6px 9px; font-size: 11px; }
+    .inventory-task-actions { gap: 4px; }
+    .inventory-task-actions .btn[hidden] { display: none !important; }
+    .inventory-scroll-region,
+    .inventory-history,
+    .inventory-differences {
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-gutter: stable;
+    }
     .inventory-summary {
         grid-template-columns: repeat(8, minmax(0, 1fr));
         gap: 3px;

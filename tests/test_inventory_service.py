@@ -613,6 +613,38 @@ class InventoryServiceTests(unittest.TestCase):
         ])
         self.assertEqual(completion_events, 2)
 
+    def test_completed_serial_item_can_be_opened_again_from_cached_data(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
+        )
+        self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+
+        reopened = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+
+        self.assertEqual(reopened["item"]["state"], "serial_pending")
+        self.assertTrue(reopened["skipped"])
+        self.assertEqual([row["serial"] for row in reopened["matched"]], ["B-1"])
+        self.assertEqual(self.worker.serial_reads, ["B2"])
+        with sqlite3.connect(self.db_path) as connection:
+            audit = connection.execute(
+                "SELECT actor, device_id FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'serial_item_reopened'",
+                (task["task_id"],),
+            ).fetchone()
+        self.assertEqual(audit, ("乙", "device-b"))
+
     def test_unmatched_scan_is_saved_without_gyj_lookup(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
@@ -920,6 +952,32 @@ class InventoryServiceTests(unittest.TestCase):
              for row in self.store.list_discrepancies("admin", "open")},
             {("B2", "product_quantity"), ("B2", "serial_unverified")},
         )
+
+    def test_complete_task_auto_finishes_serial_item_with_recorded_scan(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
+        )
+
+        completed = self.service.complete_task(
+            "admin", task["task_id"], "管理员"
+        )
+
+        self.assertTrue(completed["completed"])
+        self.assertEqual(completed["unverified_serial_items"], 0)
+        item = next(
+            row for row in self.store.get_task_snapshot("admin", task["task_id"])["items"]
+            if row["barcode"] == "B2"
+        )
+        self.assertEqual(item["state"], "serial_complete")
+        self.assertEqual(item["completed_actual_qty"], "1")
 
     def test_completion_records_unmatched_serials_as_unknown(self):
         task = self.create_serial_task()

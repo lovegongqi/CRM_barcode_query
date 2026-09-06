@@ -12,6 +12,94 @@ STYLE = ROOT / "static" / "inventory.css"
 
 
 class InventoryFrontendBehaviorTests(unittest.TestCase):
+    def test_workspace_tabs_live_inside_account_status_bar(self):
+        template = (ROOT / "templates" / "inventory.html").read_text(encoding="utf-8")
+        status_start = template.index('<div class="status-bar wrap aurora-account-status">')
+        status_end = template.index("</div>\n\n    <main", status_start)
+        status_markup = template[status_start:status_end]
+        self.assertIn('class="inventory-workspace-tabs"', status_markup)
+        self.assertNotIn('class="inventory-workspace-tabs"', template[status_end:])
+
+    def test_mobile_current_panel_keeps_controls_fixed_and_only_items_scroll(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                cards = "".join(
+                    f'<article class="inventory-item">商品 {index}</article>'
+                    for index in range(30)
+                )
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <style>
+                    :root{{--aurora-line:#345;--aurora-shadow:none;--aurora-muted:#9ab;
+                          --aurora-text:#fff;--aurora-cyan:#5ef;--aurora-control-bg:#071322}}
+                    *{{box-sizing:border-box}} body{{margin:0}}
+                    .page-nav{{position:fixed;left:8px;right:8px;bottom:10px;height:64px}}
+                    </style>
+                    <script>document.body.dataset.auroraPage = 'inventory'</script>
+                    <div class="container">
+                      <header class="header"><h1>库存盘点</h1></header>
+                      <div class="status-bar aurora-account-status">
+                        <span>管理员</span><button>GYJ 已登录</button>
+                        <div class="inventory-workspace-tabs"><button>当前盘点</button><button>历史任务</button><button>历史差异</button></div>
+                      </div>
+                      <main class="inventory-shell">
+                        <section id="inventoryCurrentRoot" class="inventory-current">
+                          <div class="inventory-section-head"><div><p class="inventory-eyebrow">CURRENT STOCKTAKE</p><h2>当前盘点</h2><p id="inventoryTaskMeta" class="muted">数量盘点 · 最近 GYJ 同步 2026-09-07T07:06:41.937573</p></div><button>完成盘点</button></div>
+                          <div id="inventoryNotice" class="inventory-notice"></div>
+                          <div class="inventory-summary"></div>
+                          <div class="inventory-toolbar"><label class="inventory-search-field"><span>搜索</span><input></label><label class="inventory-filter-field"><span>产品类别</span><select></select></label><label class="inventory-filter-field"><span>查看范围</span><select></select></label></div>
+                          <div class="inventory-scroll-region"><div id="inventoryItems" class="inventory-items">{cards}</div></div>
+                        </section>
+                      </main>
+                    </div>
+                    <nav class="page-nav"></nav>
+                    """
+                )
+                page.evaluate("document.body.dataset.auroraPage = 'inventory'")
+                notice = page.locator("#inventoryNotice")
+                panel = page.locator("#inventoryCurrentRoot")
+                scroll = page.locator(".inventory-scroll-region")
+                nav = page.locator(".page-nav")
+                meta = page.locator("#inventoryTaskMeta")
+                status = page.locator(".status-bar")
+                tabs = page.locator(".inventory-workspace-tabs")
+                self.assertEqual(notice.evaluate("node => getComputedStyle(node).display"), "none")
+                self.assertLessEqual(float(meta.evaluate("node => parseFloat(getComputedStyle(node).fontSize)")), 12)
+                self.assertLessEqual(
+                    tabs.bounding_box()["y"] + tabs.bounding_box()["height"],
+                    status.bounding_box()["y"] + status.bounding_box()["height"] + 1,
+                )
+                layout = page.evaluate("""() => Object.fromEntries(
+                    ['body', '.container', '.header', '.status-bar', '.inventory-shell', '#inventoryCurrentRoot']
+                    .map(selector => {
+                        const node = selector === 'body' ? document.body : document.querySelector(selector);
+                        const box = node.getBoundingClientRect();
+                        const style = getComputedStyle(node);
+                        return [selector, {top: box.top, height: box.height, overflow: style.overflow, flex: style.flex}];
+                    })
+                )""")
+                self.assertLessEqual(
+                    panel.bounding_box()["y"] + panel.bounding_box()["height"],
+                    nav.bounding_box()["y"] + 1,
+                    layout,
+                )
+                self.assertEqual(scroll.evaluate("node => getComputedStyle(node).overflowY"), "auto")
+                self.assertGreater(scroll.evaluate("node => node.scrollHeight"), scroll.evaluate("node => node.clientHeight"))
+                toolbar_y = page.locator(".inventory-toolbar").bounding_box()["y"]
+                scroll.evaluate("node => { node.scrollTop = 250; }")
+                self.assertAlmostEqual(page.locator(".inventory-toolbar").bounding_box()["y"], toolbar_y, delta=1)
+            finally:
+                browser.close()
+
+    def test_serial_dialog_uses_close_as_the_only_completion_action(self):
+        template = (ROOT / "templates" / "inventory.html").read_text(encoding="utf-8")
+        self.assertIn('id="inventorySerialCancel"', template)
+        self.assertNotIn('id="inventorySerialFinish"', template)
+        self.assertNotIn("完成该商品核对", template)
+
     def test_mobile_category_and_state_filters_share_one_row(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
@@ -386,6 +474,100 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             assert.equal(vm.runInContext(`inventoryActualQuantity({
                 state: 'serial_complete', count_total: '33', completed_actual_qty: '34'
             })`, context), '34');
+            """
+        )
+
+    def test_closing_serial_workspace_finishes_before_dismissing(self):
+        self.run_node(
+            r"""
+            const requests = [];
+            const input = {disabled: false, focus() {}};
+            const closeButton = {disabled: false, textContent: '关闭'};
+            const dialog = {open: true, close() { this.open = false; }};
+            const elements = new Map([
+                ['inventorySerialInput', input],
+                ['inventorySerialCancel', closeButton],
+                ['inventorySerialWorkspace', dialog],
+            ]);
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (!elements.has(id)) elements.set(id, {
+                            disabled: false, textContent: '', className: '', focus() {},
+                        });
+                        return elements.get(id);
+                    },
+                },
+                fetch: async (url, options = {}) => {
+                    requests.push({url, options});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, serial: {barcode: 'B2', counts: {}},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'B2';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+                renderSerialReconciliation = () => {};
+                pollInventoryTask = async () => {};
+            `, context);
+            (async () => {
+                await vm.runInContext('requestSerialWorkspaceClose()', context);
+                assert.equal(requests.length, 1);
+                assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/B2/serial/finish');
+                assert.equal(dialog.open, false);
+                assert.equal(vm.runInContext('serialWorkspaceOpen', context), false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_completed_serial_card_has_recheck_action(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.listeners = {}; this.attributes = {};
+                    this.textContent = ''; this.className = ''; this.disabled = false;
+                    this.dataset = {};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener(name, callback) { this.listeners[name] = callback; }
+                setAttribute(name, value) { this.attributes[name] = value; }
+            }
+            const root = new FakeNode();
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement() { return new FakeNode(); },
+                    getElementById(id) { return id === 'inventoryItems' ? root : new FakeNode(); },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryItems([{
+                barcode: 'B2', name: '序列商品', state: 'serial_complete',
+                has_serial: true, count_entries: [], book_qty: '1',
+                completed_actual_qty: '1', diff_qty: '0', updated_at: 'now'
+            }])`, context);
+            const labels = [];
+            function walk(node) {
+                if (node.textContent) labels.push(node.textContent);
+                (node.children || []).forEach(walk);
+            }
+            walk(root);
+            assert.ok(labels.includes('重新核对'));
             """
         )
 
@@ -2612,7 +2794,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     device_id: 'device-a',
                 });
                 assert.equal(vm.runInContext('serialWorkspaceOpen', context), true);
-                assert.equal(element('inventorySerialFinish').disabled, false);
+                assert.equal(element('inventorySerialCancel').disabled, false);
                 assert.equal(element('inventorySerialInput').disabled, false);
                 assert.equal(vm.runInContext('serialFinishPending', context), false);
                 assert.equal(
@@ -2649,7 +2831,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             };
             const elements = new Map([
                 ['inventorySerialInput', input],
-                ['inventorySerialFinish', finishButton],
+                ['inventorySerialCancel', finishButton],
                 ['inventorySerialWorkspace', dialog],
             ]);
             const context = {
@@ -2737,7 +2919,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             };
             const elements = new Map([
                 ['inventorySerialInput', input],
-                ['inventorySerialFinish', finishButton],
+                ['inventorySerialCancel', finishButton],
                 ['inventorySerialMessage', message],
                 ['inventorySerialWorkspace', dialog],
             ]);
@@ -2814,7 +2996,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const dialog = {open: true, close() { this.open = false; }};
             const elements = new Map([
                 ['inventorySerialInput', input],
-                ['inventorySerialFinish', finishButton],
+                ['inventorySerialCancel', finishButton],
                 ['inventorySerialWorkspace', dialog],
             ]);
             const context = {
@@ -2897,7 +3079,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const dialog = {open: true, close() { this.open = false; }};
             const elements = new Map([
                 ['inventorySerialInput', input],
-                ['inventorySerialFinish', finishButton],
+                ['inventorySerialCancel', finishButton],
                 ['inventorySerialWorkspace', dialog],
             ]);
             const context = {
@@ -2979,7 +3161,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const finishButton = {disabled: false};
             const elements = new Map([
                 ['inventorySerialInput', input],
-                ['inventorySerialFinish', finishButton],
+                ['inventorySerialCancel', finishButton],
             ]);
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,

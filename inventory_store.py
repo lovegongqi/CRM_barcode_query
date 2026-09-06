@@ -38,6 +38,7 @@ _AUDIT_EVENT_LABELS = {
     "serial_scan_reclassified": "重新分类序列号",
     "serial_scan_removed": "删除序列号",
     "serial_item_completed": "完成序列号核对",
+    "serial_item_reopened": "重新核对序列号",
     "task_completed": "完成盘点",
     "task_reopened": "继续盘点",
 }
@@ -2257,6 +2258,51 @@ class InventoryStore:
             return result
         finally:
             connection.close()
+
+    def reopen_serial_item(self, owner, task_id, barcode, device_id, actor):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            timestamp = self._now_text()
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] not in {"counting", "serial_check"}:
+                raise InventoryConflict("当前任务不能核对序列号")
+            item = connection.execute(
+                "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            if item["status"] == "serial_pending":
+                connection.rollback()
+                return self.serial_reconciliation(owner, task_id, barcode)
+            if item["status"] != "serial_complete":
+                raise InventoryConflict("商品不能重新核对序列号")
+            connection.execute(
+                """UPDATE inventory_serial_scans
+                   SET active = 0
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                     AND source_classification = 'system_only'""",
+                (task_id, barcode),
+            )
+            connection.execute(
+                """UPDATE inventory_items
+                   SET status = 'serial_pending', completed_at = NULL, updated_at = ?
+                   WHERE task_id = ? AND barcode = ?""",
+                (timestamp, task_id, barcode),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "serial_item_reopened", actor,
+                barcode=barcode, device_id=device_id, created_at=timestamp,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.serial_reconciliation(owner, task_id, barcode)
 
     def complete_serial_item(
         self, owner, task_id, barcode, device_id, actor, *,

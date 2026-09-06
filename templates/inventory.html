@@ -32,14 +32,14 @@
             {% if not is_desktop_app %}<a class="aurora-account-logout" href="/logout">退出工具账号</a>{% endif %}
         </div>
         <button class="btn btn-primary" id="inventoryGyjLoginButton" type="button">登录 GYJ</button>
-    </div>
-
-    <main id="inventoryRoot" class="inventory-shell">
         <div class="inventory-workspace-tabs" role="tablist" aria-label="库存盘点工作区">
             <button id="inventoryTabCurrent" class="inventory-workspace-tab is-active" type="button" role="tab" tabindex="0" aria-selected="true" aria-controls="inventoryCurrentRoot" data-inventory-tab="current">当前盘点</button>
             <button id="inventoryTabHistory" class="inventory-workspace-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="inventoryHistoryRoot" data-inventory-tab="history">历史任务</button>
             <button id="inventoryTabDifferences" class="inventory-workspace-tab" type="button" role="tab" tabindex="-1" aria-selected="false" aria-controls="inventoryDiscrepanciesRoot" data-inventory-tab="differences">历史差异</button>
         </div>
+    </div>
+
+    <main id="inventoryRoot" class="inventory-shell">
         <section id="inventoryCurrentRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabCurrent">
             <div class="inventory-section-head">
                 <div>
@@ -79,16 +79,18 @@
                 </label>
             </div>
 
-            <div id="inventoryItems" class="inventory-items" aria-live="polite"></div>
-            <section id="inventorySerialQueueRoot" class="inventory-serial-queue" aria-labelledby="inventorySerialQueueTitle" hidden>
-                <div class="inventory-subhead">
-                    <div>
-                        <p class="inventory-eyebrow">SERIAL RECONCILIATION</p>
-                        <h3 id="inventorySerialQueueTitle">待序列号核对</h3>
+            <div class="inventory-scroll-region">
+                <div id="inventoryItems" class="inventory-items" aria-live="polite"></div>
+                <section id="inventorySerialQueueRoot" class="inventory-serial-queue" aria-labelledby="inventorySerialQueueTitle" hidden>
+                    <div class="inventory-subhead">
+                        <div>
+                            <p class="inventory-eyebrow">SERIAL RECONCILIATION</p>
+                            <h3 id="inventorySerialQueueTitle">待序列号核对</h3>
+                        </div>
                     </div>
-                </div>
-                <div id="inventorySerialQueue" class="inventory-items" aria-live="polite"></div>
-            </section>
+                    <div id="inventorySerialQueue" class="inventory-items" aria-live="polite"></div>
+                </section>
+            </div>
         </section>
         <section id="inventoryHistoryRoot" class="inventory-current" role="tabpanel" aria-labelledby="inventoryTabHistory" hidden>
             <div class="inventory-section-head">
@@ -222,8 +224,7 @@
         <div id="inventorySerialCounts" class="inventory-summary inventory-serial-counts" aria-label="序列号核对摘要"></div>
         <div id="inventorySerialDetails" class="inventory-serial-details" aria-live="polite"></div>
         <div class="inventory-dialog-actions">
-            <button class="btn btn-secondary" id="inventorySerialCancel" type="button">关闭</button>
-            <button class="btn btn-primary" id="inventorySerialFinish" type="button">完成该商品核对</button>
+            <button class="btn btn-primary" id="inventorySerialCancel" type="button">关闭并保存</button>
         </div>
     </div>
 </dialog>

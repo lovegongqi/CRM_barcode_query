@@ -8,6 +8,7 @@ from inventory_store import (
     InventoryConflict,
     InventoryNotFound,
     InventoryPermissionDenied,
+    InventoryVersionConflict,
     normalize_quantity,
     quantity_difference,
 )
@@ -364,6 +365,14 @@ class InventoryService:
         expected_version=None,
     ):
         with self._serial_guard(owner, task_id, barcode):
+            snapshot = self._snapshot(owner, task_id, {"counting", "serial_check"})
+            item = self._item(snapshot, barcode)
+            if item["state"] == "serial_complete":
+                self.store.reopen_serial_item(
+                    owner, task_id, barcode, device_id, actor,
+                )
+            elif item["state"] != "serial_pending":
+                raise InventoryConflict("商品不在待核对序列号状态")
             return self._refresh_serial_item_locked(
                 owner, task_id, barcode, device_id, actor, False,
             )
@@ -491,10 +500,37 @@ class InventoryService:
         self, owner, task_id, actor, *, allow_unverified_serials=False,
         expected_version=None,
     ):
+        snapshot = self.store.get_task_snapshot(owner, task_id)
+        if (
+            expected_version is not None
+            and int(snapshot["version"]) != int(expected_version)
+        ):
+            raise InventoryVersionConflict(
+                "盘点任务已被其他设备更新，请刷新后重试",
+                current_version=int(snapshot["version"]),
+            )
+        auto_completed = False
+        for item in snapshot.get("items", []):
+            if item.get("state") != "serial_pending":
+                continue
+            current = self.store.serial_reconciliation(
+                owner, task_id, item["barcode"]
+            )
+            recorded = (
+                current["matched"]
+                + current["physical_only"]
+                + current["other_product"]
+            )
+            if not recorded:
+                continue
+            self.finish_serial_item(
+                owner, task_id, item["barcode"], "task-completion", actor,
+            )
+            auto_completed = True
         return self.store.complete_task(
             owner, task_id, actor,
             allow_unverified_serials=allow_unverified_serials,
-            expected_version=expected_version,
+            expected_version=None if auto_completed else expected_version,
         )
 
     def reopen_task(self, owner, task_id, actor):
