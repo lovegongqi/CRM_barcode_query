@@ -715,7 +715,8 @@ class FrontendContractTest(unittest.TestCase):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         for token in (
             'id="inventoryTaskSummary"', 'id="inventorySearch"',
-            'id="inventoryFilters"', 'id="inventoryItems"',
+            'id="inventoryFilters"', 'id="inventoryCategoryFilter"',
+            'id="inventoryItems"',
             'id="inventoryCountDialog"', 'id="inventoryGyjLoginDialog"',
             "pollInventoryTask", "renderInventoryItems", "openCountItem",
             "renderCountEntries", "addCountEntry", "updateCountEntry",
@@ -731,6 +732,13 @@ class FrontendContractTest(unittest.TestCase):
         for forbidden in ("成本价", "采购价", "零售价", "销售价", "库存金额"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source + script)
+
+    def test_inventory_has_category_filter(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn('id="inventoryCategoryFilter"', source)
+        self.assertIn("renderInventoryCategories", script)
+        self.assertIn("inventoryCategoryMatches", script)
 
     def test_inventory_camera_uses_local_pinned_decoder(self):
         source = self.source("inventory.html")
@@ -859,9 +867,9 @@ class FrontendContractTest(unittest.TestCase):
     def test_inventory_active_task_keeps_full_summary_when_zero_stock_rows_are_hidden(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
         self.assertIn("def _inventory_task_summary(items):", app_source)
-        self.assertIn('snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])', app_source)
+        self.assertIn('snapshot["summary"] = _inventory_task_summary(unfiltered_items)', app_source)
         self.assertLess(
-            app_source.index('snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])'),
+            app_source.index('snapshot["summary"] = _inventory_task_summary(unfiltered_items)'),
             app_source.index('snapshot["items"] = inventory_store.list_items('),
         )
 

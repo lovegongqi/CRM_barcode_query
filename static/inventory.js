@@ -9,6 +9,7 @@ let inventoryPollQueuedForce = false;
 let inventoryQueryGeneration = 0;
 let inventoryPollTimer = null;
 let inventorySearchTimer = null;
+let inventorySelectedCategory = '';
 let currentCountItem = null;
 let countDialogEditable = false;
 let countMutationPending = false;
@@ -305,10 +306,50 @@ function renderInventorySummary(task) {
 }
 
 function inventoryVisibleItems(items) {
+    const categoryItems = items.filter(inventoryCategoryMatches);
     const filter = inventoryElement('inventoryFilters').value;
-    if (filter === 'completed') return items.filter(inventoryIsCompleted);
-    if (filter === 'variance') return items.filter((item) => decimalDirection(item.diff_qty) !== 0);
-    return items;
+    if (filter === 'completed') return categoryItems.filter(inventoryIsCompleted);
+    if (filter === 'variance') return categoryItems.filter((item) => decimalDirection(item.diff_qty) !== 0);
+    return categoryItems;
+}
+
+function inventoryCategoryMatches(item) {
+    return !inventorySelectedCategory
+        || inventoryText(item && item.category, '') === inventorySelectedCategory;
+}
+
+function inventoryCategoryElement() {
+    if (!document || typeof document.querySelector !== 'function') return null;
+    return document.querySelector('#inventoryCategoryFilter');
+}
+
+function renderInventoryCategories(categories) {
+    const select = inventoryCategoryElement();
+    if (!select) return;
+    const values = Array.from(new Set(
+        (Array.isArray(categories) ? categories : [])
+            .map((value) => inventoryText(value, '').trim())
+            .filter(Boolean),
+    )).sort((left, right) => left.localeCompare(right, 'zh-CN'));
+    const retained = values.includes(inventorySelectedCategory)
+        ? inventorySelectedCategory : '';
+    const options = [inventoryNode('option', '', '全部类别')];
+    options[0].value = '';
+    values.forEach((value) => {
+        const option = inventoryNode('option', '', value);
+        option.value = value;
+        options.push(option);
+    });
+    select.replaceChildren(...options);
+    select.value = retained;
+    inventorySelectedCategory = retained;
+}
+
+function handleInventoryCategoryChange() {
+    const select = inventoryCategoryElement();
+    inventorySelectedCategory = select ? select.value : '';
+    renderInventoryItems((inventoryTask && inventoryTask.items) || []);
+    renderSerialQueue(inventoryTask);
 }
 
 function inventoryDetailText(item) {
@@ -406,7 +447,9 @@ function renderSerialQueue(task) {
     const section = inventoryElement('inventorySerialQueueRoot');
     const root = inventoryElement('inventorySerialQueue');
     const rows = task && ['counting', 'serial_check'].includes(task.phase)
-        ? (task.items || []).filter((item) => item.state === 'serial_pending')
+        ? (task.items || []).filter(
+            (item) => item.state === 'serial_pending' && inventoryCategoryMatches(item)
+        )
         : [];
     section.hidden = !rows.length;
     root.replaceChildren();
@@ -440,6 +483,7 @@ function renderInventoryTask(task) {
         createButton.hidden = false;
         completeButton.hidden = true;
         renderInventorySummary(null);
+        renderInventoryCategories([]);
         renderInventoryItems([]);
         renderSerialQueue(null);
         return;
@@ -451,6 +495,7 @@ function renderInventoryTask(task) {
     createButton.hidden = true;
     completeButton.hidden = !['counting', 'serial_check'].includes(task.phase);
     renderInventorySummary(task);
+    renderInventoryCategories(task.categories || []);
     renderInventoryItems(task.items || []);
     renderSerialQueue(task);
     if (currentCountItem && inventoryElement('inventoryCountDialog').open) {
@@ -2120,6 +2165,9 @@ function initializeInventoryPage() {
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
     inventoryElement('inventoryFilters').addEventListener('change', runInventorySearch);
+    inventoryElement('inventoryCategoryFilter').addEventListener(
+        'change', handleInventoryCategoryChange
+    );
     inventoryElement('inventoryCountNewQuantity').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') addCountEntry();
     });

@@ -277,6 +277,31 @@ class InventoryRouteTest(unittest.TestCase):
         )
         self.store.list_items.assert_not_called()
 
+    def test_active_task_returns_unfiltered_categories(self):
+        self.store.get_active_task.return_value = {"task_id": "task-1"}
+        self.store.get_task_snapshot.return_value = {
+            "task_id": "task-1", "phase": "counting", "version": 7,
+            "last_sync_at": datetime.now().isoformat(timespec="seconds"),
+            "items": [
+                {"barcode": "A", "category": "滤芯"},
+                {"barcode": "B", "category": "整机"},
+                {"barcode": "C", "category": "滤芯"},
+                {"barcode": "D", "category": ""},
+            ],
+        }
+        self.store.list_items.return_value = [{
+            "barcode": "B", "category": "整机",
+        }]
+
+        with mock.patch.object(app_module, "_ensure_inventory_sync"):
+            response = self.login_account("counter").get(
+                "/api/inventory/tasks/active?query=B"
+            )
+
+        task = response.get_json()["task"]
+        self.assertEqual(task["categories"], ["整机", "滤芯"])
+        self.assertEqual([item["barcode"] for item in task["items"]], ["B"])
+
     def test_all_json_routes_use_the_declared_methods_and_response_keys(self):
         client = self.login_account("admin", "admin-pass")
         cases = [

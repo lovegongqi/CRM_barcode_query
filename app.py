@@ -10778,7 +10778,13 @@ def api_inventory_active_task():
         owner, task_id, known_version=known_version
     )
     if not snapshot.get("unchanged"):
-        snapshot["summary"] = _inventory_task_summary(snapshot.get("items") or [])
+        unfiltered_items = snapshot.get("items") or []
+        snapshot["summary"] = _inventory_task_summary(unfiltered_items)
+        snapshot["categories"] = sorted({
+            str(item.get("category") or "").strip()
+            for item in unfiltered_items
+            if str(item.get("category") or "").strip()
+        })
         query = str(request.args.get("query") or "").strip()
         state = str(request.args.get("state") or "").strip()
         snapshot["items"] = inventory_store.list_items(

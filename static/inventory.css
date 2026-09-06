@@ -136,7 +136,7 @@ body[data-aurora-page="inventory"] .status-bar {
 
 .inventory-toolbar {
     display: grid;
-    grid-template-columns: minmax(260px, 1fr) minmax(150px, 220px);
+    grid-template-columns: minmax(260px, 1fr) repeat(2, minmax(150px, 220px));
     gap: 12px;
     margin-bottom: 14px;
 }

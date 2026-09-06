@@ -61,6 +61,33 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_category_filter_combines_with_state(self):
+        self.run_node(
+            r"""
+            const state = {value: 'variance'};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryFilters') return state;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext("inventorySelectedCategory = '滤芯'", context);
+            const visible = vm.runInContext(`inventoryVisibleItems([
+                {barcode: 'A', category: '滤芯', diff_qty: '-1'},
+                {barcode: 'B', category: '整机', diff_qty: '-1'},
+                {barcode: 'C', category: '滤芯', diff_qty: '0'}
+            ])`, context);
+            assert.deepEqual(Array.from(visible, item => item.barcode), ['A']);
+            """
+        )
+
     def test_complete_task_warns_once_then_confirms_unverified_serials(self):
         self.run_node(
             r"""
