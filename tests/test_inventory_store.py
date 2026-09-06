@@ -481,6 +481,19 @@ class InventoryStoreTests(unittest.TestCase):
                 ("carton_deleted", "己", "d6"),
             ],
         )
+        carton_events = {row["event_type"]: row for row in audit_rows}
+        self.assertEqual(
+            (carton_events["carton_serial_added"]["start_serial"],
+             carton_events["carton_serial_added"]["end_serial"],
+             carton_events["carton_serial_added"]["serials"]),
+            ("S001", "S003", ["S003"]),
+        )
+        self.assertEqual(
+            (carton_events["carton_serial_removed"]["start_serial"],
+             carton_events["carton_serial_removed"]["end_serial"],
+             carton_events["carton_serial_removed"]["serials"]),
+            ("S001", "S003", ["S002"]),
+        )
         self.assertEqual(audit_rows[0]["before_preset_quantity"], None)
         self.assertEqual(audit_rows[0]["after_preset_quantity"], 2)
         self.assertEqual(audit_rows[1]["start_serial"], "S001")

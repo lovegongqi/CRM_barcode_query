@@ -1662,16 +1662,34 @@ class InventoryStore:
         ).fetchone()
 
     @staticmethod
-    def _carton_audit_details(carton, affected_count, serials):
+    def _carton_audit_details(
+        carton, affected_count, serials, range_serials=None,
+    ):
         serials = list(serials)
+        range_source = range_serials if range_serials else serials
+        range_serials = sorted(
+            str(serial) for serial in range_source if str(serial)
+        )
         return json.dumps({
             "carton_id": int(carton["carton_id"]),
             "confirmed_quantity": int(carton["confirmed_quantity"]),
             "affected_count": int(affected_count),
-            "start_serial": serials[0] if serials else None,
-            "end_serial": serials[-1] if serials else None,
+            "start_serial": range_serials[0] if range_serials else None,
+            "end_serial": range_serials[-1] if range_serials else None,
             "serials": serials,
         }, ensure_ascii=False, sort_keys=True)
+
+    @staticmethod
+    def _carton_active_serials(connection, task_id, barcode, carton_id):
+        return [
+            row["serial"] for row in connection.execute(
+                """SELECT serial FROM inventory_serial_scans
+                   WHERE task_id = ? AND barcode = ? AND carton_id = ?
+                     AND active = 1
+                   ORDER BY serial""",
+                (task_id, barcode, carton_id),
+            )
+        ]
 
     def release_item_lock(
         self, owner, task_id, barcode, device_id, actor, phase, reason
@@ -2034,11 +2052,16 @@ class InventoryStore:
                 connection, task_id, barcode, carton_id, device_id, actor,
                 serial, timestamp,
             )
+            range_serials = self._carton_active_serials(
+                connection, task_id, barcode, carton_id,
+            )
             self._bump_version(connection, task_id)
             self._audit(
                 connection, task_id, "carton_serial_added", actor,
                 barcode=barcode, device_id=device_id,
-                details=self._carton_audit_details(carton, 1, [serial]),
+                details=self._carton_audit_details(
+                    carton, 1, [serial], range_serials,
+                ),
                 created_at=timestamp,
             )
             connection.commit()
@@ -2074,11 +2097,16 @@ class InventoryStore:
                 "UPDATE inventory_serial_scans SET active = 0 WHERE scan_id = ?",
                 (scan["scan_id"],),
             )
+            range_serials = self._carton_active_serials(
+                connection, task_id, barcode, carton_id,
+            )
             self._bump_version(connection, task_id)
             self._audit(
                 connection, task_id, "carton_serial_removed", actor,
                 barcode=barcode, device_id=device_id,
-                details=self._carton_audit_details(carton, 1, [serial]),
+                details=self._carton_audit_details(
+                    carton, 1, [serial], range_serials,
+                ),
                 created_at=timestamp,
             )
             connection.commit()

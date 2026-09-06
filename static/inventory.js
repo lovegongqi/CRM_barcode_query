@@ -1972,6 +1972,14 @@ function inventorySerialAuditValue(serial, classification) {
     return `${serial}（${label}）`;
 }
 
+function inventoryCartonAuditRange(event) {
+    const start = inventoryText(event && event.start_serial, '');
+    const end = inventoryText(event && event.end_serial, '');
+    if (!start) return '';
+    if (!end || end === start) return start;
+    return `${start}～${abbreviatedCartonEnd(start, end)}`;
+}
+
 function renderInventoryAudit(events) {
     const root = inventoryElement('inventoryAuditEvents');
     root.replaceChildren();
@@ -1990,20 +1998,51 @@ function renderInventoryAudit(events) {
         if (countEntryAction && Number.isInteger(event.entry_number) && event.entry_number > 0) {
             title = `${countEntryAction}第 ${event.entry_number} 笔数量`;
         }
+        const cartonRange = inventoryCartonAuditRange(event);
+        if (cartonRange && [
+            'carton_created', 'carton_serial_added',
+            'carton_serial_removed', 'carton_deleted',
+        ].includes(event.event_type)) {
+            const quantity = event.event_type === 'carton_created'
+                && Number.isInteger(event.confirmed_quantity)
+                ? `（${event.confirmed_quantity}条）` : '';
+            title = `${title} · ${cartonRange}${quantity}`;
+        }
         row.append(
             inventoryNode('strong', '', title),
             inventoryNode('span', '', `${inventoryText(event.actor, '未知账号')} · ${inventoryText(event.created_at, '时间未知')}`),
         );
-        if (event.before_quantity !== null || event.after_quantity !== null) {
+        if (event.before_quantity != null || event.after_quantity != null) {
             row.append(inventoryNode(
                 'code', '',
                 `数量 ${inventoryText(event.before_quantity, '无')} → ${inventoryText(event.after_quantity, '无')}`,
             ));
         }
-        if (event.before_serial !== null || event.after_serial !== null) {
+        if (event.before_serial != null || event.after_serial != null) {
             row.append(inventoryNode(
                 'code', '',
                 `序列号 ${inventorySerialAuditValue(event.before_serial, event.before_classification)} → ${inventorySerialAuditValue(event.after_serial, event.after_classification)}`,
+            ));
+        }
+        if (event.event_type === 'carton_preset_changed') {
+            row.append(inventoryNode(
+                'code', '',
+                `每箱数量 ${inventoryText(event.before_preset_quantity, '无')} → ${inventoryText(event.after_preset_quantity, '无')}`,
+            ));
+        }
+        if (event.event_type === 'carton_created') {
+            row.append(inventoryNode(
+                'code', '', `录入 ${inventoryText(event.affected_count, 0)} 条序列号`,
+            ));
+        }
+        if (['carton_serial_added', 'carton_serial_removed'].includes(event.event_type)) {
+            row.append(inventoryNode(
+                'code', '', `受影响序列号 ${(event.serials || []).join('、') || '无'}`,
+            ));
+        }
+        if (event.event_type === 'carton_deleted') {
+            row.append(inventoryNode(
+                'code', '', `删除 ${inventoryText(event.affected_count, 0)} 条序列号`,
             ));
         }
         root.append(row);

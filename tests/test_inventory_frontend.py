@@ -3194,6 +3194,61 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_audit_renders_carton_range_and_affected_serials(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [],
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                };
+            }
+            const auditRoot = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryAuditEvents') return auditRoot;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryAudit([{
+                event_type: 'carton_created', event_label: '整箱录入',
+                actor: '甲', created_at: '2026-09-06T10:00:00',
+                start_serial: '1422608126281', end_serial: '1422608126300',
+                confirmed_quantity: 20, affected_count: 20,
+                serials: ['1422608126281', '1422608126300'],
+            }, {
+                event_type: 'carton_serial_added', event_label: '箱内补录',
+                actor: '乙', created_at: '2026-09-06T10:01:00',
+                start_serial: '1422608126281', end_serial: '1422608126301',
+                affected_count: 1, serials: ['1422608126301'],
+            }, {
+                event_type: 'carton_deleted', event_label: '删除整箱',
+                actor: '丙', created_at: '2026-09-06T10:02:00',
+                start_serial: '1422608126281', end_serial: '1422608126301',
+                affected_count: 21, serials: ['1422608126281', '1422608126301'],
+            }])`, context);
+            assert.equal(auditRoot.children[0].children[0].textContent,
+                '整箱录入 · 1422608126281～6300（20条）');
+            assert.equal(auditRoot.children[1].children[0].textContent,
+                '箱内补录 · 1422608126281～6301');
+            assert.match(auditRoot.children[1].children[2].textContent, /1422608126301/);
+            assert.equal(auditRoot.children[2].children[0].textContent,
+                '删除整箱 · 1422608126281～6301');
+            assert.match(auditRoot.children[2].children[2].textContent, /21/);
+            const allText = JSON.stringify(auditRoot);
+            assert(!allText.includes('carton_id'));
+            assert(!allText.includes('details'));
+            """
+        )
+
     def test_both_tab_groups_support_roving_keyboard_navigation(self):
         self.run_node(
             r"""
