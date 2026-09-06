@@ -37,6 +37,7 @@ let serialOperationGeneration = 0;
 let serialRenderedGeneration = 0;
 let serialMutationFailures = new Map();
 let inventoryCameraControls = null;
+let inventoryCameraStartPromise = null;
 let inventoryCameraGeneration = 0;
 let inventoryCameraActiveGeneration = 0;
 let inventoryCameraLastSerial = '';
@@ -989,7 +990,7 @@ function inventoryCameraCanUseHttp() {
         || hostname === '::1' || hostname === '[::1]';
 }
 
-function stopInventoryCamera() {
+function stopInventoryCamera(showStatus = true) {
     inventoryCameraGeneration += 1;
     inventoryCameraActiveGeneration = 0;
     const controls = inventoryCameraControls;
@@ -1014,65 +1015,79 @@ function stopInventoryCamera() {
     if (stop) stop.disabled = true;
     inventoryCameraLastSerial = '';
     inventoryCameraLastDecodedAt = 0;
+    if (showStatus) setInventoryCameraMessage('相机已停止。');
 }
 
 async function startInventoryCamera() {
-    stopInventoryCamera();
-    if (!inventoryCameraCanUseHttp()) {
-        setInventoryCameraMessage('相机连续扫码需要 HTTPS；仍可使用扫码枪或键盘输入。', 'error');
-        return;
-    }
-    if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
-    if (!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader) {
-        setInventoryCameraMessage('相机扫码组件未能载入；仍可使用扫码枪或键盘输入。', 'error');
-        return;
-    }
-
+    stopInventoryCamera(false);
     const generation = ++inventoryCameraGeneration;
-    inventoryCameraActiveGeneration = generation;
-    const start = inventoryElement('inventoryCameraStart');
-    const stop = inventoryElement('inventoryCameraStop');
-    const panel = inventoryElement('inventoryCameraPanel');
-    const video = inventoryElement('inventoryCameraVideo');
-    start.disabled = true;
-    stop.disabled = false;
-    panel.hidden = false;
-    setInventoryCameraMessage('正在启动后置相机…');
-    try {
-        const reader = new window.ZXingBrowser.BrowserMultiFormatReader();
-        const controls = await reader.decodeFromConstraints(
-            {video: {facingMode: {ideal: 'environment'}}},
-            video,
-            (result) => {
-                if (!result || generation !== inventoryCameraGeneration) return;
-                const serial = String(result.getText ? result.getText() : result.text || '').trim();
-                if (!serial) return;
-                const decodedAt = Date.now();
-                if (serial === inventoryCameraLastSerial && decodedAt - inventoryCameraLastDecodedAt < 1500) return;
-                inventoryCameraLastSerial = serial;
-                inventoryCameraLastDecodedAt = decodedAt;
-                submitDecodedSerial(serial);
-            },
-        );
-        if (generation !== inventoryCameraGeneration || !serialWorkspaceOpen) {
-            if (controls && typeof controls.stop === 'function') controls.stop();
-            if (!inventoryCameraActiveGeneration && video.srcObject && typeof video.srcObject.getTracks === 'function') {
-                video.srcObject.getTracks().forEach((track) => track.stop());
-                video.srcObject = null;
-            }
+    const previousStart = inventoryCameraStartPromise;
+    const pending = (async () => {
+        if (previousStart) await previousStart;
+        if (generation !== inventoryCameraGeneration) return;
+        if (!inventoryCameraCanUseHttp()) {
+            setInventoryCameraMessage('相机连续扫码需要 HTTPS；仍可使用扫码枪或键盘输入。', 'error');
             return;
         }
-        inventoryCameraControls = controls;
-        setInventoryCameraMessage('相机连续扫码已开启。', 'success');
-    } catch (error) {
-        if (generation !== inventoryCameraGeneration) return;
-        stopInventoryCamera();
-        if (error && error.name === 'NotAllowedError') {
-            setInventoryCameraMessage('无法使用相机：请允许相机权限。仍可使用扫码枪或键盘输入。', 'error');
-        } else if (error && error.name === 'NotFoundError') {
-            setInventoryCameraMessage('未找到可用相机；仍可使用扫码枪或键盘输入。', 'error');
-        } else {
-            setInventoryCameraMessage('相机启动失败；仍可使用扫码枪或键盘输入。', 'error');
+        if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
+        if (!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader) {
+            setInventoryCameraMessage('相机扫码组件未能载入；仍可使用扫码枪或键盘输入。', 'error');
+            return;
+        }
+
+        inventoryCameraActiveGeneration = generation;
+        const start = inventoryElement('inventoryCameraStart');
+        const stop = inventoryElement('inventoryCameraStop');
+        const panel = inventoryElement('inventoryCameraPanel');
+        const video = inventoryElement('inventoryCameraVideo');
+        start.disabled = true;
+        stop.disabled = false;
+        panel.hidden = false;
+        setInventoryCameraMessage('正在启动后置相机…');
+        try {
+            const reader = new window.ZXingBrowser.BrowserMultiFormatReader();
+            const controls = await reader.decodeFromConstraints(
+                {video: {facingMode: {ideal: 'environment'}}},
+                video,
+                (result) => {
+                    if (!result || generation !== inventoryCameraGeneration) return;
+                    const serial = String(result.getText ? result.getText() : result.text || '').trim();
+                    if (!serial) return;
+                    const decodedAt = Date.now();
+                    if (serial === inventoryCameraLastSerial && decodedAt - inventoryCameraLastDecodedAt < 1500) return;
+                    inventoryCameraLastSerial = serial;
+                    inventoryCameraLastDecodedAt = decodedAt;
+                    submitDecodedSerial(serial);
+                },
+            );
+            if (generation !== inventoryCameraGeneration || !serialWorkspaceOpen) {
+                if (controls && typeof controls.stop === 'function') controls.stop();
+                if (!inventoryCameraActiveGeneration && video.srcObject && typeof video.srcObject.getTracks === 'function') {
+                    video.srcObject.getTracks().forEach((track) => track.stop());
+                    video.srcObject = null;
+                }
+                return;
+            }
+            inventoryCameraControls = controls;
+            setInventoryCameraMessage('相机连续扫码已开启。', 'success');
+        } catch (error) {
+            if (generation !== inventoryCameraGeneration) return;
+            stopInventoryCamera(false);
+            if (error && error.name === 'NotAllowedError') {
+                setInventoryCameraMessage('无法使用相机：请允许相机权限。仍可使用扫码枪或键盘输入。', 'error');
+            } else if (error && error.name === 'NotFoundError') {
+                setInventoryCameraMessage('未找到可用相机；仍可使用扫码枪或键盘输入。', 'error');
+            } else {
+                setInventoryCameraMessage('相机启动失败；仍可使用扫码枪或键盘输入。', 'error');
+            }
+        }
+    })();
+    inventoryCameraStartPromise = pending;
+    try {
+        return await pending;
+    } finally {
+        if (inventoryCameraStartPromise === pending) {
+            inventoryCameraStartPromise = null;
         }
     }
 }
@@ -1205,7 +1220,7 @@ function renderSerialReconciliation(value) {
 }
 
 function closeSerialWorkspace() {
-    stopInventoryCamera();
+    stopInventoryCamera(false);
     serialWorkspaceRequestId += 1;
     resetSerialOperations();
     serialWorkspaceOpen = false;
@@ -1220,7 +1235,7 @@ async function openSerialItem(barcode) {
     if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
     const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
     if (!item || item.state !== 'serial_pending') return;
-    stopInventoryCamera();
+    stopInventoryCamera(false);
     const requestId = ++serialWorkspaceRequestId;
     resetSerialOperations();
     const dialog = inventoryElement('inventorySerialWorkspace');
@@ -1290,17 +1305,26 @@ function refreshSerialItem(force = false) {
 }
 
 async function manualRefreshSerialItem() {
+    const requestId = serialWorkspaceRequestId;
+    if (!serialOperationIsOpen(requestId) || !serialWorkspaceEditable || serialFinishPending) return;
     const button = inventoryElement('inventorySerialRefresh');
     button.disabled = true;
     setSerialMessage('正在重新获取 GYJ 账面序列号…');
     try {
-        await refreshSerialItem(true);
+        const result = await refreshSerialItem(true);
+        if (
+            result === null || !serialOperationIsOpen(requestId)
+            || !serialWorkspaceEditable || serialFinishPending
+        ) return;
         setSerialMessage('账面序列号已重新获取。', 'success');
     } catch (_error) {
+        if (!serialOperationIsOpen(requestId) || !serialWorkspaceEditable || serialFinishPending) return;
         setSerialMessage('重新获取失败。已保留上次成功获取的数据，请确认 GYJ 已登录后重试。', 'error');
     } finally {
-        button.disabled = false;
-        inventoryElement('inventorySerialInput').focus();
+        if (serialOperationIsOpen(requestId) && serialWorkspaceEditable && !serialFinishPending) {
+            button.disabled = false;
+            inventoryElement('inventorySerialInput').focus();
+        }
     }
 }
 
@@ -1398,10 +1422,11 @@ function deleteSerialScan(serial) {
                     {device_id: inventoryDeviceId},
                 );
                 acceptInventoryMutationVersion(data);
-            } catch (error) {
+            } catch (_error) {
                 if (serialOperationIsOpen(requestId)) {
-                    serialMutationFailures.set(mutationKey, error.message || '删除失败');
-                    setSerialMessage(error.message, 'error');
+                    const message = '删除扫描记录失败，请重试。';
+                    serialMutationFailures.set(mutationKey, message);
+                    setSerialMessage(message, 'error');
                 }
                 return;
             }
@@ -1447,10 +1472,10 @@ function finishSerialItem() {
             lastInventoryVersion = null;
             setInventoryNotice('序列号核对已完成。', 'success');
             await pollInventoryTask({force: true});
-        } catch (error) {
+        } catch (_error) {
             if (!serialOperationIsOpen(requestId)) return;
             restoreSerialAfterFailedFinish(
-                `未能完成核对：${error.message}。当前扫描界面已保留。`
+                '未能完成核对，请稍后重试。当前扫描界面已保留。'
             );
         }
     });
@@ -2146,13 +2171,13 @@ function initializeInventoryPage() {
     bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
-            stopInventoryCamera();
+            stopInventoryCamera(false);
             return;
         }
         if (inventoryActiveTab === 'current') pollInventoryTask({force: true});
     });
     window.addEventListener('beforeunload', () => {
-        stopInventoryCamera();
+        stopInventoryCamera(false);
         stopGyjLoginPolling();
     });
     renderInventoryTask(null);

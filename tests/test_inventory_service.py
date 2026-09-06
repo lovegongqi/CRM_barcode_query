@@ -347,6 +347,127 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(self.worker.serial_reads, ["B2", "B2"])
         self.assertEqual([row["serial"] for row in refreshed["system_only"]], ["B-2"])
 
+    def test_count_entry_mutations_preserve_successful_serial_cache(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        cached = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        synced_at = cached["item"]["serial_synced_at"]
+        self.worker.serials["B2"] = [{
+            "serial": "B-NEW", "barcode": "B2", "name": "序列商品",
+            "warehouse": "其他仓", "shipped": False,
+        }]
+
+        first_added = self.service.add_count_entry(
+            "admin", task["task_id"], "B2", "device-a", "甲", "1"
+        )
+        self.assertEqual(first_added["serial_synced_at"], synced_at)
+        self.assertTrue(self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )["skipped"])
+
+        second_added = self.service.add_count_entry(
+            "admin", task["task_id"], "B2", "device-b", "乙", "1"
+        )
+        first_entry = second_added["count_entries"][0]
+        updated = self.service.update_count_entry(
+            "admin", task["task_id"], "B2",
+            first_entry["entry_id"], first_entry["version"],
+            "device-c", "丙", "2",
+        )
+        self.assertEqual(updated["serial_synced_at"], synced_at)
+        self.assertTrue(self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-c", "丙"
+        )["skipped"])
+
+        first_entry = next(
+            row for row in updated["count_entries"]
+            if row["entry_id"] == first_entry["entry_id"]
+        )
+        deleted = self.service.delete_count_entry(
+            "admin", task["task_id"], "B2",
+            first_entry["entry_id"], first_entry["version"],
+            "device-d", "丁",
+        )
+        self.assertEqual(deleted["serial_synced_at"], synced_at)
+        reopened = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-d", "丁"
+        )
+
+        self.assertTrue(reopened["skipped"])
+        self.assertEqual([row["serial"] for row in reopened["expected"]], ["B-1"])
+        self.assertEqual(self.worker.serial_reads, ["B2"])
+
+    def test_reopened_serial_completion_retires_synthetic_rows_before_rescan(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [
+            {
+                "serial": "B-1", "barcode": "B2", "name": "序列商品",
+                "warehouse": "沈桥仓", "shipped": False,
+            },
+            {
+                "serial": "B-2", "barcode": "B2", "name": "序列商品",
+                "warehouse": "其他仓", "shipped": False,
+            },
+        ]
+        cached = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        synced_at = cached["item"]["serial_synced_at"]
+        self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-2"
+        )
+        first_finish = self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        self.assertEqual([row["serial"] for row in first_finish["system_only"]], ["B-1"])
+
+        reopened = self.service.add_count_entry(
+            "admin", task["task_id"], "B2", "device-b", "乙", "1"
+        )
+        opened = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+        real_scan = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-b", "乙", "B-1"
+        )
+        second_finish = self.service.finish_serial_item(
+            "admin", task["task_id"], "B2", "device-b", "乙"
+        )
+
+        self.assertEqual(reopened["state"], "serial_pending")
+        self.assertEqual(reopened["serial_synced_at"], synced_at)
+        self.assertTrue(opened["skipped"])
+        self.assertEqual(real_scan["classification"], "matched")
+        self.assertEqual(
+            [row["serial"] for row in second_finish["matched"]],
+            ["B-2", "B-1"],
+        )
+        self.assertEqual(second_finish["system_only"], [])
+        self.assertEqual(self.worker.serial_reads, ["B2"])
+        with sqlite3.connect(self.db_path) as connection:
+            rows = connection.execute(
+                "SELECT serial, classification, source_classification, active "
+                "FROM inventory_serial_scans WHERE task_id = ? AND barcode = 'B2' "
+                "ORDER BY scan_id",
+                (task["task_id"],),
+            ).fetchall()
+            completion_events = connection.execute(
+                "SELECT COUNT(*) FROM inventory_audit_events "
+                "WHERE task_id = ? AND event_type = 'serial_item_completed'",
+                (task["task_id"],),
+            ).fetchone()[0]
+        self.assertEqual(rows, [
+            ("B-2", "matched", "matched", 1),
+            ("B-1", "system_only", "system_only", 0),
+            ("B-1", "matched", "matched", 1),
+        ])
+        self.assertEqual(completion_events, 2)
+
     def test_unmatched_scan_is_saved_without_gyj_lookup(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []

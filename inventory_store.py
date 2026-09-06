@@ -1097,13 +1097,20 @@ class InventoryStore:
             difference = None
             state = "pending"
             completed_at = None
+        if item["status"] == "serial_complete":
+            connection.execute(
+                """UPDATE inventory_serial_scans
+                   SET active = 0
+                   WHERE task_id = ? AND barcode = ? AND active = 1
+                     AND source_classification = 'system_only'""",
+                (task["task_id"], item["barcode"]),
+            )
         connection.execute(
             """UPDATE inventory_items
                SET book_quantity = ?, counted_quantity = ?,
                    completed_book_quantity = ?, completed_counted_quantity = ?,
                    latest_book_quantity = ?, expected_current_quantity = ?,
-                   difference = ?, status = ?, serial_synced_at = NULL,
-                   completed_at = ?, updated_at = ?
+                   difference = ?, status = ?, completed_at = ?, updated_at = ?
                WHERE task_id = ? AND barcode = ?""",
             (
                 book_quantity, count_total,

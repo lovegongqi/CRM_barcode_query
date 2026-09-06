@@ -531,6 +531,26 @@ class GYJInventoryReaderTests(unittest.TestCase):
         self.assertEqual([row["serial"] for row in result], ["S1"])
         self.assertGreaterEqual(len(page.waits), 5)
 
+    def test_serial_query_waits_for_a_present_parseable_nonempty_total(self):
+        rows = [["S1", "10000213", "雷哲", "沈桥仓", "0", "否"]]
+        valid = serial_page(rows, 1)
+        missing = serial_page(rows, 1)
+        missing.pop("total")
+        for label, invalid in (
+            ("missing", missing),
+            ("blank", serial_page(rows, "")),
+            ("unparseable", serial_page(rows, "共 ? 条")),
+        ):
+            with self.subTest(total=label):
+                page = SettlingSerialPage([invalid, invalid, valid, valid])
+
+                result = GYJInventoryReader(page).read_unshipped_serials(
+                    "10000213"
+                )
+
+                self.assertEqual([row["serial"] for row in result], ["S1"])
+                self.assertGreaterEqual(len(page.waits), 3)
+
     def test_serial_query_rejects_a_result_that_never_settles(self):
         with self.assertRaisesRegex(GYJInventoryReadError, "查询结果未稳定"):
             GYJInventoryReader(NeverSettlingSerialPage()).read_unshipped_serials(

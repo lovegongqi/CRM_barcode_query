@@ -331,11 +331,14 @@ class GYJInventoryReader:
             if not _is_total_row(row)
             and any(_text(value) for value in (row.values() if isinstance(row, dict) else row))
         ]
+        try:
+            total = self._total_count(snapshot.get("total"))
+        except GYJInventoryReadError:
+            return False
+        if total is None:
+            return False
         if not rows:
-            try:
-                return self._total_count(snapshot.get("total")) == 0
-            except GYJInventoryReadError:
-                return False
+            return total == 0
         indexes = _header_indexes(snapshot.get("headers") or [])
         if expected_field not in indexes:
             return False
