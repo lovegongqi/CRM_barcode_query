@@ -300,6 +300,38 @@ class InventoryService:
             })
         return rows
 
+    @staticmethod
+    def _carton_quantity(value):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 999
+        ):
+            raise ValueError("每箱数量必须是1至999之间的整数")
+        return value
+
+    @staticmethod
+    def _carton_text(value, label):
+        if not isinstance(value, str):
+            raise ValueError(f"{label}格式不正确")
+        value = value.strip()
+        if (
+            not value
+            or len(value) > 512
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError(f"{label}格式不正确")
+        return value
+
+    @classmethod
+    def _carton_serials(cls, value):
+        if not isinstance(value, list) or not value or len(value) > 999:
+            raise ValueError("本箱序列号必须是1至999条")
+        serials = [cls._carton_text(serial, "序列号") for serial in value]
+        if len(set(serials)) != len(serials):
+            raise ValueError("本箱序列号存在重复")
+        return serials
+
     def _serial_item(self, owner, task_id, barcode):
         snapshot = self._snapshot(owner, task_id, {"counting", "serial_check"})
         item = self._item(snapshot, barcode)
@@ -385,6 +417,61 @@ class InventoryService:
             self._serial_item(owner, task_id, barcode)
             return self.store.remove_serial_scan(
                 owner, task_id, barcode, device_id, actor, serial,
+            )
+
+    def save_carton_preset(
+        self, owner, task_id, barcode, device_id, actor, carton_quantity,
+    ):
+        carton_quantity = self._carton_quantity(carton_quantity)
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            return self.store.save_carton_preset(
+                owner, task_id, barcode, device_id, actor, carton_quantity,
+            )
+
+    def create_serial_carton(
+        self, owner, task_id, barcode, device_id, actor, preset_quantity,
+        start_serial, serials,
+    ):
+        preset_quantity = self._carton_quantity(preset_quantity)
+        start_serial = self._carton_text(start_serial, "起始序列号")
+        serials = self._carton_serials(serials)
+        if serials[0] != start_serial:
+            raise ValueError("起始序列号必须与预览第一条一致")
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            return self.store.create_serial_carton(
+                owner, task_id, barcode, device_id, actor, preset_quantity,
+                start_serial, serials,
+            )
+
+    def add_carton_serial(
+        self, owner, task_id, barcode, device_id, actor, carton_id, serial,
+    ):
+        serial = self._carton_text(serial, "序列号")
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            return self.store.add_carton_serial(
+                owner, task_id, barcode, device_id, actor, carton_id, serial,
+            )
+
+    def remove_carton_serial(
+        self, owner, task_id, barcode, device_id, actor, carton_id, serial,
+    ):
+        serial = self._carton_text(serial, "序列号")
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            return self.store.remove_carton_serial(
+                owner, task_id, barcode, device_id, actor, carton_id, serial,
+            )
+
+    def delete_serial_carton(
+        self, owner, task_id, barcode, device_id, actor, carton_id,
+    ):
+        with self._serial_guard(owner, task_id, barcode):
+            self._serial_item(owner, task_id, barcode)
+            return self.store.delete_serial_carton(
+                owner, task_id, barcode, device_id, actor, carton_id,
             )
 
     def finish_serial_item(

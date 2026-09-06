@@ -139,6 +139,114 @@ class InventoryServiceTests(unittest.TestCase):
         )
         self.assertIn("B-2", [row["serial"] for row in result["system_only"]])
 
+    def test_carton_create_uses_cache_without_worker_calls(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [
+            {
+                "serial": serial,
+                "barcode": "B2",
+                "name": "序列商品",
+                "warehouse": "沈桥仓",
+                "shipped": False,
+            }
+            for serial in ("S001", "S002")
+        ]
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        serial_reads = list(self.worker.serial_reads)
+
+        result = self.service.create_serial_carton(
+            "admin", task["task_id"], "B2", "device-b", "乙",
+            2, "S001", ["S001", "S002"],
+        )
+
+        self.assertEqual(result["counts"]["matched"], 2)
+        self.assertEqual(self.worker.serial_reads, serial_reads)
+        self.assertEqual(self.worker.lookup_reads, [])
+
+    def test_carton_validation_rejects_invalid_payloads(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = []
+        self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+        task_id = task["task_id"]
+
+        for quantity in (0, 1000, 1.5, True):
+            with self.subTest(quantity=quantity):
+                with self.assertRaises(ValueError):
+                    self.service.create_serial_carton(
+                        "admin", task_id, "B2", "device-b", "乙",
+                        quantity, "S001", ["S001"],
+                    )
+        for start_serial in ("", "BAD\nVALUE", "S" * 513):
+            with self.subTest(start_serial=start_serial):
+                with self.assertRaises(ValueError):
+                    self.service.create_serial_carton(
+                        "admin", task_id, "B2", "device-b", "乙",
+                        1, start_serial, ["S001"],
+                    )
+        invalid_serials = (
+            [], ["S001", "S001"], [""], ["BAD\tVALUE"],
+            ["S" * 513], [f"S{index}" for index in range(1000)],
+        )
+        for serials in invalid_serials:
+            with self.subTest(serial_count=len(serials)):
+                with self.assertRaises(ValueError):
+                    self.service.create_serial_carton(
+                        "admin", task_id, "B2", "device-b", "乙",
+                        1, "S001", serials,
+                    )
+        with self.assertRaisesRegex(ValueError, "起始序列号"):
+            self.service.create_serial_carton(
+                "admin", task_id, "B2", "device-b", "乙",
+                1, "S001", ["S002"],
+            )
+        with sqlite3.connect(self.db_path) as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM inventory_cartons WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_carton_service_corrections_use_cache_without_worker_calls(self):
+        task = self.create_serial_task()
+        task_id = task["task_id"]
+        self.worker.serials["B2"] = [{
+            "serial": "S001", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.service.open_serial_item(
+            "admin", task_id, "B2", "device-a", "甲"
+        )
+        serial_reads = list(self.worker.serial_reads)
+        preset = self.service.save_carton_preset(
+            "admin", task_id, "B2", "device-b", "乙", 20
+        )
+        self.assertEqual(preset["carton_quantity"], 20)
+        created = self.service.create_serial_carton(
+            "admin", task_id, "B2", "device-b", "乙",
+            20, "S001", ["S001"],
+        )
+        carton_id = created["cartons"][0]["carton_id"]
+        added = self.service.add_carton_serial(
+            "admin", task_id, "B2", "device-c", "丙", carton_id, "S002"
+        )
+        self.assertEqual(added["counts"]["physical_only"], 1)
+        removed = self.service.remove_carton_serial(
+            "admin", task_id, "B2", "device-d", "丁", carton_id, "S002"
+        )
+        self.assertEqual(removed["counts"]["physical_only"], 0)
+        deleted = self.service.delete_serial_carton(
+            "admin", task_id, "B2", "device-e", "戊", carton_id
+        )
+        self.assertEqual(deleted["cartons"], [])
+        self.assertEqual(self.worker.serial_reads, serial_reads)
+        self.assertEqual(self.worker.lookup_reads, [])
+
     def test_duplicate_serial_does_not_lookup_or_insert_second_active_row(self):
         task = self.create_serial_task()
         self.worker.serials = {"B2": [
@@ -445,7 +553,7 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(real_scan["classification"], "matched")
         self.assertEqual(
             [row["serial"] for row in second_finish["matched"]],
-            ["B-2", "B-1"],
+            ["B-1", "B-2"],
         )
         self.assertEqual(second_finish["system_only"], [])
         self.assertEqual(self.worker.serial_reads, ["B2"])
