@@ -31,11 +31,19 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 filters = page.locator(".inventory-filter-field")
                 category = filters.nth(0).bounding_box()
                 state = filters.nth(1).bounding_box()
+                category_label = filters.nth(0).locator("span").bounding_box()
+                category_select = filters.nth(0).locator("select").bounding_box()
 
                 self.assertAlmostEqual(category["y"], state["y"], delta=1)
                 self.assertAlmostEqual(category["width"], state["width"], delta=1)
                 self.assertGreater(search["width"], category["width"] + 20)
                 self.assertLess(search["y"], category["y"])
+                self.assertAlmostEqual(
+                    category_label["y"] + category_label["height"] / 2,
+                    category_select["y"] + category_select["height"] / 2,
+                    delta=1,
+                )
+                self.assertLessEqual(category_select["height"], 36)
             finally:
                 browser.close()
 
