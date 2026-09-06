@@ -115,6 +115,19 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.scan_serial.return_value = {"serial": "SN/1", "classification": "matched"}
         self.service.delete_serial_scan.return_value = {"barcode": "A/B", "removed": "SN/1"}
         self.service.finish_serial_item.return_value = {"barcode": "A/B", "counts": {}}
+        self.store.get_carton_preset.return_value = {
+            "barcode": "A/B", "carton_quantity": 20,
+        }
+        self.service.save_carton_preset.return_value = {
+            "barcode": "A/B", "carton_quantity": 20, "version": 4,
+        }
+        carton_serial = {
+            "barcode": "A/B", "cartons": [], "counts": {}, "version": 4,
+        }
+        self.service.create_serial_carton.return_value = carton_serial
+        self.service.add_carton_serial.return_value = carton_serial
+        self.service.remove_carton_serial.return_value = carton_serial
+        self.service.delete_serial_carton.return_value = carton_serial
         self.service.complete_task.return_value = {"task_id": "task-1", "completed": True}
         self.service.reopen_task.return_value = {
             "task_id": "task-1", "phase": "counting", "version": 9,
@@ -529,6 +542,11 @@ class InventoryRouteTest(unittest.TestCase):
             ("get", "/api/inventory/tasks/task-1/items/A/serials"),
             ("post", "/api/inventory/tasks/task-1/items/A/serials/SN"),
             ("get", "/api/inventory/tasks/task-1/items/A/serial/finish"),
+            ("delete", "/api/inventory/tasks/task-1/items/A/carton-preset"),
+            ("get", "/api/inventory/tasks/task-1/items/A/cartons"),
+            ("get", "/api/inventory/tasks/task-1/items/A/cartons/7/serials"),
+            ("post", "/api/inventory/tasks/task-1/items/A/cartons/7/serials/SN"),
+            ("post", "/api/inventory/tasks/task-1/items/A/cartons/7"),
             ("get", "/api/inventory/tasks/task-1/complete"),
             ("get", "/api/inventory/tasks/task-1/items/A/unlock"),
             ("post", "/api/inventory/tasks/task-1/export"),
@@ -582,6 +600,91 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertNotIn("999", body)
         self.assertNotIn("secret", body)
         self.assertNotIn("html", body.lower())
+
+    def test_carton_routes_use_authenticated_identity(self):
+        client = self.login_account("counter")
+        base = "/api/inventory/tasks/task-1/items/A%2FB"
+
+        fetched = client.get(f"{base}/carton-preset")
+        saved = client.post(
+            f"{base}/carton-preset",
+            json={"device_id": "device-a", "carton_quantity": 20},
+        )
+        created = client.post(
+            f"{base}/cartons",
+            json={
+                "device_id": "device-a", "preset_quantity": 20,
+                "start_serial": "SN/1", "serials": ["SN/1", "SN/2"],
+            },
+        )
+        added = client.post(
+            f"{base}/cartons/7/serials",
+            json={"device_id": "device-b", "serial": "SN/3"},
+        )
+        removed = client.delete(
+            f"{base}/cartons/7/serials/SN%2F2",
+            json={"device_id": "device-c"},
+        )
+        deleted = client.delete(
+            f"{base}/cartons/7", json={"device_id": "device-d"},
+        )
+
+        self.assertEqual(fetched.get_json()["preset"]["carton_quantity"], 20)
+        for response in (saved, created, added, removed, deleted):
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.get_json()["version"], 4)
+        self.store.get_carton_preset.assert_called_once_with(
+            "counter-id", "task-1", "A/B"
+        )
+        self.service.save_carton_preset.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-a", "counter", 20
+        )
+        self.service.create_serial_carton.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-a", "counter",
+            20, "SN/1", ["SN/1", "SN/2"],
+        )
+        self.service.add_carton_serial.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-b", "counter", 7, "SN/3"
+        )
+        self.service.remove_carton_serial.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-c", "counter", 7, "SN/2"
+        )
+        self.service.delete_serial_carton.assert_called_once_with(
+            "counter-id", "task-1", "A/B", "device-d", "counter", 7
+        )
+
+    def test_carton_routes_validate_methods_and_errors(self):
+        client = self.login_account("counter")
+        base = "/api/inventory/tasks/task-1/items/A/cartons"
+
+        obsolete = client.post(base, json={
+            "device_id": "device-a", "carton_code": "BOX-1",
+            "preset_quantity": 20, "start_serial": "S001",
+            "serials": ["S001"],
+        })
+        self.assertEqual(obsolete.status_code, 400)
+        self.assertIn("请求字段", obsolete.get_json()["error"])
+        self.service.create_serial_carton.assert_not_called()
+
+        malformed = client.post(base, json=["not", "an", "object"])
+        self.assertEqual(malformed.status_code, 400)
+        self.assertEqual(client.get(base).status_code, 405)
+        self.assertEqual(
+            client.post(f"{base}/0/serials", json={
+                "device_id": "device-a", "serial": "S001",
+            }).status_code,
+            400,
+        )
+
+        self.service.create_serial_carton.side_effect = InventoryConflict(
+            "任务内序列号重复：S001"
+        )
+        conflict = client.post(base, json={
+            "device_id": "device-a", "preset_quantity": 20,
+            "start_serial": "S001", "serials": ["S001"],
+        })
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.get_json()["error"], "任务内序列号重复：S001")
 
     def test_lock_owner_is_returned_only_for_real_owner_conflicts(self):
         client = self.login_account("counter")

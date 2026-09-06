@@ -10517,6 +10517,18 @@ def _inventory_device_id(data):
     return _inventory_path_value(data.get("device_id"), "设备标识")
 
 
+def _inventory_json_fields(data, allowed):
+    if set(data) - set(allowed):
+        raise ValueError("请求字段不正确")
+    return data
+
+
+def _inventory_carton_id(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("箱组标识格式不正确")
+    return value
+
+
 def _inventory_expected_version(data):
     if "expected_version" not in data:
         raise ValueError("expected_version 不能为空")
@@ -10993,6 +11005,103 @@ def api_inventory_delete_serial(task_id, barcode, serial):
         _inventory_device_id(data),
         actor,
         _inventory_path_value(serial, "序列号"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/carton-preset",
+    methods=["GET", "POST"],
+)
+@_inventory_api
+def api_inventory_carton_preset(task_id, barcode):
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if request.method == "GET":
+        preset = inventory_store.get_carton_preset(owner, task_id, barcode)
+        return jsonify({"success": True, "preset": preset})
+    data = _inventory_json_fields(
+        _inventory_json_body(), {"device_id", "carton_quantity"}
+    )
+    preset = inventory_service.save_carton_preset(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        data.get("carton_quantity"),
+    )
+    return _inventory_mutation_response("preset", preset, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons",
+    methods=["POST"],
+)
+@_inventory_api
+def api_inventory_create_carton(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(
+        _inventory_json_body(),
+        {"device_id", "preset_quantity", "start_serial", "serials"},
+    )
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.create_serial_carton(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        data.get("preset_quantity"), data.get("start_serial"),
+        data.get("serials"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>/serials",
+    methods=["POST"],
+)
+@_inventory_api
+def api_inventory_add_carton_serial(task_id, barcode, carton_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id", "serial"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.add_carton_serial(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id), data.get("serial"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>/serials/<path:serial>",
+    methods=["DELETE"],
+)
+@_inventory_api
+def api_inventory_remove_carton_serial(task_id, barcode, carton_id, serial):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.remove_carton_serial(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id), _inventory_path_value(serial, "序列号"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>",
+    methods=["DELETE"],
+)
+@_inventory_api
+def api_inventory_delete_carton(task_id, barcode, carton_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.delete_serial_carton(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id),
     )
     return _inventory_mutation_response("serial", result, owner, task_id)
 
