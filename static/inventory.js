@@ -1083,16 +1083,39 @@ function notifyInventoryCameraDecoded() {
 
 async function optimizeInventoryCameraTrack(video) {
     const stream = video && video.srcObject;
-    if (!stream || typeof stream.getVideoTracks !== 'function') return;
+    if (!stream || typeof stream.getVideoTracks !== 'function') return null;
     const track = stream.getVideoTracks()[0];
-    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return;
+    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return null;
+    let capabilities;
     try {
-        const capabilities = track.getCapabilities() || {};
-        if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
-            await track.applyConstraints({advanced: [{focusMode: 'continuous'}]});
-        }
+        capabilities = track.getCapabilities() || {};
     } catch (_error) {
-        // Some mobile browsers report focus support but reject the constraint.
+        return null;
+    }
+    if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
+        try {
+            await track.applyConstraints({advanced: [{focusMode: 'continuous'}]});
+        } catch (_error) {
+            // Focus support can be reported even when this camera rejects it.
+        }
+    }
+    const zoomMin = Number(capabilities.zoom && capabilities.zoom.min);
+    const zoomMax = Number(capabilities.zoom && capabilities.zoom.max);
+    if (!Number.isFinite(zoomMin) || !Number.isFinite(zoomMax) || zoomMax < zoomMin) return null;
+    try {
+        let desiredZoom = Math.min(zoomMax, Math.max(zoomMin, 2));
+        const zoomStep = Number(capabilities.zoom && capabilities.zoom.step);
+        if (Number.isFinite(zoomStep) && zoomStep > 0) {
+            desiredZoom = zoomMin + Math.round((desiredZoom - zoomMin) / zoomStep) * zoomStep;
+            desiredZoom = Math.min(zoomMax, Math.max(zoomMin, Number(desiredZoom.toFixed(6))));
+        }
+        await track.applyConstraints({advanced: [{zoom: desiredZoom}]});
+        if (typeof track.getSettings !== 'function') return null;
+        const actualZoom = Number((track.getSettings() || {}).zoom);
+        return Number.isFinite(actualZoom) ? actualZoom : null;
+    } catch (_error) {
+        // Zoom support can be reported even when this camera rejects it.
+        return null;
     }
 }
 
@@ -1204,8 +1227,10 @@ async function startInventoryCamera(mode = 'single') {
                 return;
             }
             inventoryCameraControls = controls;
-            await optimizeInventoryCameraTrack(video);
-            setInventoryCameraMessage('相机已就绪，请将一维码横放并对准框内。', 'success');
+            const cameraZoom = await optimizeInventoryCameraTrack(video);
+            const zoomLabel = Number.isFinite(cameraZoom) && cameraZoom > 1
+                ? `（${Math.round(cameraZoom * 10) / 10}×）` : '';
+            setInventoryCameraMessage(`相机已就绪${zoomLabel}，请将一维码横放并对准框内。`, 'success');
         } catch (error) {
             if (generation !== inventoryCameraGeneration) return;
             stopInventoryCamera(false);

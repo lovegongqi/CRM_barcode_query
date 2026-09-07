@@ -2421,8 +2421,17 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     decoderCallback = callback;
                     const track = {
                         stop() { stoppedTracks.push(track); },
-                        getCapabilities() { return {focusMode: ['manual', 'continuous']}; },
-                        async applyConstraints(value) { appliedConstraints.push(value); },
+                        getCapabilities() {
+                            return {
+                                focusMode: ['manual', 'continuous'],
+                                zoom: {min: 1, max: 5, step: 0.3},
+                            };
+                        },
+                        getSettings() { return {zoom: 1.9}; },
+                        async applyConstraints(value) {
+                            appliedConstraints.push(value);
+                            if (value.advanced[0].focusMode) throw new Error('focus rejected');
+                        },
                     };
                     video.srcObject = {
                         getTracks() { return [track]; },
@@ -2480,7 +2489,14 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             (async () => {
                 await vm.runInContext('startInventoryCamera()', context);
                 assert.equal(audioResumeCount, 1);
-                assert.deepEqual(appliedConstraints, [{advanced: [{focusMode: 'continuous'}]}]);
+                assert.deepEqual(appliedConstraints, [
+                    {advanced: [{focusMode: 'continuous'}]},
+                    {advanced: [{zoom: 1.9}]},
+                ]);
+                assert.equal(
+                    element('inventoryCameraMessage').textContent,
+                    '相机已就绪（1.9×），请将一维码横放并对准框内。'
+                );
                 decoderCallback({getText() { return ' SN-1 '; }}, null);
                 decoderCallback({text: 'SN-2'}, null);
                 await vm.runInContext('serialOperationQueue', context);
@@ -2640,7 +2656,15 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             }
             class FakeReader {
                 async decodeFromConstraints(_constraints, video) {
-                    video.srcObject = {getTracks() { return [{stop() {}}]; }};
+                    const track = {
+                        stop() {},
+                        getCapabilities() { return {zoom: {min: 1, max: 4, step: 0.1}}; },
+                        async applyConstraints() { throw new Error('zoom rejected'); },
+                    };
+                    video.srcObject = {
+                        getTracks() { return [track]; },
+                        getVideoTracks() { return [track]; },
+                    };
                     return {stop() { video.srcObject = null; }};
                 }
             }
@@ -2670,6 +2694,30 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
 
                 await vm.runInContext('startInventoryCamera()', context);
                 assert.equal(element('inventoryCameraMessage').textContent, '相机已就绪，请将一维码横放并对准框内。');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_capability_error_falls_back_to_unoptimized_scanning(self):
+        self.run_node(
+            r"""
+            const track = {
+                getCapabilities() { throw new Error('capabilities unavailable'); },
+                async applyConstraints() { throw new Error('must not be called'); },
+            };
+            const video = {srcObject: {getVideoTracks() { return [track]; }}};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {hidden: false, addEventListener() {}},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            context.video = video;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                const zoom = await vm.runInContext('optimizeInventoryCameraTrack(video)', context);
+                assert.equal(zoom, null);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )

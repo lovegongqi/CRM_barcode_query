@@ -20,11 +20,21 @@ import queue
 import uuid
 import shutil
 import hashlib
-from contextlib import closing
+from contextlib import closing, contextmanager
 from collections import OrderedDict
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
 
 from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
 from inbound_extraction import (
@@ -6314,6 +6324,8 @@ PRODUCT_LIBRARY_FILE = os.path.join(CONFIG_DIR, "product_library.json")
 ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
+DISTRIBUTOR_HISTORY_LOCK = threading.RLock()
+DISTRIBUTOR_HISTORY_LOCK_STATE = threading.local()
 TRANSFER_RECORDS_DB_FILE = os.path.join(CONFIG_DIR, "transfer_records.sqlite3")
 INBOUND_HISTORY_DB_FILE = os.path.join(CONFIG_DIR, "inbound_history.sqlite3")
 INVENTORY_DB_FILE = os.path.join(CONFIG_DIR, "inventory_stocktake.sqlite3")
@@ -8574,126 +8586,182 @@ def _sync_transfer_record_from_job(job_id):
     })
 
 
+@contextmanager
+def _distributor_history_transaction():
+    with DISTRIBUTOR_HISTORY_LOCK:
+        depth = getattr(DISTRIBUTOR_HISTORY_LOCK_STATE, "depth", 0)
+        if depth:
+            DISTRIBUTOR_HISTORY_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                DISTRIBUTOR_HISTORY_LOCK_STATE.depth -= 1
+            return
+
+        lock_path = f"{DISTRIBUTOR_HISTORY_FILE}.lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "a+b") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                raise RuntimeError("No supported file-locking API is available")
+            DISTRIBUTOR_HISTORY_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                DISTRIBUTOR_HISTORY_LOCK_STATE.depth = 0
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def load_distributor_history():
-    own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
+            try:
+                with open(DISTRIBUTOR_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return [
+                    _clean_export_value(row)
+                    for row in (data if isinstance(data, list) else [])
+                    if _clean_export_value(row) and _clean_export_value(row) != own_dealer
+                ]
+            except Exception:
+                pass
+        return []
+
+def _atomic_save_json_rows(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def _save_distributor_history_rows(rows):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(rows[:100], f, ensure_ascii=False, indent=2)
+    with _distributor_history_transaction():
+        _atomic_save_json_rows(DISTRIBUTOR_HISTORY_FILE, rows)
 
 def load_deleted_distributor_history():
-    own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_DELETED_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        if os.path.exists(DISTRIBUTOR_HISTORY_DELETED_FILE):
+            try:
+                with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return [
+                    _clean_export_value(row)
+                    for row in (data if isinstance(data, list) else [])
+                    if _clean_export_value(row) and _clean_export_value(row) != own_dealer
+                ]
+            except Exception:
+                pass
+        return []
 
 def save_deleted_distributor_history(rows):
-    clean_rows = []
-    seen = set()
-    own_dealer = own_dealer_name()
-    for row in rows:
-        row = _clean_export_value(row)
-        if row and row != own_dealer and row not in seen:
-            clean_rows.append(row)
-            seen.add(row)
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clean_rows[:300], f, ensure_ascii=False, indent=2)
+    with _distributor_history_transaction():
+        clean_rows = []
+        seen = set()
+        own_dealer = own_dealer_name()
+        for row in rows:
+            row = _clean_export_value(row)
+            if row and row != own_dealer and row not in seen:
+                clean_rows.append(row)
+                seen.add(row)
+        _atomic_save_json_rows(DISTRIBUTOR_HISTORY_DELETED_FILE, clean_rows[:300])
 
 def restore_deleted_distributor_history(distributor):
-    distributor = _clean_export_value(distributor)
-    if not distributor:
-        return
-    deleted = [row for row in load_deleted_distributor_history() if row != distributor]
-    save_deleted_distributor_history(deleted)
+    with _distributor_history_transaction():
+        distributor = _clean_export_value(distributor)
+        if not distributor:
+            return
+        deleted = [row for row in load_deleted_distributor_history() if row != distributor]
+        save_deleted_distributor_history(deleted)
 
 def import_distributor_history_many(distributors):
-    own_dealer = own_dealer_name()
-    incoming = []
-    seen = set()
-    for distributor in distributors:
-        distributor = _clean_export_value(distributor)
-        if distributor and distributor != own_dealer and distributor not in seen:
-            incoming.append(distributor)
-            seen.add(distributor)
-    if not incoming:
-        return load_distributor_history()
-    deleted = [row for row in load_deleted_distributor_history() if row not in seen]
-    save_deleted_distributor_history(deleted)
-    rows = OrderedDict()
-    for distributor in incoming:
-        rows[distributor] = True
-    for distributor in load_distributor_history():
-        if distributor and distributor != own_dealer:
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        incoming = []
+        seen = set()
+        for distributor in distributors:
+            distributor = _clean_export_value(distributor)
+            if distributor and distributor != own_dealer and distributor not in seen:
+                incoming.append(distributor)
+                seen.add(distributor)
+        if not incoming:
+            return load_distributor_history()
+        deleted = [row for row in load_deleted_distributor_history() if row not in seen]
+        save_deleted_distributor_history(deleted)
+        rows = OrderedDict()
+        for distributor in incoming:
             rows[distributor] = True
-    _save_distributor_history_rows(list(rows.keys()))
-    return load_distributor_history()
+        for distributor in load_distributor_history():
+            if distributor and distributor != own_dealer:
+                rows[distributor] = True
+        _save_distributor_history_rows(list(rows.keys()))
+        return load_distributor_history()
 
 def save_distributor_history(distributor):
-    own_dealer = own_dealer_name()
-    distributor = _clean_export_value(distributor)
-    if not distributor or distributor == own_dealer:
-        return
-    restore_deleted_distributor_history(distributor)
-    rows = [distributor] + [row for row in load_distributor_history() if row != distributor]
-    _save_distributor_history_rows(rows)
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        distributor = _clean_export_value(distributor)
+        if not distributor or distributor == own_dealer:
+            return
+        restore_deleted_distributor_history(distributor)
+        rows = [distributor] + [row for row in load_distributor_history() if row != distributor]
+        _save_distributor_history_rows(rows)
 
 def save_distributor_history_many(distributors):
-    own_dealer = own_dealer_name()
-    deleted = set(load_deleted_distributor_history())
-    rows = OrderedDict()
-    for distributor in distributors:
-        distributor = _clean_export_value(distributor)
-        if distributor and distributor != own_dealer and distributor not in deleted:
-            rows[distributor] = True
-    for distributor in load_distributor_history():
-        if distributor and distributor != own_dealer and distributor not in deleted:
-            rows[distributor] = True
-    _save_distributor_history_rows(list(rows.keys()))
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        deleted = set(load_deleted_distributor_history())
+        rows = OrderedDict()
+        for distributor in distributors:
+            distributor = _clean_export_value(distributor)
+            if distributor and distributor != own_dealer and distributor not in deleted:
+                rows[distributor] = True
+        for distributor in load_distributor_history():
+            if distributor and distributor != own_dealer and distributor not in deleted:
+                rows[distributor] = True
+        _save_distributor_history_rows(list(rows.keys()))
 
 def delete_distributor_history(distributor):
-    own_dealer = own_dealer_name()
-    distributor = _clean_export_value(distributor)
-    if not distributor or distributor == own_dealer:
-        return False
-    rows = [row for row in load_distributor_history() if row != distributor]
-    _save_distributor_history_rows(rows)
-    deleted = [distributor] + [row for row in load_deleted_distributor_history() if row != distributor]
-    save_deleted_distributor_history(deleted)
-    return True
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        distributor = _clean_export_value(distributor)
+        if not distributor or distributor == own_dealer:
+            return False
+        rows = [row for row in load_distributor_history() if row != distributor]
+        _save_distributor_history_rows(rows)
+        deleted = [distributor] + [row for row in load_deleted_distributor_history() if row != distributor]
+        save_deleted_distributor_history(deleted)
+        return True
 
 def combined_distributor_history():
-    own_dealer = own_dealer_name()
-    save_distributor_history_many(queried_dealer_history())
-    deleted = set(load_deleted_distributor_history())
-    dealers = OrderedDict()
-    for dealer in load_distributor_history():
-        dealer = _clean_export_value(dealer)
-        if dealer and dealer != own_dealer and dealer not in deleted:
-            dealers[dealer] = True
-    return list(dealers.keys())
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        queried = queried_dealer_history()
+        if queried:
+            save_distributor_history_many(queried)
+        deleted = set(load_deleted_distributor_history())
+        dealers = OrderedDict()
+        for dealer in load_distributor_history():
+            dealer = _clean_export_value(dealer)
+            if dealer and dealer != own_dealer and dealer not in deleted:
+                dealers[dealer] = True
+        return list(dealers.keys())
 
 def load_data():
     if os.path.exists(DATA_FILE):
