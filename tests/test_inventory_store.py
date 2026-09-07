@@ -1355,12 +1355,45 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual([row["entry_number"] for row in rows], [1, 1])
         self.assertEqual(set(rows[0]), {
             "id", "barcode", "event_type", "event_label", "entry_number", "actor",
-            "device_id", "created_at", "before_quantity", "after_quantity",
+            "product_name", "device_id", "created_at", "before_quantity", "after_quantity",
             "before_serial", "after_serial", "before_classification",
             "after_classification", "carton_id", "start_serial", "end_serial",
             "before_preset_quantity", "after_preset_quantity",
             "confirmed_quantity", "affected_count", "serials",
         })
+
+    def test_audit_view_hides_sync_noise_and_names_quantity_product(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "2", "2"
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.executemany(
+                """INSERT INTO inventory_audit_events
+                   (task_id, barcode, event_type, actor, device_id, details, created_at)
+                   VALUES (?, ?, ?, 'system', 'device-a', '{}',
+                           '2026-09-07T10:00:00')""",
+                [
+                    (task["task_id"], "B2", "serial_expected_refreshed"),
+                    (task["task_id"], "B2", "serial_scan_reclassified"),
+                ],
+            )
+
+        rows = store.list_audit_events("admin", task["task_id"])
+
+        self.assertNotIn("serial_expected_refreshed", {
+            row["event_type"] for row in rows
+        })
+        self.assertNotIn("serial_scan_reclassified", {
+            row["event_type"] for row in rows
+        })
+        quantity = next(
+            row for row in rows if row["event_type"] == "count_entry_added"
+        )
+        self.assertEqual(quantity["barcode"], "A1")
+        self.assertEqual(quantity["product_name"], "有库存商品")
 
     def test_audit_view_numbers_count_entries_stably(self):
         store = InventoryStore(self.db_path)
@@ -1584,7 +1617,7 @@ class InventoryStoreTests(unittest.TestCase):
             {"product_quantity", "serial_unverified"},
         )
 
-    def test_serial_audit_includes_before_after_for_add_reclassify_and_remove(self):
+    def test_serial_audit_view_includes_manual_add_and_remove_only(self):
         store, task = self.serial_ready_store()
         store.add_serial_scan(
             "admin", task["task_id"], "B2", "device-a", "甲", "SN-1",
@@ -1614,17 +1647,14 @@ class InventoryStoreTests(unittest.TestCase):
              for row in rows],
             [
                 ("serial_scanned", "甲", "device-a"),
-                ("serial_scan_reclassified", "乙", "device-b"),
                 ("serial_scan_removed", "丙", "device-c"),
             ],
         )
         self.assertIsNone(rows[0]["before_serial"])
         self.assertEqual(rows[0]["after_serial"], "SN-1")
         self.assertEqual(rows[0]["after_classification"], "unknown")
-        self.assertEqual(rows[1]["before_classification"], "unknown")
-        self.assertEqual(rows[1]["after_classification"], "matched")
-        self.assertEqual(rows[2]["before_serial"], "SN-1")
-        self.assertIsNone(rows[2]["after_serial"])
+        self.assertEqual(rows[1]["before_serial"], "SN-1")
+        self.assertIsNone(rows[1]["after_serial"])
 
     def test_admin_reopens_completed_task_without_losing_entries(self):
         store, task = self.completed_difference_store()
@@ -1678,6 +1708,22 @@ class InventoryStoreTests(unittest.TestCase):
             {"from_phase": "completed", "to_phase": "counting"},
         )
 
+    def test_reopen_keeps_historical_product_missing_from_latest_gyj_totals(self):
+        store, task = self.completed_difference_store()
+        store.complete_task("admin", task["task_id"], "管理员")
+
+        reopened = store.reopen_task(
+            "admin", task["task_id"], "管理员", {"A1": "3"},
+            synced_at=datetime(2026, 9, 7, 14, 0, 0),
+        )
+
+        self.assertEqual(reopened["phase"], "counting")
+        self.assertEqual(reopened["missing_barcodes"], ["B2"])
+        snapshot = store.get_task_snapshot("admin", task["task_id"])
+        items = {row["barcode"]: row for row in snapshot["items"]}
+        self.assertEqual(items["B2"]["latest_book_qty"], "0")
+        self.assertEqual(items["B2"]["count_expression"], "3")
+
     def test_reopen_is_atomic_when_another_task_is_active(self):
         store = InventoryStore(self.db_path)
         target = store.create_task("admin", "管理员", self.catalog())
@@ -1696,6 +1742,34 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(after["phase"], "completed")
         self.assertEqual(after["version"], before["version"])
         self.assertEqual(store.get_active_task("admin")["task_id"], active["task_id"])
+
+    def test_admin_deletes_completed_task_and_all_task_owned_history(self):
+        store, task = self.completed_difference_store()
+        store.complete_task("admin", task["task_id"], "管理员")
+
+        deleted = store.delete_completed_task("admin", task["task_id"])
+
+        self.assertEqual(deleted, {"task_id": task["task_id"]})
+        with self.assertRaises(InventoryNotFound):
+            store.get_task_snapshot("admin", task["task_id"])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for table in (
+                "inventory_items", "inventory_count_entries",
+                "inventory_serial_expected", "inventory_serial_scans",
+                "inventory_discrepancies", "inventory_notes",
+                "inventory_audit_events",
+            ):
+                self.assertEqual(connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE task_id = ?",
+                    (task["task_id"],),
+                ).fetchone()[0], 0, table)
+
+    def test_completed_task_delete_rejects_active_task(self):
+        store = InventoryStore(self.db_path)
+        task = store.create_task("admin", "管理员", self.catalog())
+
+        with self.assertRaisesRegex(InventoryConflict, "只能删除已完成"):
+            store.delete_completed_task("admin", task["task_id"])
 
     def test_notes_are_append_only_and_archive_restore_only_change_metadata(self):
         store, task = self.completed_difference_store()

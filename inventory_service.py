@@ -534,9 +534,22 @@ class InventoryService:
         )
 
     def reopen_task(self, owner, task_id, actor):
-        totals = self._call_worker(owner, "read_inventory_stock_totals")
-        if not isinstance(totals, dict):
-            raise InventoryServiceError("GYJ 库存汇总结果格式不正确")
+        catalog = self._call_worker(owner, "load_inventory_catalog")
+        if not isinstance(catalog, list):
+            raise InventoryServiceError("GYJ 商品档案结果格式不正确")
+        totals = {}
+        for product in catalog:
+            if not isinstance(product, dict):
+                raise InventoryServiceError("GYJ 商品档案结果格式不正确")
+            barcode = str(product.get("barcode") or "").strip()
+            if not barcode or "initial_stock" not in product:
+                raise InventoryServiceError("GYJ 商品档案结果格式不正确")
+            try:
+                totals[barcode] = normalize_quantity(product["initial_stock"])
+            except ValueError as exc:
+                raise InventoryServiceError(
+                    f"GYJ 返回的库存数量无效: {barcode}"
+                ) from exc
         return self.store.reopen_task(
             owner, task_id, actor, totals, synced_at=self.now()
         )

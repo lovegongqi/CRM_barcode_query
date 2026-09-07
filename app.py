@@ -10859,6 +10859,18 @@ def api_inventory_task(task_id):
     return jsonify({"success": True, "task": _inventory_public_task(task)})
 
 
+@app.route("/api/inventory/tasks/<task_id>", methods=["DELETE"])
+@_inventory_api
+def api_inventory_delete_task(task_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以删除历史盘点任务")
+    owner, _actor = _inventory_identity()
+    deleted = inventory_store.delete_completed_task(
+        owner, _inventory_path_value(task_id, "任务标识")
+    )
+    return jsonify({"success": True, "deleted": deleted})
+
+
 @app.route("/api/inventory/tasks/<task_id>/history-detail", methods=["GET"])
 @_inventory_api
 def api_inventory_task_history_detail(task_id):

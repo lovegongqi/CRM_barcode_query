@@ -9,9 +9,59 @@ from playwright.sync_api import sync_playwright
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "static" / "inventory.js"
 STYLE = ROOT / "static" / "inventory.css"
+APP_LAYOUT_STYLE = ROOT / "static" / "app_layout.css"
+AURORA_STYLE = ROOT / "static" / "aurora.css"
 
 
 class InventoryFrontendBehaviorTests(unittest.TestCase):
+    def test_desktop_workspace_tabs_align_left_of_account_controls(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 1200, "height": 800})
+                page.set_content(
+                    f"""
+                    <style>{APP_LAYOUT_STYLE.read_text(encoding='utf-8')}</style>
+                    <style>{AURORA_STYLE.read_text(encoding='utf-8')}</style>
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <div class="status-bar aurora-account-status">
+                      <div class="inventory-workspace-tabs">
+                        <button class="inventory-workspace-tab">当前盘点</button>
+                        <button class="inventory-workspace-tab">历史任务</button>
+                        <button class="inventory-workspace-tab">历史差异</button>
+                      </div>
+                      <div class="aurora-account-session">管理员</div>
+                      <button class="btn">GYJ 已登录</button>
+                    </div>
+                    """
+                )
+                page.evaluate("document.body.dataset.auroraPage = 'inventory'")
+                status = page.locator(".status-bar").bounding_box()
+                first_tab = page.locator(".inventory-workspace-tab").first.bounding_box()
+                self.assertLessEqual(first_tab["x"] - status["x"], 24)
+            finally:
+                browser.close()
+
+    def test_hidden_history_pagination_button_is_not_visually_rendered(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{APP_LAYOUT_STYLE.read_text(encoding='utf-8')}</style>
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <button id="inventoryHistoryLoadMore"
+                            class="btn btn-secondary inventory-history-load-more"
+                            hidden>加载更早任务</button>
+                    """
+                )
+                self.assertFalse(
+                    page.locator("#inventoryHistoryLoadMore").is_visible()
+                )
+            finally:
+                browser.close()
+
     def test_mobile_account_and_workspace_controls_share_one_row(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
@@ -1651,6 +1701,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const notices = [];
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                notices,
                 document: {
                     hidden: false,
                     addEventListener() {},
@@ -3741,8 +3792,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             context.CURRENT_ACCOUNT.is_admin = true;
             vm.runInContext(`renderInventoryHistory(${task})`, context);
             const actions = historyRoot.children[0].children[2].children;
-            assert.equal(actions.length, 3);
+            assert.equal(actions.length, 4);
             assert.equal(actions[2].textContent, '继续盘点');
+            assert.equal(actions[3].textContent, '删除任务');
 
             vm.runInContext(`renderInventoryAudit([{
                 event_type: 'count_entry_updated', event_label: '修改分次数量',
@@ -3761,6 +3813,100 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 before_classification: 'unknown', after_classification: 'matched',
             }])`, context);
             assert.match(auditRoot.children[0].children[2].textContent, /SN-1.*未知.*账实一致/);
+            """
+        )
+
+    def test_reopen_warns_when_latest_gyj_totals_omit_historical_products(self):
+        self.run_node(
+            r"""
+            const notices = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                notices,
+                document: {hidden: false, addEventListener() {}, getElementById() {
+                    return {textContent: '', className: ''};
+                }},
+                fetch: async () => ({ok: true, status: 200, json: async () => ({
+                    success: true,
+                    task: {task_id: 'T1', phase: 'counting', version: 4,
+                        missing_barcodes: ['10000428']},
+                })}),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                switchInventoryTab = async () => {};
+                pollInventoryTask = async () => {};
+                setWorkspaceStatus = () => {};
+                setInventoryNotice = (message, kind) => notices.push({message, kind});
+            `, context);
+            (async () => {
+                await vm.runInContext(`reopenInventoryTask('T1')`, context);
+                assert.equal(notices.length, 1);
+                assert.equal(notices[0].kind, 'warning');
+                assert.match(notices[0].message, /10000428/);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_admin_history_delete_requires_confirmation_and_reloads(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [], href: '',
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener(name, handler) { this[name] = handler; },
+                };
+            }
+            const historyRoot = makeNode('div');
+            const requests = [];
+            const reloads = [];
+            let confirmed = false;
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: true}, requests, reloads,
+                window: {confirm() { return confirmed; }},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryHistory') return historyRoot;
+                        return {textContent: '', className: ''};
+                    },
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, method: options && options.method});
+                    return {ok: true, status: 200, json: async () => ({
+                        success: true, deleted: {task_id: 'T1'},
+                    })};
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            Object.defineProperty(context.window, 'confirmed', {
+                set(value) { confirmed = value; },
+            });
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`loadInventoryHistory = async () => reloads.push('loaded')`, context);
+            const task = `[{task_id: 'T1', started_at: 'START', completed_at: 'DONE',
+                participant_count: 1, product_total: 2, counted_product_count: 1,
+                uncounted_product_count: 1, quantity_difference_count: 0,
+                serial_difference_count: 0}]`;
+            vm.runInContext(`renderInventoryHistory(${task})`, context);
+            const actions = historyRoot.children[0].children[2].children;
+            assert.equal(actions[3].textContent, '删除任务');
+            (async () => {
+                await actions[3].click();
+                assert.equal(requests.length, 0);
+                context.window.confirmed = true;
+                await actions[3].click();
+                assert.deepEqual(requests, [{
+                    url: '/api/inventory/tasks/T1', method: 'DELETE',
+                }]);
+                assert.deepEqual(reloads, ['loaded']);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
 
@@ -3800,6 +3946,43 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             }])`, context);
             assert.equal(auditRoot.children[0].children[0].textContent, '修改第 2 笔数量');
             assert.equal(auditRoot.children[1].children[0].textContent, '删除分次数量');
+            """
+        )
+
+    def test_audit_renders_product_identity_for_quantity_change(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [],
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {},
+                };
+            }
+            const auditRoot = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryAuditEvents') return auditRoot;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryAudit([{
+                barcode: 'A1', product_name: '有库存商品',
+                event_type: 'count_entry_added', event_label: '新增分次数量',
+                entry_number: 1, actor: '甲', created_at: '2026-09-07T10:00:00',
+                before_quantity: null, after_quantity: '2',
+            }])`, context);
+            const text = auditRoot.children[0].children
+                .map(node => node.textContent).join(' | ');
+            assert.match(text, /A1 · 有库存商品/);
             """
         )
 

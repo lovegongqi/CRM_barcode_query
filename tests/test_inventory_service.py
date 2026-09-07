@@ -1035,18 +1035,20 @@ class InventoryServiceTests(unittest.TestCase):
         )
         self.assertEqual(history_page["total"], 2)
 
-    def test_reopen_reads_current_gyj_totals_before_restoring_task(self):
+    def test_reopen_uses_same_current_gyj_catalog_as_new_stocktake(self):
         task = self.create_task()
         self.submit(task["task_id"], "A1", "2")
         self.service.complete_task("admin", task["task_id"], "管理员")
-        self.worker.stock["A1"] = "3"
+        self.worker.catalog[0]["initial_stock"] = "3"
+        del self.worker.stock["A1"]
 
         reopened = self.service.reopen_task(
             "admin", task["task_id"], "管理员"
         )
 
         self.assertEqual(reopened["phase"], "counting")
-        self.assertEqual(self.worker.totals_reads, 1)
+        self.assertEqual(self.worker.catalog_reads, 2)
+        self.assertEqual(self.worker.totals_reads, 0)
         item = next(
             row for row in self.store.get_task_snapshot(
                 "admin", task["task_id"]

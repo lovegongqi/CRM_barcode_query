@@ -6,7 +6,7 @@ body[data-aurora-page="inventory"] .status-bar {
 }
 
 body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
-    margin: 0 0 0 auto;
+    margin: 0;
 }
 
 .inventory-label-mobile { display: none; }
@@ -791,6 +791,10 @@ article.inventory-item { cursor: default; }
 
 .inventory-history-load-more {
     justify-self: center;
+}
+
+.inventory-history-load-more[hidden] {
+    display: none !important;
 }
 
 .inventory-difference-tabs {

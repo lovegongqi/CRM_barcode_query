@@ -915,6 +915,23 @@ class InventoryRouteTest(unittest.TestCase):
             "admin", "task-1", "admin"
         )
 
+    def test_only_admin_can_delete_completed_inventory_task(self):
+        ordinary = self.login_account("counter")
+        denied = ordinary.delete("/api/inventory/tasks/task-1")
+        self.assertEqual(denied.status_code, 403)
+        self.store.delete_completed_task.assert_not_called()
+
+        self.store.delete_completed_task.return_value = {"task_id": "task-1"}
+        admin = self.login_account("admin", "admin-pass")
+        deleted = admin.delete("/api/inventory/tasks/task-1")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.get_json(), {
+            "success": True, "deleted": {"task_id": "task-1"},
+        })
+        self.store.delete_completed_task.assert_called_once_with(
+            "admin", "task-1"
+        )
+
     def test_audit_route_is_owner_scoped_and_filters_barcode(self):
         response = self.login_account("counter").get(
             "/api/inventory/tasks/task-1/audit?barcode=A%2FB"

@@ -42,6 +42,12 @@ _AUDIT_EVENT_LABELS = {
     "task_completed": "完成盘点",
     "task_reopened": "继续盘点",
 }
+_VISIBLE_AUDIT_EVENT_TYPES = tuple(
+    event_type for event_type in _AUDIT_EVENT_LABELS
+    if event_type not in {
+        "serial_expected_refreshed", "serial_scan_reclassified",
+    }
+)
 
 _DISCREPANCY_SELECT = """
     SELECT discrepancies.discrepancy_id AS id,
@@ -2609,14 +2615,17 @@ class InventoryStore:
                 (task_id,),
             ).fetchall()
             normalized_totals = {}
+            missing_barcodes = []
             for item in items:
                 if item["status"] == "data_error":
                     continue
                 if item["barcode"] not in stock_totals:
-                    raise ValueError(f"GYJ 库存缺少商品: {item['barcode']}")
-                normalized_totals[item["barcode"]] = normalize_quantity(
-                    stock_totals[item["barcode"]]
-                )
+                    missing_barcodes.append(item["barcode"])
+                    normalized_totals[item["barcode"]] = "0"
+                else:
+                    normalized_totals[item["barcode"]] = normalize_quantity(
+                        stock_totals[item["barcode"]]
+                    )
 
             connection.execute(
                 """INSERT INTO inventory_count_entries
@@ -2672,9 +2681,29 @@ class InventoryStore:
                 created_at=timestamp,
             )
             connection.commit()
-            return self._row_dict(connection.execute(
+            result = self._row_dict(connection.execute(
                 "SELECT * FROM inventory_tasks WHERE task_id = ?", (task_id,)
             ).fetchone())
+            result["missing_barcodes"] = missing_barcodes
+            return result
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def delete_completed_task(self, owner, task_id):
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] != "completed":
+                raise InventoryConflict("只能删除已完成的盘点任务")
+            connection.execute(
+                "DELETE FROM inventory_tasks WHERE task_id = ?", (task_id,)
+            )
+            connection.commit()
+            return {"task_id": task_id}
         except Exception:
             connection.rollback()
             raise
@@ -2923,19 +2952,24 @@ class InventoryStore:
         barcode = str(barcode or "").strip()
         with closing(self.connect()) as connection:
             self._task_for_owner(connection, owner, task_id)
-            clauses = ["task_id = ?"]
+            clauses = ["events.task_id = ?"]
             params = [task_id]
             if barcode:
-                clauses.append("barcode = ?")
+                clauses.append("events.barcode = ?")
                 params.append(barcode)
-            placeholders = ",".join("?" for _ in _AUDIT_EVENT_LABELS)
+            placeholders = ",".join("?" for _ in _VISIBLE_AUDIT_EVENT_TYPES)
             clauses.append(f"event_type IN ({placeholders})")
-            params.extend(_AUDIT_EVENT_LABELS)
+            params.extend(_VISIBLE_AUDIT_EVENT_TYPES)
             rows = connection.execute(
-                """SELECT event_id, barcode, event_type, actor, device_id,
-                          details, created_at
-                     FROM inventory_audit_events
-                    WHERE """ + " AND ".join(clauses) + " ORDER BY event_id",
+                """SELECT events.event_id, events.barcode, events.event_type,
+                          events.actor, events.device_id, events.details,
+                          events.created_at,
+                          COALESCE(items.name, '') AS product_name
+                     FROM inventory_audit_events AS events
+                     LEFT JOIN inventory_items AS items
+                       ON items.task_id = events.task_id
+                      AND items.barcode = events.barcode
+                    WHERE """ + " AND ".join(clauses) + " ORDER BY events.event_id",
                 params,
             ).fetchall()
         result = []
@@ -3016,6 +3050,7 @@ class InventoryStore:
             result.append({
                 "id": int(row["event_id"]),
                 "barcode": row["barcode"],
+                "product_name": row["product_name"],
                 "event_type": row["event_type"],
                 "event_label": _AUDIT_EVENT_LABELS[row["event_type"]],
                 "entry_number": entry_number,

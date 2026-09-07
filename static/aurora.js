@@ -9,6 +9,7 @@
         '/product-library': ['≋', '匹配'],
         '/accounts': ['⚙', '设置']
     };
+    const WAREHOUSE_PATHS = new Set(['/transfer', '/inbound', '/inventory']);
 
     function escapeHtml(value) {
         return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
@@ -17,20 +18,67 @@
     }
 
     function navMeta(anchor) {
-        const path = new URL(anchor.href, location.origin).pathname;
+        const path = new URL(anchor.href, document.baseURI).pathname;
         if (path === '/' && anchor.textContent.includes('结果')) return ['▤', '结果'];
         return NAV[path] || ['•', anchor.textContent.trim()];
     }
 
+    function closeWarehouseNavigation() {
+        document.querySelectorAll('.aurora-warehouse-nav.is-open').forEach(group => {
+            group.classList.remove('is-open');
+            const toggle = group.querySelector('.aurora-warehouse-toggle');
+            if (toggle) toggle.setAttribute('aria-expanded', 'false');
+        });
+    }
+
+    function enhanceWarehouseNavigation(nav) {
+        if (!nav || nav.querySelector('.aurora-warehouse-nav')) return;
+        const links = Array.from(nav.querySelectorAll(':scope > a')).filter(anchor => {
+            const path = new URL(anchor.href, document.baseURI).pathname;
+            return WAREHOUSE_PATHS.has(path);
+        });
+        if (!links.length) return;
+
+        const group = document.createElement('div');
+        group.className = 'aurora-warehouse-nav';
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'aurora-warehouse-toggle';
+        if (links.some(anchor => anchor.classList.contains('active'))) {
+            toggle.classList.add('active');
+        }
+        toggle.setAttribute('aria-label', '仓库');
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.innerHTML = '<span class="aurora-nav-glyph" aria-hidden="true">▣</span><span class="aurora-nav-label">仓库</span>';
+
+        const menu = document.createElement('div');
+        menu.className = 'aurora-warehouse-menu';
+        links[0].before(group);
+        links.forEach(anchor => menu.appendChild(anchor));
+        group.append(toggle, menu);
+        toggle.addEventListener('click', () => {
+            const open = !group.classList.contains('is-open');
+            closeWarehouseNavigation();
+            if (open) {
+                group.classList.add('is-open');
+                toggle.setAttribute('aria-expanded', 'true');
+            }
+        });
+        menu.addEventListener('click', closeWarehouseNavigation);
+    }
+
     function enhanceNavigation() {
-        document.querySelectorAll('.page-nav a').forEach(anchor => {
-            if (anchor.dataset.auroraEnhanced) return;
-            const original = anchor.textContent.trim();
-            const [glyph, fallback] = navMeta(anchor);
-            anchor.dataset.auroraEnhanced = '1';
-            anchor.setAttribute('aria-label', original || fallback);
-            anchor.title = original || fallback;
-            anchor.innerHTML = `<span class="aurora-nav-glyph" aria-hidden="true">${escapeHtml(glyph)}</span><span class="aurora-nav-label">${escapeHtml(fallback)}</span>`;
+        document.querySelectorAll('.page-nav').forEach(nav => {
+            nav.querySelectorAll('a').forEach(anchor => {
+                if (anchor.dataset.auroraEnhanced) return;
+                const original = anchor.textContent.trim();
+                const [glyph, fallback] = navMeta(anchor);
+                anchor.dataset.auroraEnhanced = '1';
+                anchor.setAttribute('aria-label', original || fallback);
+                anchor.title = original || fallback;
+                anchor.innerHTML = `<span class="aurora-nav-glyph" aria-hidden="true">${escapeHtml(glyph)}</span><span class="aurora-nav-label">${escapeHtml(fallback)}</span>`;
+            });
+            enhanceWarehouseNavigation(nav);
         });
     }
 
@@ -118,7 +166,15 @@
     };
 
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') closeAuroraLog();
+        if (event.key === 'Escape') {
+            closeAuroraLog();
+            closeWarehouseNavigation();
+        }
+    });
+    document.addEventListener('click', event => {
+        if (!event.target.closest('.aurora-warehouse-nav')) {
+            closeWarehouseNavigation();
+        }
     });
     document.addEventListener('DOMContentLoaded', () => {
         enhanceNavigation();

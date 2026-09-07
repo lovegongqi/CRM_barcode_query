@@ -2045,10 +2045,17 @@ function renderInventoryAudit(events) {
                 ? `（${event.confirmed_quantity}条）` : '';
             title = `${title} · ${cartonRange}${quantity}`;
         }
-        row.append(
-            inventoryNode('strong', '', title),
-            inventoryNode('span', '', `${inventoryText(event.actor, '未知账号')} · ${inventoryText(event.created_at, '时间未知')}`),
-        );
+        row.append(inventoryNode('strong', '', title));
+        if (event.barcode) {
+            row.append(inventoryNode(
+                'span', 'inventory-audit-product',
+                `${inventoryText(event.barcode)} · ${inventoryText(event.product_name, '商品名称未知')}`,
+            ));
+        }
+        row.append(inventoryNode(
+            'span', '',
+            `${inventoryText(event.actor, '未知账号')} · ${inventoryText(event.created_at, '时间未知')}`,
+        ));
         if (event.before_quantity != null || event.after_quantity != null) {
             row.append(inventoryNode(
                 'code', '',
@@ -2243,7 +2250,7 @@ function closeInventoryHistoryDetail() {
 async function reopenInventoryTask(taskId) {
     setWorkspaceStatus('inventoryHistoryStatus', '正在读取 GYJ 最新库存并继续盘点…');
     try {
-        await inventoryPost(
+        const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(taskId)}/reopen`, {}
         );
         inventoryHistoryTasks = [];
@@ -2251,7 +2258,30 @@ async function reopenInventoryTask(taskId) {
         lastInventoryVersion = null;
         await switchInventoryTab('current');
         await pollInventoryTask({force: true});
-        setInventoryNotice('已恢复历史任务，可继续盘点。', 'success');
+        const missing = Array.isArray(data.task && data.task.missing_barcodes)
+            ? data.task.missing_barcodes : [];
+        if (missing.length) {
+            setInventoryNotice(
+                `已恢复历史任务。GYJ 当前库存未返回商品 ${missing.join('、')}，账面数量暂按 0 处理，请核对。`,
+                'warning',
+            );
+        } else {
+            setInventoryNotice('已恢复历史任务，可继续盘点。', 'success');
+        }
+    } catch (error) {
+        setWorkspaceStatus('inventoryHistoryStatus', error.message, 'error');
+    }
+}
+
+async function deleteInventoryHistoryTask(taskId) {
+    if (!window.confirm('确定永久删除这张历史盘点任务吗？任务明细、差异和修改记录将一并删除，且无法恢复。')) {
+        return;
+    }
+    setWorkspaceStatus('inventoryHistoryStatus', '正在删除历史任务…');
+    try {
+        await inventoryDelete(`/api/inventory/tasks/${encodeURIComponent(taskId)}`, {});
+        await loadInventoryHistory(inventoryTabGeneration, true);
+        setWorkspaceStatus('inventoryHistoryStatus', '历史任务已删除。', 'success');
     } catch (error) {
         setWorkspaceStatus('inventoryHistoryStatus', error.message, 'error');
     }
@@ -2294,7 +2324,10 @@ function renderInventoryHistory(tasks) {
             const reopen = inventoryNode('button', 'btn btn-primary', '继续盘点');
             reopen.type = 'button';
             reopen.addEventListener('click', () => reopenInventoryTask(task.task_id));
-            actions.append(reopen);
+            const remove = inventoryNode('button', 'btn btn-danger', '删除任务');
+            remove.type = 'button';
+            remove.addEventListener('click', () => deleteInventoryHistoryTask(task.task_id));
+            actions.append(reopen, remove);
         }
         row.append(title, metrics, actions);
         row.addEventListener('click', (event) => {
