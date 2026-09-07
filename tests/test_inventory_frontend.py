@@ -2368,7 +2368,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_camera_continuously_submits_and_stops(self):
+    def test_camera_submits_one_serial_stops_and_reports_success(self):
         self.run_node(
             r"""
             class FakeNode {
@@ -2390,22 +2390,51 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const visibilityListeners = [];
             const submitted = [];
             const stoppedTracks = [];
+            const appliedConstraints = [];
+            const vibrations = [];
+            let audioResumeCount = 0;
+            let audioStartCount = 0;
             let decoderCallback = null;
             let stopCount = 0;
+            class FakeAudioContext {
+                constructor() {
+                    this.state = 'suspended'; this.currentTime = 0; this.destination = {};
+                }
+                async resume() { audioResumeCount += 1; this.state = 'running'; }
+                createOscillator() {
+                    return {
+                        frequency: {value: 0}, connect() {},
+                        start() { audioStartCount += 1; }, stop() {},
+                    };
+                }
+                createGain() { return {gain: {value: 0}, connect() {}}; }
+                async close() {}
+            }
             class FakeReader {
                 async decodeFromConstraints(constraints, video, callback) {
-                    assert.deepEqual(constraints, {video: {facingMode: {ideal: 'environment'}}});
+                    assert.deepEqual(constraints, {video: {
+                        facingMode: {ideal: 'environment'},
+                        width: {ideal: 1920},
+                        height: {ideal: 1080},
+                    }});
                     assert.equal(video, element('inventoryCameraVideo'));
                     decoderCallback = callback;
-                    const track = {stop() { stoppedTracks.push(track); }};
-                    video.srcObject = {getTracks() { return [track]; }};
+                    const track = {
+                        stop() { stoppedTracks.push(track); },
+                        getCapabilities() { return {focusMode: ['manual', 'continuous']}; },
+                        async applyConstraints(value) { appliedConstraints.push(value); },
+                    };
+                    video.srcObject = {
+                        getTracks() { return [track]; },
+                        getVideoTracks() { return [track]; },
+                    };
                     return {stop() { stopCount += 1; }};
                 }
             }
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 CURRENT_ACCOUNT: {is_admin: false},
-                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
                 document: {
                     hidden: false,
                     addEventListener(type, callback) {
@@ -2424,6 +2453,8 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
                 localStorage: {getItem() { return 'device-a'; }, setItem() {}},
                 crypto: {randomUUID() { return 'device-a'; }},
+                navigator: {vibrate(value) { vibrations.push(value); }},
+                AudioContext: FakeAudioContext,
                 now: 1000,
             };
             context.window = context;
@@ -2448,21 +2479,21 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext('startInventoryCamera()', context);
+                assert.equal(audioResumeCount, 1);
+                assert.deepEqual(appliedConstraints, [{advanced: [{focusMode: 'continuous'}]}]);
                 decoderCallback({getText() { return ' SN-1 '; }}, null);
-                decoderCallback({getText() { return 'SN-1'; }}, null);
-                context.now += 100;
                 decoderCallback({text: 'SN-2'}, null);
-                context.now += 1600;
-                decoderCallback({getText() { return 'SN-2'; }}, null);
                 await vm.runInContext('serialOperationQueue', context);
-                assert.deepEqual(submitted, ['SN-1', 'SN-2', 'SN-2']);
-
-                context.document.hidden = true;
-                visibilityListeners.forEach(callback => callback());
+                await Promise.resolve();
+                assert.deepEqual(submitted, ['SN-1']);
                 assert.equal(stopCount, 1);
                 assert.equal(stoppedTracks.length, 1);
                 assert.equal(element('inventoryCameraVideo').srcObject, null);
                 assert.equal(element('inventoryCameraPanel').hidden, true);
+                assert.equal(element('inventoryCameraMessage').textContent, '已录入：SN-1');
+                assert.match(element('inventoryCameraMessage').className, /is-success/);
+                assert.deepEqual(vibrations, [120]);
+                assert.equal(audioStartCount, 1);
 
                 context.document.hidden = false;
                 await vm.runInContext('startInventoryCamera()', context);
@@ -2505,7 +2536,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 document: {hidden: false, addEventListener() {}, getElementById: element},
                 fetch: async () => { fetchCount += 1; throw new Error('must not save'); },
-                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
             };
             context.window = context;
@@ -2522,6 +2553,73 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(stopCount, 1);
                 assert.equal(fetchCount, 0);
                 assert.equal(vm.runInContext('cartonPreview.length', context), 0);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_keeps_recognized_serial_visible_when_save_fails(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = true; this.textContent = '';
+                    this.className = ''; this.srcObject = null;
+                }
+                focus() {}
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            let decoderCallback = null;
+            let stopCount = 0;
+            class FakeReader {
+                async decodeFromConstraints(_constraints, video, callback) {
+                    decoderCallback = callback;
+                    const track = {stop() {}};
+                    video.srcObject = {
+                        getTracks() { return [track]; },
+                        getVideoTracks() { return [track]; },
+                    };
+                    return {stop() { stopCount += 1; }};
+                }
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                fetch: async () => ({
+                    ok: false, status: 502,
+                    json: async () => ({success: false, error: 'private backend error'}),
+                }),
+                navigator: {vibrate() {}},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            context.window.isSecureContext = true;
+            context.window.location = {hostname: 'inventory.example.test'};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                currentSerialData = {counts: {}, duplicates: []};
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+            `, context);
+            (async () => {
+                await vm.runInContext('startInventoryCamera()', context);
+                decoderCallback({getText() { return ' SN-FAILED '; }}, null);
+                await vm.runInContext('serialOperationQueue', context);
+                await Promise.resolve();
+                assert.equal(stopCount, 1);
+                assert.equal(
+                    element('inventoryCameraMessage').textContent,
+                    '已识别但保存失败：SN-FAILED，请重试。',
+                );
+                assert.match(element('inventoryCameraMessage').className, /is-error/);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -2548,7 +2646,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             }
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
                 document: {hidden: false, addEventListener() {}, getElementById: element},
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
             };
@@ -2565,13 +2663,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext('startInventoryCamera()', context);
-                assert.equal(element('inventoryCameraMessage').textContent, '相机连续扫码已开启。');
+                assert.equal(element('inventoryCameraMessage').textContent, '相机已就绪，请将一维码横放并对准框内。');
 
                 vm.runInContext('stopInventoryCamera()', context);
                 assert.equal(element('inventoryCameraMessage').textContent, '相机已停止。');
 
                 await vm.runInContext('startInventoryCamera()', context);
-                assert.equal(element('inventoryCameraMessage').textContent, '相机连续扫码已开启。');
+                assert.equal(element('inventoryCameraMessage').textContent, '相机已就绪，请将一维码横放并对准框内。');
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -2621,7 +2719,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             }
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                ZXingBrowser: {BrowserMultiFormatReader: FakeReader},
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
                 document: {hidden: false, addEventListener() {}, getElementById: element},
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
                 streams, controls,
@@ -2670,7 +2768,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             ]);
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                ZXingBrowser: {BrowserMultiFormatReader: class { constructor() { readerCount += 1; }}},
+                ZXingBrowser: {BrowserMultiFormatOneDReader: class { constructor() { readerCount += 1; }}},
                 document: {
                     hidden: false, addEventListener() {},
                     getElementById(id) { return elements.get(id); },

@@ -179,11 +179,12 @@
             <input id="inventorySerialInput" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="扫描后按 Enter">
         </label>
         <div class="inventory-camera-actions">
-            <button class="btn btn-primary" id="inventoryCameraStart" type="button" disabled>相机连续扫码</button>
-            <button class="btn btn-secondary" id="inventoryCameraStop" type="button" disabled>停止相机</button>
+            <button class="btn btn-primary" id="inventoryCameraStart" type="button" disabled>相机扫一条</button>
+            <button class="btn btn-secondary" id="inventoryCameraStop" type="button" disabled>取消扫码</button>
         </div>
         <div id="inventoryCameraPanel" class="inventory-camera-panel" hidden>
             <video id="inventoryCameraVideo" playsinline muted aria-label="序列号扫码相机预览"></video>
+            <div class="inventory-camera-guide" aria-hidden="true"><span></span></div>
         </div>
         <p id="inventoryCameraMessage" class="inventory-camera-message" role="status" aria-live="polite"></p>
         <details class="inventory-carton-entry">

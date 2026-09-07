@@ -10490,10 +10490,16 @@ def api_inbound_gyj_status():
 
 def _inventory_identity():
     account = current_account() or {}
-    owner = str(account.get("id") or account.get("username") or "").strip()
     actor = str(account.get("username") or "").strip()
-    if not owner or not actor:
+    if not actor:
         raise InventoryPermissionDenied("请先登录工具账号")
+    admin_account = next(
+        (row for row in load_accounts() if row.get("username") == "admin"),
+        {},
+    )
+    owner = str(
+        admin_account.get("id") or admin_account.get("username") or "admin"
+    ).strip()
     return owner, actor
 
 

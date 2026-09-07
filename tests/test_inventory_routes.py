@@ -238,7 +238,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertIs(result, sentinel)
         pool.get.assert_called_once_with("warehouse-user")
 
-    def test_create_uses_session_owner_and_actor_not_request_overrides(self):
+    def test_create_uses_shared_owner_and_session_actor_not_request_overrides(self):
         client = self.login_account("warehouse-user", "warehouse-pass")
         response = client.post(
             "/api/inventory/tasks",
@@ -247,8 +247,76 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(set(response.get_json()), {"success", "task", "version"})
         self.service.create_task.assert_called_once_with(
-            "warehouse-account-id", "warehouse-user"
+            "admin", "warehouse-user"
         )
+
+    def test_active_stocktake_is_shared_across_inventory_accounts(self):
+        self.store.get_active_task.return_value = {"task_id": "task-1"}
+        with mock.patch.object(app_module, "_ensure_inventory_sync"):
+            admin_response = self.login_account("admin", "admin-pass").get(
+                "/api/inventory/tasks/active"
+            )
+            counter_response = self.login_account("counter").get(
+                "/api/inventory/tasks/active"
+            )
+
+        self.assertEqual(admin_response.status_code, 200)
+        self.assertEqual(counter_response.status_code, 200)
+        self.assertEqual(
+            self.store.get_active_task.call_args_list,
+            [mock.call("admin"), mock.call("admin")],
+        )
+        self.assertEqual(
+            [call.args[:2] for call in self.store.get_task_snapshot.call_args_list],
+            [("admin", "task-1"), ("admin", "task-1")],
+        )
+
+    def test_real_stocktake_and_history_are_shared_but_actor_is_preserved(self):
+        class SharedWorker:
+            def load_inventory_catalog(self):
+                return True, [{
+                    "barcode": "A1", "name": "Filter", "spec": "",
+                    "model": "", "category": "Parts", "unit": "piece",
+                    "has_serial": False, "initial_stock": "2",
+                }]
+
+            def read_inventory_stock(self, _barcode):
+                return True, "2"
+
+        store = InventoryStore(
+            os.path.join(self.tempdir.name, "shared-route.sqlite3")
+        )
+        service = InventoryService(store, lambda _owner: SharedWorker())
+        with (
+            mock.patch.object(app_module, "inventory_store", store),
+            mock.patch.object(app_module, "inventory_service", service),
+            mock.patch.object(app_module, "_ensure_inventory_sync"),
+        ):
+            admin = self.login_account("admin", "admin-pass")
+            created = admin.post("/api/inventory/tasks").get_json()
+            task_id = created["task"]["task_id"]
+
+            counter = self.login_account("counter")
+            active = counter.get("/api/inventory/tasks/active").get_json()
+            self.assertEqual(active["task"]["task_id"], task_id)
+            counted = counter.post(
+                f"/api/inventory/tasks/{task_id}/items/A1/count-entries",
+                json={"device_id": "device-counter", "quantity": "2"},
+            ).get_json()
+
+            completed = admin.post(
+                f"/api/inventory/tasks/{task_id}/complete",
+                json={
+                    "expected_version": counted["version"],
+                    "allow_unverified_serials": False,
+                },
+            )
+            self.assertEqual(completed.status_code, 200)
+            history = counter.get("/api/inventory/tasks/history").get_json()
+
+        self.assertEqual(history["tasks"][0]["task_id"], task_id)
+        events = store.list_audit_events("admin", task_id, barcode="A1")
+        self.assertIn("counter", {event["actor"] for event in events})
 
     def test_active_query_passes_version_query_and_state_to_store(self):
         self.store.get_active_task.return_value = {"task_id": "task-1"}
@@ -261,12 +329,12 @@ class InventoryRouteTest(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(set(payload), {"success", "task"})
         self.store.get_task_snapshot.assert_called_once_with(
-            "counter-id", "task-1", known_version=7
+            "admin", "task-1", known_version=7
         )
         self.store.list_items.assert_called_once_with(
             "task-1", query="Zero stock", state="pending", include_zero=True
         )
-        ensure.assert_called_once_with("counter-id", "task-1")
+        ensure.assert_called_once_with("admin", "task-1")
 
     def test_active_unchanged_snapshot_does_not_reload_items(self):
         self.store.get_active_task.return_value = {"task_id": "task-1"}
@@ -403,17 +471,17 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertEqual(updated.get_json()["version"], 5)
         self.assertEqual(deleted.get_json()["version"], 6)
         self.service.open_count_item.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "counter"
+            "admin", "task-1", "A/B", "counter"
         )
         self.service.add_count_entry.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-a", "counter", "12"
+            "admin", "task-1", "A/B", "device-a", "counter", "12"
         )
         self.service.update_count_entry.assert_called_once_with(
-            "counter-id", "task-1", "A/B", 7, 1,
+            "admin", "task-1", "A/B", 7, 1,
             "device-b", "counter", "13",
         )
         self.service.delete_count_entry.assert_called_once_with(
-            "counter-id", "task-1", "A/B", 7, 2,
+            "admin", "task-1", "A/B", 7, 2,
             "device-a", "counter",
         )
 
@@ -665,23 +733,23 @@ class InventoryRouteTest(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.get_json()["version"], 4)
         self.store.get_carton_preset.assert_called_once_with(
-            "counter-id", "task-1", "A/B"
+            "admin", "task-1", "A/B"
         )
         self.service.save_carton_preset.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-a", "counter", 20
+            "admin", "task-1", "A/B", "device-a", "counter", 20
         )
         self.service.create_serial_carton.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-a", "counter",
+            "admin", "task-1", "A/B", "device-a", "counter",
             20, "SN/1", ["SN/1", "SN/2"],
         )
         self.service.add_carton_serial.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-b", "counter", 7, "SN/3"
+            "admin", "task-1", "A/B", "device-b", "counter", 7, "SN/3"
         )
         self.service.remove_carton_serial.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-c", "counter", 7, "SN/2"
+            "admin", "task-1", "A/B", "device-c", "counter", 7, "SN/2"
         )
         self.service.delete_serial_carton.assert_called_once_with(
-            "counter-id", "task-1", "A/B", "device-d", "counter", 7
+            "admin", "task-1", "A/B", "device-d", "counter", 7
         )
 
     def test_carton_routes_validate_methods_and_errors(self):
@@ -789,7 +857,7 @@ class InventoryRouteTest(unittest.TestCase):
         store = InventoryStore(
             os.path.join(self.tempdir.name, "route-sync-retry.sqlite3")
         )
-        task = store.create_task("counter-id", "counter", [{
+        task = store.create_task("admin", "counter", [{
             "barcode": "A1",
             "name": "Filter",
             "spec": "",
@@ -800,13 +868,13 @@ class InventoryRouteTest(unittest.TestCase):
             "initial_stock": "2",
         }])
         task_id = task["task_id"]
-        store.advance_count_phase_if_ready("counter-id", task_id)
+        store.advance_count_phase_if_ready("admin", task_id)
         store.claim_item(task_id, "A1", "device-a", "counter", "counting")
         store.set_open_book_quantity(
-            "counter-id", task_id, "A1", "device-a", "counter", "2"
+            "admin", task_id, "A1", "device-a", "counter", "2"
         )
         store.record_count(
-            "counter-id",
+            "admin",
             task_id,
             "A1",
             "device-a",
@@ -823,8 +891,8 @@ class InventoryRouteTest(unittest.TestCase):
             mock.patch.object(app_module, "inventory_store", store),
             mock.patch.object(app_module, "inventory_service", service),
         ):
-            app_module._run_inventory_sync("counter-id", task_id)
-            failed = store.get_task_snapshot("counter-id", task_id)
+            app_module._run_inventory_sync("admin", task_id)
+            failed = store.get_task_snapshot("admin", task_id)
             self.assertEqual(failed["phase"], "sync_error")
             self.assertIsNone(failed["last_sync_at"])
             self.assertNotIn("999", failed["gyj_status"])
@@ -845,7 +913,7 @@ class InventoryRouteTest(unittest.TestCase):
             if retry_thread is not None:
                 retry_thread.join(1)
 
-        recovered = store.get_task_snapshot("counter-id", task_id)
+        recovered = store.get_task_snapshot("admin", task_id)
         self.assertEqual(worker.calls, 2)
         self.assertEqual(recovered["phase"], "counting")
         self.assertEqual(recovered["gyj_status"], "synced")
@@ -945,12 +1013,12 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["events"][0]["event_label"], "修改分次数量")
         self.store.list_audit_events.assert_called_once_with(
-            "counter-id", "task-1", barcode="A/B"
+            "admin", "task-1", barcode="A/B"
         )
 
     def test_history_and_discrepancy_route_json_contract_matches_store_rows(self):
         history_row = {
-            "task_id": "task-history-1", "owner": "counter-id",
+            "task_id": "task-history-1", "owner": "admin",
             "created_by": "盘点员", "phase": "completed", "version": 8,
             "started_at": "2026-09-01T08:00:00",
             "completed_at": "2026-09-01T09:00:00", "last_sync_at": None,
@@ -1000,7 +1068,7 @@ class InventoryRouteTest(unittest.TestCase):
             },
         })
         self.store.list_task_history.assert_called_with(
-            "counter-id", limit=10, offset=10
+            "admin", limit=10, offset=10
         )
         self.assertEqual(
             discrepancies,
@@ -1009,7 +1077,7 @@ class InventoryRouteTest(unittest.TestCase):
             }]},
         )
         self.store.list_discrepancies.assert_called_with(
-            "counter-id", "open", query="SN/1"
+            "admin", "open", query="SN/1"
         )
 
     def test_history_route_rejects_unbounded_or_invalid_pagination(self):
@@ -1023,7 +1091,7 @@ class InventoryRouteTest(unittest.TestCase):
 
     def test_history_task_number_and_detail_route_use_completion_time(self):
         task = {
-            "task_id": "task-history-1", "owner": "counter-id",
+            "task_id": "task-history-1", "owner": "admin",
             "created_by": "盘点员", "phase": "completed", "version": 8,
             "started_at": "2026-09-07T08:00:00",
             "completed_at": "2026-09-07T08:14:26.123456",
@@ -1065,7 +1133,7 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertEqual(detail["scope"], "counted")
         self.assertEqual(detail["items"][0]["serial_discrepancies"][0]["state"], "archived")
         self.store.get_task_history_detail.assert_called_once_with(
-            "counter-id", "task-history-1", scope="counted"
+            "admin", "task-history-1", scope="counted"
         )
 
     def test_history_detail_route_rejects_unknown_metric_scope(self):
@@ -1103,7 +1171,7 @@ class InventoryRouteTest(unittest.TestCase):
             cell.value for sheet in workbook.worksheets for row in sheet.iter_rows() for cell in row
         ]))
         self.store.get_task_snapshot.assert_called_with(
-            "counter-id", "task-safe"
+            "admin", "task-safe"
         )
 
         discrepancy_response = client.get(
@@ -1118,7 +1186,7 @@ class InventoryRouteTest(unittest.TestCase):
             for cell in row
         ]))
         self.store.list_discrepancies.assert_called_with(
-            "counter-id", "open", query="SN1"
+            "admin", "open", query="SN1"
         )
 
     def test_ensure_inventory_sync_deduplicates_daemons_and_reopens_stale_tasks(self):

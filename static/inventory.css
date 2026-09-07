@@ -481,6 +481,7 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-camera-panel {
+    position: relative;
     width: min(100%, 560px);
     margin-top: 12px;
     overflow: hidden;
@@ -498,6 +499,25 @@ article.inventory-item { cursor: default; }
     object-fit: cover;
 }
 
+.inventory-camera-guide {
+    position: absolute;
+    inset: 18% 7%;
+    border: 2px solid rgba(103, 232, 249, .9);
+    border-radius: 12px;
+    box-shadow: 0 0 0 999px rgba(2, 8, 23, .32);
+    pointer-events: none;
+}
+
+.inventory-camera-guide span {
+    position: absolute;
+    top: 50%;
+    right: 8%;
+    left: 8%;
+    height: 2px;
+    background: #fb7185;
+    box-shadow: 0 0 10px rgba(251, 113, 133, .9);
+}
+
 .inventory-camera-message {
     min-height: 20px;
     margin: 8px 0 0;
@@ -505,8 +525,23 @@ article.inventory-item { cursor: default; }
     font-size: 12px;
 }
 
-.inventory-camera-message.is-error { color: #fecaca; }
-.inventory-camera-message.is-success { color: #bbf7d0; }
+.inventory-camera-message.is-error,
+.inventory-camera-message.is-success {
+    padding: 9px 11px;
+    border: 1px solid currentColor;
+    border-radius: 10px;
+    font-weight: 800;
+}
+
+.inventory-camera-message.is-error {
+    color: #fecaca;
+    background: rgba(127, 29, 29, .18);
+}
+
+.inventory-camera-message.is-success {
+    color: #bbf7d0;
+    background: rgba(20, 83, 45, .18);
+}
 
 .inventory-carton-entry {
     margin: 12px 0;

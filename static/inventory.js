@@ -42,9 +42,9 @@ let inventoryCameraControls = null;
 let inventoryCameraStartPromise = null;
 let inventoryCameraGeneration = 0;
 let inventoryCameraActiveGeneration = 0;
-let inventoryCameraLastSerial = '';
-let inventoryCameraLastDecodedAt = 0;
-let inventoryCameraMode = 'continuous';
+let inventoryCameraMode = 'single';
+let inventoryCameraResultLocked = false;
+let inventoryCameraAudioContext = null;
 let cartonPreview = [];
 let cartonPreviewQuantity = 0;
 let cartonSubmissionPending = false;
@@ -1043,6 +1043,59 @@ function inventoryCameraCanUseHttp() {
         || hostname === '::1' || hostname === '[::1]';
 }
 
+function primeInventoryCameraAudio() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) return null;
+    try {
+        if (!inventoryCameraAudioContext || inventoryCameraAudioContext.state === 'closed') {
+            inventoryCameraAudioContext = new AudioContextClass();
+        }
+        if (inventoryCameraAudioContext.state === 'suspended'
+            && typeof inventoryCameraAudioContext.resume === 'function') {
+            const resume = inventoryCameraAudioContext.resume();
+            if (resume && typeof resume.catch === 'function') resume.catch(() => {});
+        }
+        return inventoryCameraAudioContext;
+    } catch (_error) {
+        return null;
+    }
+}
+
+function notifyInventoryCameraDecoded() {
+    if (window.navigator && typeof window.navigator.vibrate === 'function') {
+        window.navigator.vibrate(120);
+    }
+    const audioContext = primeInventoryCameraAudio();
+    if (!audioContext) return;
+    try {
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        oscillator.frequency.value = 880;
+        gain.gain.value = 0.08;
+        oscillator.connect(gain);
+        gain.connect(audioContext.destination);
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + 0.08);
+    } catch (_error) {
+        // Visual feedback remains available when browsers block Web Audio.
+    }
+}
+
+async function optimizeInventoryCameraTrack(video) {
+    const stream = video && video.srcObject;
+    if (!stream || typeof stream.getVideoTracks !== 'function') return;
+    const track = stream.getVideoTracks()[0];
+    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return;
+    try {
+        const capabilities = track.getCapabilities() || {};
+        if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
+            await track.applyConstraints({advanced: [{focusMode: 'continuous'}]});
+        }
+    } catch (_error) {
+        // Some mobile browsers report focus support but reject the constraint.
+    }
+}
+
 function stopInventoryCamera(showStatus = true) {
     inventoryCameraGeneration += 1;
     inventoryCameraActiveGeneration = 0;
@@ -1068,26 +1121,26 @@ function stopInventoryCamera(showStatus = true) {
     if (start) start.disabled = false;
     if (cartonStart) cartonStart.disabled = false;
     if (stop) stop.disabled = true;
-    inventoryCameraLastSerial = '';
-    inventoryCameraLastDecodedAt = 0;
-    inventoryCameraMode = 'continuous';
+    inventoryCameraResultLocked = false;
+    inventoryCameraMode = 'single';
     if (showStatus) setInventoryCameraMessage('相机已停止。');
 }
 
-async function startInventoryCamera(mode = 'continuous') {
+async function startInventoryCamera(mode = 'single') {
+    primeInventoryCameraAudio();
     stopInventoryCamera(false);
-    inventoryCameraMode = mode === 'carton-start' ? 'carton-start' : 'continuous';
+    inventoryCameraMode = mode === 'carton-start' ? 'carton-start' : 'single';
     const generation = ++inventoryCameraGeneration;
     const previousStart = inventoryCameraStartPromise;
     const pending = (async () => {
         if (previousStart) await previousStart;
         if (generation !== inventoryCameraGeneration) return;
         if (!inventoryCameraCanUseHttp()) {
-            setInventoryCameraMessage('相机连续扫码需要 HTTPS；仍可使用扫码枪或键盘输入。', 'error');
+            setInventoryCameraMessage('相机扫码需要 HTTPS；仍可使用扫码枪或键盘输入。', 'error');
             return;
         }
         if (!serialWorkspaceOpen || !serialWorkspaceEditable) return;
-        if (!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatReader) {
+        if (!window.ZXingBrowser || !window.ZXingBrowser.BrowserMultiFormatOneDReader) {
             setInventoryCameraMessage('相机扫码组件未能载入；仍可使用扫码枪或键盘输入。', 'error');
             return;
         }
@@ -1110,18 +1163,19 @@ async function startInventoryCamera(mode = 'continuous') {
         panel.hidden = false;
         setInventoryCameraMessage('正在启动后置相机…');
         try {
-            const reader = new window.ZXingBrowser.BrowserMultiFormatReader();
+            const reader = new window.ZXingBrowser.BrowserMultiFormatOneDReader();
             const controls = await reader.decodeFromConstraints(
-                {video: {facingMode: {ideal: 'environment'}}},
+                {video: {
+                    facingMode: {ideal: 'environment'},
+                    width: {ideal: 1920},
+                    height: {ideal: 1080},
+                }},
                 video,
                 (result) => {
-                    if (!result || generation !== inventoryCameraGeneration) return;
+                    if (!result || generation !== inventoryCameraGeneration || inventoryCameraResultLocked) return;
                     const serial = String(result.getText ? result.getText() : result.text || '').trim();
                     if (!serial) return;
-                    const decodedAt = Date.now();
-                    if (serial === inventoryCameraLastSerial && decodedAt - inventoryCameraLastDecodedAt < 1500) return;
-                    inventoryCameraLastSerial = serial;
-                    inventoryCameraLastDecodedAt = decodedAt;
+                    inventoryCameraResultLocked = true;
                     if (inventoryCameraMode === 'carton-start') {
                         const target = inventoryElement('inventoryCartonStartSerial');
                         target.value = serial;
@@ -1130,7 +1184,15 @@ async function startInventoryCamera(mode = 'continuous') {
                         target.focus();
                         return;
                     }
-                    submitDecodedSerial(serial);
+                    const requestId = serialWorkspaceRequestId;
+                    notifyInventoryCameraDecoded();
+                    stopInventoryCamera(false);
+                    setInventoryCameraMessage(`已识别：${serial}，正在保存…`, 'success');
+                    submitDecodedSerial(serial).then((saved) => {
+                        if (!serialWorkspaceOpen || requestId !== serialWorkspaceRequestId) return;
+                        if (saved) setInventoryCameraMessage(`已录入：${serial}`, 'success');
+                        else setInventoryCameraMessage(`已识别但保存失败：${serial}，请重试。`, 'error');
+                    });
                 },
             );
             if (generation !== inventoryCameraGeneration || !serialWorkspaceOpen) {
@@ -1142,7 +1204,8 @@ async function startInventoryCamera(mode = 'continuous') {
                 return;
             }
             inventoryCameraControls = controls;
-            setInventoryCameraMessage('相机连续扫码已开启。', 'success');
+            await optimizeInventoryCameraTrack(video);
+            setInventoryCameraMessage('相机已就绪，请将一维码横放并对准框内。', 'success');
         } catch (error) {
             if (generation !== inventoryCameraGeneration) return;
             stopInventoryCamera(false);
@@ -1809,7 +1872,7 @@ async function submitDecodedSerial(serial) {
     const input = inventoryElement('inventorySerialInput');
     if (!serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask || !serial) {
         if (input) input.focus();
-        return;
+        return false;
     }
     const taskId = inventoryTask.task_id;
     const barcode = currentSerialBarcode;
@@ -1818,7 +1881,7 @@ async function submitDecodedSerial(serial) {
     const mutationKey = serialMutationKey('scan', serial);
     return queueSerialOperation(async (requestId, generation) => {
         try {
-            if (!serialWorkspaceEditable) return;
+            if (!serialWorkspaceEditable) return false;
             let data;
             try {
                 data = await inventoryPost(
@@ -1831,9 +1894,9 @@ async function submitDecodedSerial(serial) {
                     serialMutationFailures.set(mutationKey, '扫码保存失败，请重试。');
                     setSerialMessage('扫码保存失败，请重试。', 'error');
                 }
-                return;
+                return false;
             }
-            if (!serialOperationIsOpen(requestId)) return;
+            if (!serialOperationIsOpen(requestId)) return false;
             serialMutationFailures.delete(mutationKey);
             const scan = data.scan || {};
             if (scan.classification === 'duplicate') {
@@ -1850,12 +1913,13 @@ async function submitDecodedSerial(serial) {
                 try {
                     await performSerialRefresh(false, requestId, generation);
                 } catch (_error) {
-                    return;
+                    return true;
                 }
             }
             if (serialOperationIsOpen(requestId)) {
                 setSerialMessage(`${inventoryText(scan.serial, serial)}：${serialClassificationLabel(scan.classification)}`, scan.classification === 'matched' ? 'success' : '');
             }
+            return true;
         } finally {
             if (requestId === serialWorkspaceRequestId) {
                 serialScanQueueLength = Math.max(0, serialScanQueueLength - 1);
