@@ -935,6 +935,7 @@ class InventoryRouteTest(unittest.TestCase):
             "completed": True,
             "product_total": 4, "quantity_difference_count": 2,
             "serial_difference_count": 3, "participant_count": 2,
+            "counted_product_count": 3, "uncounted_product_count": 1,
         }
         discrepancy_row = {
             "id": 9, "task_id": "task-history-1", "barcode": "A/B",
@@ -970,7 +971,7 @@ class InventoryRouteTest(unittest.TestCase):
 
         self.assertEqual(history, {
             "success": True,
-            "tasks": [history_row],
+            "tasks": [{**history_row, "task_number": "PD20260901-090000"}],
             "pagination": {
                 "limit": 10, "offset": 10, "total": 21, "has_more": True,
             },
@@ -980,7 +981,9 @@ class InventoryRouteTest(unittest.TestCase):
         )
         self.assertEqual(
             discrepancies,
-            {"success": True, "discrepancies": [discrepancy_row]},
+            {"success": True, "discrepancies": [{
+                **discrepancy_row, "task_number": "PD20260901-090000",
+            }]},
         )
         self.store.list_discrepancies.assert_called_with(
             "counter-id", "open", query="SN/1"
@@ -994,6 +997,52 @@ class InventoryRouteTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertFalse(response.get_json()["success"])
         self.store.list_task_history.assert_not_called()
+
+    def test_history_task_number_and_detail_route_use_completion_time(self):
+        task = {
+            "task_id": "task-history-1", "owner": "counter-id",
+            "created_by": "盘点员", "phase": "completed", "version": 8,
+            "started_at": "2026-09-07T08:00:00",
+            "completed_at": "2026-09-07T08:14:26.123456",
+            "last_sync_at": None, "gyj_status": "synced",
+            "sync_resume_phase": None,
+        }
+        self.store.list_task_history.return_value = {
+            "tasks": [{**task, "completed": True, "product_total": 1,
+                       "counted_product_count": 1,
+                       "uncounted_product_count": 0,
+                       "quantity_difference_count": 1,
+                       "serial_difference_count": 1,
+                       "participant_count": 1}],
+            "total": 1, "limit": 20, "offset": 0,
+        }
+        self.store.get_task_history_detail.return_value = {
+            "task": task,
+            "items": [{
+                "barcode": "B2", "name": "序列号商品", "has_serial": True,
+                "completed_book_qty": "2", "completed_actual_qty": "1",
+                "diff_qty": "-1", "serial_discrepancies": [{
+                    "id": 9, "serial": "SN-1", "kind": "system_only_serial",
+                    "state": "archived", "archived_by": "管理员",
+                    "archived_at": "2026-09-07T09:00:00",
+                }],
+            }],
+        }
+        client = self.login_account("counter")
+
+        history = client.get("/api/inventory/tasks/history").get_json()
+        detail_response = client.get(
+            "/api/inventory/tasks/task-history-1/history-detail"
+        )
+
+        self.assertEqual(history["tasks"][0]["task_number"], "PD20260907-081426")
+        self.assertEqual(detail_response.status_code, 200)
+        detail = detail_response.get_json()
+        self.assertEqual(detail["task"]["task_number"], "PD20260907-081426")
+        self.assertEqual(detail["items"][0]["serial_discrepancies"][0]["state"], "archived")
+        self.store.get_task_history_detail.assert_called_once_with(
+            "counter-id", "task-history-1"
+        )
 
     def test_export_routes_are_owner_scoped_filtered_and_price_free(self):
         self.store.get_task_snapshot.return_value = {

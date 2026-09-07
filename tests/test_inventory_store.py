@@ -1861,14 +1861,15 @@ class InventoryStoreTests(unittest.TestCase):
                 tasks,
             )
             items = [
-                ("newer", "A1", "商品一", "1"),
-                ("newer", "B2", "商品二", "0"),
-                ("older", "A1", "商品一", "1"),
+                ("newer", "A1", "商品一", "1", "2"),
+                ("newer", "B2", "商品二", "0", None),
+                ("older", "A1", "商品一", "1", "2"),
             ]
             connection.executemany(
                 """INSERT INTO inventory_items
-                   (task_id, barcode, name, difference, updated_at)
-                   VALUES (?, ?, ?, ?, '2026-09-03T10:00:00')""",
+                   (task_id, barcode, name, difference,
+                    completed_counted_quantity, updated_at)
+                   VALUES (?, ?, ?, ?, ?, '2026-09-03T10:00:00')""",
                 items,
             )
             connection.executemany(
@@ -1901,6 +1902,7 @@ class InventoryStoreTests(unittest.TestCase):
                 for key in (
                     "product_total", "quantity_difference_count",
                     "serial_difference_count", "participant_count",
+                    "counted_product_count", "uncounted_product_count",
                 )
             },
             {
@@ -1908,7 +1910,115 @@ class InventoryStoreTests(unittest.TestCase):
                 "quantity_difference_count": 1,
                 "serial_difference_count": 3,
                 "participant_count": 2,
+                "counted_product_count": 1,
+                "uncounted_product_count": 1,
             },
         )
         self.assertEqual(second_page["tasks"][0]["participant_count"], 1)
         self.assertEqual(store.list_task_history("other")["total"], 1)
+
+    def test_history_detail_groups_product_counts_and_serial_archive_states(self):
+        store = InventoryStore(self.db_path)
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, started_at, completed_at)
+                   VALUES ('history-1', 'admin', '管理员', 'completed',
+                           '2026-09-07T08:00:00', '2026-09-07T08:14:26')"""
+            )
+            connection.executemany(
+                """INSERT INTO inventory_items
+                   (task_id, barcode, name, has_serial,
+                    completed_book_quantity, completed_counted_quantity,
+                    difference, updated_at)
+                   VALUES ('history-1', ?, ?, ?, ?, ?, ?,
+                           '2026-09-07T08:14:26')""",
+                [
+                    ("A1", "普通商品", 0, "10", "12", "2"),
+                    ("B2", "序列号商品", 1, "2", "2", "0"),
+                    ("C3", "无差异商品", 0, "3", "3", "0"),
+                ],
+            )
+            connection.executemany(
+                """INSERT INTO inventory_discrepancies
+                   (task_id, barcode, serial, kind, status,
+                    archived_by, archived_at, created_at)
+                   VALUES ('history-1', ?, ?, ?, ?, ?, ?,
+                           '2026-09-07T08:14:26')""",
+                [
+                    ("A1", None, "product_quantity", "open", None, None),
+                    ("B2", "SN-OPEN", "system_only_serial", "open", None, None),
+                    (
+                        "B2", "SN-DONE", "physical_only_serial", "archived",
+                        "管理员", "2026-09-07T09:00:00",
+                    ),
+                ],
+            )
+            connection.commit()
+
+        detail = store.get_task_history_detail("admin", "history-1")
+
+        self.assertEqual(detail["task"]["completed_at"], "2026-09-07T08:14:26")
+        self.assertEqual([row["barcode"] for row in detail["items"]], ["A1", "B2"])
+        self.assertEqual(detail["items"][0]["completed_book_qty"], "10")
+        self.assertEqual(detail["items"][0]["completed_actual_qty"], "12")
+        self.assertEqual(detail["items"][0]["diff_qty"], "2")
+        self.assertEqual(
+            [
+                (
+                    row["serial"], row["state"], row["archived_by"],
+                    row["archived_at"],
+                )
+                for row in detail["items"][1]["serial_discrepancies"]
+            ],
+            [
+                ("SN-DONE", "archived", "管理员", "2026-09-07T09:00:00"),
+                ("SN-OPEN", "open", None, None),
+            ],
+        )
+        with self.assertRaises(InventoryNotFound):
+            store.get_task_history_detail("other", "history-1")
+
+    def test_history_detail_uses_bounded_queries_for_many_serial_differences(self):
+        store = InventoryStore(self.db_path)
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, started_at, completed_at)
+                   VALUES ('history-many', 'admin', '管理员', 'completed',
+                           '2026-09-07T08:00:00', '2026-09-07T08:14:26')"""
+            )
+            connection.execute(
+                """INSERT INTO inventory_items
+                   (task_id, barcode, name, has_serial,
+                    completed_book_quantity, completed_counted_quantity,
+                    difference, updated_at)
+                   VALUES ('history-many', 'B2', '序列号商品', 1,
+                           '250', '0', '-250', '2026-09-07T08:14:26')"""
+            )
+            connection.executemany(
+                """INSERT INTO inventory_discrepancies
+                   (task_id, barcode, serial, kind, status, created_at)
+                   VALUES ('history-many', 'B2', ?, 'system_only_serial',
+                           'open', '2026-09-07T08:14:26')""",
+                [(f"SN-{index:04d}",) for index in range(250)],
+            )
+            connection.commit()
+
+        statements = []
+        original_connect = store.connect
+
+        def traced_connect():
+            connection = original_connect()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        store.connect = traced_connect
+        detail = store.get_task_history_detail("admin", "history-many")
+
+        select_count = sum(
+            statement.lstrip().upper().startswith("SELECT")
+            for statement in statements
+        )
+        self.assertEqual(len(detail["items"][0]["serial_discrepancies"]), 250)
+        self.assertLessEqual(select_count, 3)

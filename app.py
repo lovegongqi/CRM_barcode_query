@@ -10704,10 +10704,23 @@ def _inventory_discrepancy_filters():
     return state, str(request.args.get("query") or "").strip()
 
 
+def _inventory_task_number(completed_at):
+    if completed_at:
+        try:
+            completed = datetime.fromisoformat(str(completed_at))
+            return completed.strftime("PD%Y%m%d-%H%M%S")
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 def _inventory_public_task(task):
     if not isinstance(task, dict):
         return task
     public = dict(task)
+    task_number = _inventory_task_number(public.get("completed_at"))
+    if task_number:
+        public["task_number"] = task_number
     if public.get("gyj_status") not in (None, "", "synced"):
         public["gyj_status"] = "GYJ 库存读取失败，请检查登录状态后重试"
     return public
@@ -10844,6 +10857,19 @@ def api_inventory_task(task_id):
     owner, _actor = _inventory_identity()
     task = _inventory_owned_task(owner, task_id)
     return jsonify({"success": True, "task": _inventory_public_task(task)})
+
+
+@app.route("/api/inventory/tasks/<task_id>/history-detail", methods=["GET"])
+@_inventory_api
+def api_inventory_task_history_detail(task_id):
+    owner, _actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    detail = inventory_store.get_task_history_detail(owner, task_id)
+    return jsonify({
+        "success": True,
+        "task": _inventory_public_task(detail["task"]),
+        "items": detail["items"],
+    })
 
 
 @app.route("/api/inventory/tasks/<task_id>/audit", methods=["GET"])
@@ -11191,6 +11217,10 @@ def api_inventory_discrepancies():
     owner, _actor = _inventory_identity()
     state, query = _inventory_discrepancy_filters()
     rows = inventory_store.list_discrepancies(owner, state, query=query)
+    for row in rows:
+        task_number = _inventory_task_number(row.get("completed_at"))
+        if task_number:
+            row["task_number"] = task_number
     return jsonify({"success": True, "discrepancies": rows})
 
 

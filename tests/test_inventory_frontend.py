@@ -12,6 +12,142 @@ STYLE = ROOT / "static" / "inventory.css"
 
 
 class InventoryFrontendBehaviorTests(unittest.TestCase):
+    def test_mobile_account_and_workspace_controls_share_one_row(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <style>
+                    *{{box-sizing:border-box}} body{{margin:0}}
+                    .status-bar{{width:414px}}
+                    .aurora-account-session{{display:flex;align-items:center}}
+                    </style>
+                    <div class="status-bar wrap aurora-account-status">
+                      <div class="inventory-workspace-tabs">
+                        <button class="inventory-workspace-tab">当前盘点</button>
+                        <button class="inventory-workspace-tab">历史任务</button>
+                        <button class="inventory-workspace-tab">历史差异</button>
+                      </div>
+                      <div class="aurora-account-session">
+                        <span class="aurora-account-name">管理员</span>
+                        <a class="aurora-account-logout">退出工具账号</a>
+                      </div>
+                      <button class="btn" id="inventoryGyjLoginButton">GYJ 已登录</button>
+                    </div>
+                    """
+                )
+                page.evaluate("document.body.dataset.auroraPage = 'inventory'")
+                controls = page.locator(
+                    ".inventory-workspace-tab, .aurora-account-name, "
+                    ".aurora-account-logout, #inventoryGyjLoginButton"
+                )
+                centers = controls.evaluate_all(
+                    "nodes => nodes.map(node => { const box = node.getBoundingClientRect(); return box.top + box.height / 2; })"
+                )
+                status = page.locator(".status-bar").bounding_box()
+                self.assertEqual(len(centers), 6)
+                self.assertLess(max(centers) - min(centers), 1)
+                self.assertLessEqual(status["height"], 44)
+                self.assertLessEqual(
+                    controls.nth(5).bounding_box()["x"] + controls.nth(5).bounding_box()["width"],
+                    status["x"] + status["width"] + 1,
+                )
+            finally:
+                browser.close()
+
+    def test_start_and_complete_actions_use_the_same_mobile_slot(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <style>*{{box-sizing:border-box}} .inventory-section-head{{width:390px}}</style>
+                    <div class="inventory-section-head">
+                      <div><h2>当前盘点</h2></div>
+                      <div class="inventory-task-actions">
+                        <button class="btn" id="inventoryCompleteTask" hidden>完成盘点</button>
+                        <button class="btn" id="inventoryCreateTask">开始盘点</button>
+                      </div>
+                    </div>
+                    """
+                )
+                page.evaluate("document.body.dataset.auroraPage = 'inventory'")
+                start_box = page.locator("#inventoryCreateTask").bounding_box()
+                page.evaluate("""() => {
+                    document.querySelector('#inventoryCreateTask').hidden = true;
+                    document.querySelector('#inventoryCompleteTask').hidden = false;
+                }""")
+                complete_box = page.locator("#inventoryCompleteTask").bounding_box()
+                self.assertAlmostEqual(start_box["x"], complete_box["x"], delta=1)
+                self.assertAlmostEqual(start_box["width"], complete_box["width"], delta=1)
+            finally:
+                browser.close()
+
+    def test_mobile_difference_state_tabs_are_visible_and_equal_width(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <style>*{{box-sizing:border-box}} body{{margin:0}} .inventory-difference-tabs{{width:390px}}</style>
+                    <div class="inventory-difference-tabs">
+                      <button class="inventory-workspace-tab is-active">待处理</button>
+                      <button class="inventory-workspace-tab">已归档</button>
+                    </div>
+                    """
+                )
+                buttons = page.locator(".inventory-difference-tabs button")
+                first = buttons.nth(0).bounding_box()
+                second = buttons.nth(1).bounding_box()
+                self.assertAlmostEqual(first["y"], second["y"], delta=1)
+                self.assertAlmostEqual(first["width"], second["width"], delta=1)
+                self.assertGreater(first["width"], 150)
+                self.assertGreaterEqual(
+                    float(buttons.nth(0).evaluate(
+                        "node => parseFloat(getComputedStyle(node).fontSize)"
+                    )),
+                    11,
+                )
+            finally:
+                browser.close()
+
+    def test_collapsed_difference_cards_keep_their_summary_height_in_scroll_list(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                cards = "".join(
+                    """<details class="inventory-discrepancy-card">
+                    <summary class="inventory-discrepancy-summary">
+                      <div class="inventory-history-title">
+                        <strong>10000398 · 雷哲V200MAX-N2嵌入式管线机</strong>
+                        <code>REG202608050141</code>
+                      </div>
+                    </summary>
+                    </details>"""
+                    for _ in range(28)
+                )
+                page.set_content(
+                    f"""
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <style>*{{box-sizing:border-box}} .inventory-differences{{height:544px}}</style>
+                    <div class="inventory-differences">{cards}</div>
+                    """
+                )
+                first = page.locator(".inventory-discrepancy-card").nth(0)
+                summary = first.locator("summary")
+                self.assertGreaterEqual(first.bounding_box()["height"], 60)
+                self.assertGreaterEqual(summary.bounding_box()["height"], 60)
+            finally:
+                browser.close()
+
     def test_workspace_tabs_live_inside_account_status_bar(self):
         template = (ROOT / "templates" / "inventory.html").read_text(encoding="utf-8")
         status_start = template.index('<div class="status-bar wrap aurora-account-status">')
@@ -19,6 +155,15 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
         status_markup = template[status_start:status_end]
         self.assertIn('class="inventory-workspace-tabs"', status_markup)
         self.assertNotIn('class="inventory-workspace-tabs"', template[status_end:])
+        self.assertLess(
+            status_markup.index('id="inventoryTabCurrent"'),
+            status_markup.index('class="aurora-account-session"'),
+        )
+        self.assertLess(
+            status_markup.index('class="aurora-account-session"'),
+            status_markup.index('id="inventoryGyjLoginButton"'),
+        )
+        self.assertIn('<span class="inventory-label-mobile">历史</span>', status_markup)
 
     def test_mobile_current_panel_keeps_controls_fixed_and_only_items_scroll(self):
         with sync_playwright() as playwright:
@@ -65,11 +210,11 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 nav = page.locator(".page-nav")
                 meta = page.locator("#inventoryTaskMeta")
                 status = page.locator(".status-bar")
-                tabs = page.locator(".inventory-workspace-tabs")
+                last_tab = page.locator(".inventory-workspace-tabs button").last
                 self.assertEqual(notice.evaluate("node => getComputedStyle(node).display"), "none")
                 self.assertLessEqual(float(meta.evaluate("node => parseFloat(getComputedStyle(node).fontSize)")), 12)
                 self.assertLessEqual(
-                    tabs.bounding_box()["y"] + tabs.bounding_box()["height"],
+                    last_tab.bounding_box()["y"] + last_tab.bounding_box()["height"],
                     status.bounding_box()["y"] + status.bounding_box()["height"] + 1,
                 )
                 layout = page.evaluate("""() => Object.fromEntries(
@@ -3246,6 +3391,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             function allText(node) {
                 return [node.textContent, ...node.children.flatMap(child => allText(child))];
             }
+            const compactCard = roots.get('inventoryDifferencesOpen').children[0];
+            assert.equal(compactCard.tag, 'details');
+            assert.equal(compactCard.open, false);
+            assert.equal(compactCard.children[0].tag, 'summary');
+            assert.deepEqual(allText(compactCard.children[0]).filter(Boolean), [
+                'A/B · 滤芯', 'SN/1',
+            ]);
             assert.equal(allText(roots.get('inventoryDifferencesOpen')).includes('归档'), false);
             context.CURRENT_ACCOUNT.is_admin = true;
             vm.runInContext('renderDiscrepancyRows([globalThis.testRow], "open")', context);
@@ -3383,10 +3535,11 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     tag, textContent: '', className: '', children: [], href: '',
                     append(...nodes) { this.children.push(...nodes); },
                     replaceChildren(...nodes) { this.children = nodes; },
-                    addEventListener() {},
+                    addEventListener(name, handler) { this[name] = handler; },
                 };
             }
             const root = makeNode('div');
+            const opened = [];
             const context = {
                 console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
                 CURRENT_ACCOUNT: {is_admin: false},
@@ -3401,16 +3554,82 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             };
             vm.createContext(context);
             vm.runInContext(source, context);
+            vm.runInContext('openInventoryHistoryDetail = taskId => opened.push(taskId)',
+                Object.assign(context, {opened}));
             vm.runInContext(`renderInventoryHistory([{
-                task_id: 'T2', started_at: 'START', completed_at: 'DONE',
+                task_id: 'T2', task_number: 'PD20260907-081426',
+                started_at: 'START', completed_at: 'DONE',
                 participant_count: 2, product_total: 8,
+                counted_product_count: 6, uncounted_product_count: 2,
                 quantity_difference_count: 1, serial_difference_count: 3,
             }])`, context);
+            assert.equal(
+                root.children[0].children[0].children[0].textContent,
+                '盘点任务单号 PD20260907-081426',
+            );
             const metrics = root.children[0].children[1].children;
             assert.deepEqual(
                 metrics.map(metric => [metric.children[0].textContent, metric.children[1].textContent]),
-                [['参与人数', '2'], ['商品总数', '8'], ['数量差异', '1'], ['序列号差异', '3']],
+                [
+                    ['参与人数', '2'], ['商品总数', '8'],
+                    ['已盘商品', '6'], ['未盘商品', '2'],
+                    ['数量差异', '1'], ['序列号差异', '3'],
+                ],
             );
+            root.children[0].click({target: {closest() { return null; }}});
+            assert.deepEqual(opened, ['T2']);
+            """
+        )
+
+    def test_history_detail_renders_quantity_and_serial_archive_states(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [], open: false,
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {}, setAttribute() {},
+                };
+            }
+            const roots = new Map();
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (!roots.has(id)) roots.set(id, makeNode('div'));
+                        return roots.get(id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryHistoryDetail({
+                task: {task_number: 'PD20260907-081426', completed_at: '2026-09-07T08:14:26'},
+                items: [{
+                    barcode: 'B2', name: '序列号商品', has_serial: true,
+                    completed_book_qty: '2', completed_actual_qty: '1', diff_qty: '-1',
+                    serial_discrepancies: [
+                        {serial: 'SN-OPEN', kind: 'system_only_serial', state: 'open'},
+                        {serial: 'SN-DONE', kind: 'physical_only_serial', state: 'archived',
+                         archived_by: '管理员', archived_at: '2026-09-07T09:00:00'},
+                    ],
+                }],
+            })`, context);
+            function allText(node) {
+                return [node.textContent, ...node.children.flatMap(child => allText(child))];
+            }
+            assert.equal(roots.get('inventoryHistoryDetailTitle').textContent,
+                '盘点任务单号 PD20260907-081426');
+            const text = allText(roots.get('inventoryHistoryDetailItems')).join(' | ');
+            assert.match(text, /账面 2/);
+            assert.match(text, /实盘 1/);
+            assert.match(text, /差异 -1/);
+            assert.match(text, /SN-OPEN.*待归档/);
+            assert.match(text, /SN-DONE.*已归档.*管理员.*2026-09-07T09:00:00/);
             """
         )
 

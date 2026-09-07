@@ -9,6 +9,8 @@ body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
     margin: 0 0 0 auto;
 }
 
+.inventory-label-mobile { display: none; }
+
 .inventory-shell {
     margin-top: 16px;
 }
@@ -687,6 +689,7 @@ article.inventory-item { cursor: default; }
     grid-template-columns: minmax(220px, 1fr) minmax(420px, 1.4fr) auto;
     align-items: center;
     gap: 14px;
+    cursor: pointer;
 }
 
 .inventory-task-actions,
@@ -742,6 +745,21 @@ article.inventory-item { cursor: default; }
     min-width: 0;
 }
 
+.inventory-history-detail-trigger {
+    width: 100%;
+    padding: 0;
+    color: inherit;
+    text-align: left;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.inventory-history-detail-trigger:hover strong,
+.inventory-history-detail-trigger:focus-visible strong {
+    color: var(--aurora-cyan);
+}
+
 .inventory-history-title strong {
     overflow-wrap: anywhere;
 }
@@ -753,7 +771,7 @@ article.inventory-item { cursor: default; }
 
 .inventory-history-metrics {
     display: grid;
-    grid-template-columns: repeat(4, minmax(90px, 1fr));
+    grid-template-columns: repeat(6, minmax(82px, 1fr));
     gap: 8px;
 }
 
@@ -762,7 +780,14 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-difference-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     margin-top: 18px;
+    overflow: visible;
+}
+
+.inventory-difference-tabs .inventory-workspace-tab {
+    width: 100%;
 }
 
 .inventory-difference-search {
@@ -785,6 +810,90 @@ article.inventory-item { cursor: default; }
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
+}
+
+.inventory-discrepancy-card {
+    padding: 0;
+}
+
+.inventory-discrepancy-summary {
+    padding: 11px 12px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.inventory-discrepancy-summary::-webkit-details-marker { display: none; }
+
+.inventory-discrepancy-summary::after {
+    content: '展开';
+    float: right;
+    margin-left: 8px;
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-discrepancy-card[open] .inventory-discrepancy-summary::after {
+    content: '收起';
+}
+
+.inventory-discrepancy-meta,
+.inventory-discrepancy-card > .inventory-discrepancy-head,
+.inventory-discrepancy-card > .inventory-note-history,
+.inventory-discrepancy-card > .inventory-note-form {
+    margin-right: 12px;
+    margin-left: 12px;
+}
+
+.inventory-discrepancy-meta {
+    display: grid;
+    gap: 4px;
+    color: var(--aurora-muted);
+    font-size: 12px;
+}
+
+.inventory-history-detail-card {
+    width: min(760px, 100%);
+}
+
+.inventory-history-detail-items {
+    display: grid;
+    gap: 10px;
+}
+
+.inventory-history-detail-item {
+    padding: 12px;
+    border: 1px solid var(--aurora-line);
+    border-radius: 12px;
+    background: rgba(4, 14, 26, .5);
+}
+
+.inventory-history-detail-quantities {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.inventory-history-detail-quantities span,
+.inventory-history-detail-serial span {
+    color: var(--aurora-muted);
+    font-size: 12px;
+}
+
+.inventory-history-detail-serials {
+    margin-top: 10px;
+}
+
+.inventory-history-detail-serials summary {
+    color: var(--aurora-cyan);
+    cursor: pointer;
+}
+
+.inventory-history-detail-serial {
+    display: grid;
+    gap: 3px;
+    padding: 8px 0;
+    border-top: 1px solid var(--aurora-line);
 }
 
 .inventory-note-history {
@@ -871,30 +980,61 @@ article.inventory-item { cursor: default; }
         margin-bottom: 6px !important;
     }
     body[data-aurora-page="inventory"] .status-bar {
-        display: grid;
+        display: flex;
         flex: 0 0 auto;
-        grid-template-columns: minmax(0, 1fr) auto;
-        gap: 6px 8px;
-        height: auto !important;
-        min-height: 0;
-        max-height: none !important;
-        padding: 6px 8px !important;
+        align-items: center;
+        flex-wrap: nowrap !important;
+        gap: 3px;
+        height: 40px !important;
+        min-height: 40px;
+        max-height: 40px !important;
+        padding: 4px 5px !important;
         margin-bottom: 6px !important;
+        overflow: hidden;
+    }
+    body[data-aurora-page="inventory"] .status-bar .aurora-account-session {
+        flex: 0 1 auto;
+        gap: 3px;
+        margin-left: 0;
+    }
+    body[data-aurora-page="inventory"] .status-bar .aurora-account-name {
+        max-width: 48px;
+        font-size: 9px;
+    }
+    body[data-aurora-page="inventory"] .status-bar .aurora-account-logout {
+        min-height: 28px;
+        padding: 4px 6px;
+        font-size: 9px;
+    }
+    body[data-aurora-page="inventory"] #inventoryGyjLoginButton {
+        flex: 0 1 auto;
+        min-width: 0;
+        min-height: 28px;
+        padding: 4px 6px;
+        font-size: 9px;
+        white-space: nowrap;
     }
     body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
-        display: grid;
-        grid-column: 1 / -1;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 5px;
-        width: 100%;
+        display: contents;
         margin: 0;
-        overflow: visible;
     }
     body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tab {
-        min-height: 32px;
-        padding: 5px 6px;
-        border-radius: 9px;
-        font-size: 11px;
+        flex: 1 1 0;
+        min-width: 0;
+        min-height: 28px;
+        padding: 4px 3px;
+        overflow: hidden;
+        border-radius: 8px;
+        font-size: 9px;
+        text-overflow: ellipsis;
+    }
+    body[data-aurora-page="inventory"] .inventory-label-full { display: none; }
+    body[data-aurora-page="inventory"] .inventory-label-mobile { display: inline; }
+    body[data-aurora-page="inventory"] .inventory-task-actions {
+        flex: 0 0 74px;
+    }
+    body[data-aurora-page="inventory"] .inventory-task-actions .btn {
+        width: 100%;
     }
     .inventory-shell {
         flex: 1 1 auto;

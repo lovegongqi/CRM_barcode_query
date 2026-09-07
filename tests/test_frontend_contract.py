@@ -942,7 +942,8 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertIn(token, source + script)
         for label in (
             "匹配", "账面独有", "实物独有", "其他商品", "重复扫描",
-            "任务号", "开始时间", "完成时间", "参与人数", "商品总数",
+            "盘点任务单号", "开始时间", "完成时间", "参与人数", "商品总数",
+            "已盘商品", "未盘商品",
             "数量差异", "序列号差异", "Excel", "待处理", "已归档",
         ):
             with self.subTest(label=label):

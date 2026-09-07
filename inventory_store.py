@@ -2709,6 +2709,14 @@ class InventoryStore:
                        SELECT items.task_id,
                               COUNT(*) AS product_total,
                               SUM(CASE
+                                  WHEN items.completed_counted_quantity IS NOT NULL
+                                  THEN 1 ELSE 0
+                              END) AS counted_product_count,
+                              SUM(CASE
+                                  WHEN items.completed_counted_quantity IS NULL
+                                  THEN 1 ELSE 0
+                              END) AS uncounted_product_count,
+                              SUM(CASE
                                   WHEN items.difference IS NOT NULL
                                        AND items.difference <> '0'
                                   THEN 1 ELSE 0
@@ -2740,6 +2748,12 @@ class InventoryStore:
                    SELECT history_page.*,
                           COALESCE(item_counts.product_total, 0) AS product_total,
                           COALESCE(
+                              item_counts.counted_product_count, 0
+                          ) AS counted_product_count,
+                          COALESCE(
+                              item_counts.uncounted_product_count, 0
+                          ) AS uncounted_product_count,
+                          COALESCE(
                               item_counts.quantity_difference_count, 0
                           ) AS quantity_difference_count,
                           COALESCE(
@@ -2769,7 +2783,8 @@ class InventoryStore:
             task["completed"] = True
             task.pop("history_rowid", None)
             for key in (
-                "product_total", "quantity_difference_count",
+                "product_total", "counted_product_count",
+                "uncounted_product_count", "quantity_difference_count",
                 "serial_difference_count", "participant_count",
             ):
                 task[key] = int(task.get(key) or 0)
@@ -2779,6 +2794,50 @@ class InventoryStore:
             "limit": limit,
             "offset": offset,
         }
+
+    def get_task_history_detail(self, owner, task_id):
+        with closing(self.connect()) as connection:
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] != "completed":
+                raise InventoryConflict("盘点任务尚未完成")
+            item_rows = connection.execute(
+                """SELECT * FROM inventory_items
+                    WHERE task_id = ?
+                    ORDER BY barcode""",
+                (task_id,),
+            ).fetchall()
+            discrepancy_rows = connection.execute(
+                """SELECT discrepancy_id AS id, task_id, barcode, serial,
+                          kind, book_quantity, counted_quantity, difference,
+                          status AS state, archived_by, archived_at, created_at
+                     FROM inventory_discrepancies
+                    WHERE task_id = ?
+                    ORDER BY barcode, COALESCE(serial, ''), discrepancy_id""",
+                (task_id,),
+            ).fetchall()
+            serials_by_barcode = {}
+            discrepant_barcodes = set()
+            for row in discrepancy_rows:
+                discrepancy = self._row_dict(row)
+                discrepant_barcodes.add(discrepancy["barcode"])
+                if discrepancy["kind"] == "product_quantity":
+                    continue
+                serials_by_barcode.setdefault(
+                    discrepancy["barcode"], []
+                ).append(discrepancy)
+            items = []
+            for row in item_rows:
+                item = self._item_dict(row)
+                if (
+                    item["barcode"] not in discrepant_barcodes
+                    and (item["diff_qty"] is None or item["diff_qty"] == "0")
+                ):
+                    continue
+                item["serial_discrepancies"] = serials_by_barcode.get(
+                    item["barcode"], []
+                )
+                items.append(item)
+        return {"task": self._row_dict(task), "items": items}
 
     def list_audit_events(self, owner, task_id, barcode=None):
         barcode = str(barcode or "").strip()
