@@ -10864,11 +10864,21 @@ def api_inventory_task(task_id):
 def api_inventory_task_history_detail(task_id):
     owner, _actor = _inventory_identity()
     task_id = _inventory_path_value(task_id, "任务标识")
-    detail = inventory_store.get_task_history_detail(owner, task_id)
+    scope = str(request.args.get("scope") or "differences").strip()
+    if scope not in {
+        "differences", "participants", "all", "counted", "uncounted",
+        "quantity", "serial",
+    }:
+        raise ValueError("历史详情类型不正确")
+    detail = inventory_store.get_task_history_detail(
+        owner, task_id, scope=scope
+    )
     return jsonify({
         "success": True,
         "task": _inventory_public_task(detail["task"]),
+        "scope": detail.get("scope", scope),
         "items": detail["items"],
+        "participants": detail.get("participants", []),
     })
 
 

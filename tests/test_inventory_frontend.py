@@ -3554,7 +3554,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             };
             vm.createContext(context);
             vm.runInContext(source, context);
-            vm.runInContext('openInventoryHistoryDetail = taskId => opened.push(taskId)',
+            vm.runInContext('openInventoryHistoryDetail = (taskId, scope) => opened.push([taskId, scope])',
                 Object.assign(context, {opened}));
             vm.runInContext(`renderInventoryHistory([{
                 task_id: 'T2', task_number: 'PD20260907-081426',
@@ -3576,8 +3576,14 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     ['数量差异', '1'], ['序列号差异', '3'],
                 ],
             );
+            metrics.forEach(metric => metric.click());
+            assert.equal(JSON.stringify(opened), JSON.stringify([
+                ['T2', 'participants'], ['T2', 'all'],
+                ['T2', 'counted'], ['T2', 'uncounted'],
+                ['T2', 'quantity'], ['T2', 'serial'],
+            ]));
             root.children[0].click({target: {closest() { return null; }}});
-            assert.deepEqual(opened, ['T2']);
+            assert.equal(JSON.stringify(opened[6]), JSON.stringify(['T2', undefined]));
             """
         )
 
@@ -3630,6 +3636,72 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             assert.match(text, /差异 -1/);
             assert.match(text, /SN-OPEN.*待归档/);
             assert.match(text, /SN-DONE.*已归档.*管理员.*2026-09-07T09:00:00/);
+            """
+        )
+
+    def test_history_metric_detail_renders_participants_and_uncounted_items(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', children: [], open: false,
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {}, setAttribute() {},
+                };
+            }
+            const roots = new Map();
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: false},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (!roots.has(id)) roots.set(id, makeNode('div'));
+                        return roots.get(id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            function allText(node) {
+                return [node.textContent, ...node.children.flatMap(child => allText(child))];
+            }
+
+            vm.runInContext(`renderInventoryHistoryDetail({
+                scope: 'participants',
+                task: {task_number: 'PD20260907-081426', completed_at: 'DONE'},
+                participants: [{
+                    actor: '甲', device_id: 'device-a', action_count: 3,
+                    first_activity_at: 'START', last_activity_at: 'LAST',
+                }],
+                items: [],
+            })`, context);
+            assert.equal(roots.get('inventoryHistoryDetailTitle').textContent,
+                '参与人员 · PD20260907-081426');
+            let text = allText(roots.get('inventoryHistoryDetailItems')).join(' | ');
+            assert.match(text, /甲/);
+            assert.match(text, /device-a/);
+            assert.match(text, /3 次操作/);
+            assert.match(text, /最后操作 LAST/);
+
+            vm.runInContext(`renderInventoryHistoryDetail({
+                scope: 'uncounted',
+                task: {task_number: 'PD20260907-081426', completed_at: 'DONE'},
+                participants: [],
+                items: [{
+                    barcode: 'D4', name: '未盘商品', has_serial: false,
+                    completed_book_qty: '4', completed_actual_qty: null,
+                    diff_qty: null, serial_discrepancies: [],
+                }],
+            })`, context);
+            assert.equal(roots.get('inventoryHistoryDetailTitle').textContent,
+                '未盘商品 · PD20260907-081426');
+            text = allText(roots.get('inventoryHistoryDetailItems')).join(' | ');
+            assert.match(text, /D4.*未盘商品/);
+            assert.match(text, /状态 未盘/);
+            assert.match(text, /账面 4/);
             """
         )
 

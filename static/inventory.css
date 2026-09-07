@@ -775,6 +775,20 @@ article.inventory-item { cursor: default; }
     gap: 8px;
 }
 
+.inventory-history-metric-trigger {
+    width: 100%;
+    color: inherit;
+    border: 1px solid transparent;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.inventory-history-metric-trigger:hover,
+.inventory-history-metric-trigger:focus-visible {
+    border-color: var(--aurora-cyan);
+}
+
 .inventory-history-load-more {
     justify-self: center;
 }
@@ -858,6 +872,9 @@ article.inventory-item { cursor: default; }
 .inventory-history-detail-items {
     display: grid;
     gap: 10px;
+    max-height: min(60vh, 560px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .inventory-history-detail-item {
@@ -875,9 +892,22 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-history-detail-quantities span,
-.inventory-history-detail-serial span {
+.inventory-history-detail-serial span,
+.inventory-history-participant span,
+.inventory-history-detail-state {
     color: var(--aurora-muted);
     font-size: 12px;
+}
+
+.inventory-history-detail-state {
+    display: block;
+    margin-top: 7px;
+}
+
+.inventory-history-participant {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 5px 12px;
 }
 
 .inventory-history-detail-serials {

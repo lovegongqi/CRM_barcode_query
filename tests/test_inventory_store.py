@@ -1886,7 +1886,11 @@ class InventoryStoreTests(unittest.TestCase):
                 """INSERT INTO inventory_audit_events
                    (task_id, event_type, actor, device_id, created_at)
                    VALUES ('newer', 'item_counted', ?, ?, '2026-09-03T10:00:00')""",
-                [("甲", "device-a"), ("乙", "device-b"), ("丙", "device-a"), ("丁", "")],
+                [
+                    ("甲", "device-a"), ("乙", "device-b"),
+                    ("丙", "device-a"), ("丁", ""),
+                    ("管理员", "task-completion"),
+                ],
             )
 
         first_page = store.list_task_history("admin", limit=1, offset=0)
@@ -2022,3 +2026,106 @@ class InventoryStoreTests(unittest.TestCase):
         )
         self.assertEqual(len(detail["items"][0]["serial_discrepancies"]), 250)
         self.assertLessEqual(select_count, 3)
+
+    def test_history_detail_filters_product_lists_for_each_metric(self):
+        store = InventoryStore(self.db_path)
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, started_at, completed_at)
+                   VALUES ('history-scopes', 'admin', '管理员', 'completed',
+                           '2026-09-07T08:00:00', '2026-09-07T08:14:26')"""
+            )
+            connection.executemany(
+                """INSERT INTO inventory_items
+                   (task_id, barcode, name, has_serial,
+                    completed_book_quantity, completed_counted_quantity,
+                    difference, updated_at)
+                   VALUES ('history-scopes', ?, ?, ?, ?, ?, ?,
+                           '2026-09-07T08:14:26')""",
+                [
+                    ("A1", "数量差异", 0, "10", "12", "2"),
+                    ("B2", "序列号差异", 1, "2", "2", "0"),
+                    ("C3", "数量一致", 0, "3", "3", "0"),
+                    ("D4", "未盘商品", 0, "4", None, None),
+                ],
+            )
+            connection.execute(
+                """INSERT INTO inventory_discrepancies
+                   (task_id, barcode, serial, kind, status, created_at)
+                   VALUES ('history-scopes', 'B2', 'SN-1',
+                           'system_only_serial', 'open',
+                           '2026-09-07T08:14:26')"""
+            )
+            connection.commit()
+
+        expected = {
+            "all": ["A1", "B2", "C3", "D4"],
+            "counted": ["A1", "B2", "C3"],
+            "uncounted": ["D4"],
+            "quantity": ["A1"],
+            "serial": ["B2"],
+        }
+        for scope, barcodes in expected.items():
+            with self.subTest(scope=scope):
+                detail = store.get_task_history_detail(
+                    "admin", "history-scopes", scope=scope
+                )
+                self.assertEqual(detail["scope"], scope)
+                self.assertEqual(
+                    [item["barcode"] for item in detail["items"]], barcodes
+                )
+        serials = store.get_task_history_detail(
+            "admin", "history-scopes", scope="serial"
+        )["items"][0]["serial_discrepancies"]
+        self.assertEqual([row["serial"] for row in serials], ["SN-1"])
+
+    def test_history_detail_lists_one_participant_per_counted_device(self):
+        store = InventoryStore(self.db_path)
+        with store.connect() as connection:
+            connection.execute(
+                """INSERT INTO inventory_tasks
+                   (task_id, owner, created_by, phase, started_at, completed_at)
+                   VALUES ('history-people', 'admin', '管理员', 'completed',
+                           '2026-09-07T08:00:00', '2026-09-07T08:14:26')"""
+            )
+            connection.executemany(
+                """INSERT INTO inventory_audit_events
+                   (task_id, event_type, actor, device_id, created_at)
+                   VALUES ('history-people', 'item_counted', ?, ?, ?)""",
+                [
+                    ("甲", "device-a", "2026-09-07T08:01:00"),
+                    ("甲", "device-a", "2026-09-07T08:03:00"),
+                    ("乙", "device-b", "2026-09-07T08:02:00"),
+                    ("丙", "", "2026-09-07T08:04:00"),
+                    ("管理员", "task-completion", "2026-09-07T08:05:00"),
+                ],
+            )
+            connection.commit()
+
+        detail = store.get_task_history_detail(
+            "admin", "history-people", scope="participants"
+        )
+
+        self.assertEqual(detail["scope"], "participants")
+        self.assertEqual(detail["items"], [])
+        self.assertEqual(
+            detail["participants"],
+            [
+                {
+                    "actor": "甲", "device_id": "device-a", "action_count": 2,
+                    "first_activity_at": "2026-09-07T08:01:00",
+                    "last_activity_at": "2026-09-07T08:03:00",
+                },
+                {
+                    "actor": "乙", "device_id": "device-b", "action_count": 1,
+                    "first_activity_at": "2026-09-07T08:02:00",
+                    "last_activity_at": "2026-09-07T08:02:00",
+                },
+            ],
+        )
+
+    def test_history_detail_rejects_unknown_metric_scope(self):
+        store = InventoryStore(self.db_path)
+        with self.assertRaisesRegex(ValueError, "历史详情类型"):
+            store.get_task_history_detail("admin", "missing", scope="prices")

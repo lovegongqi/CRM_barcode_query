@@ -2117,17 +2117,52 @@ function historySerialArchiveText(row) {
     return `已归档 · ${inventoryText(row.archived_by, '未知账号')} · ${inventoryText(row.archived_at, '时间未知')}`;
 }
 
+function inventoryHistoryScopeTitle(scope) {
+    return ({
+        participants: '参与人员',
+        all: '全部商品',
+        counted: '已盘商品',
+        uncounted: '未盘商品',
+        quantity: '数量差异商品',
+        serial: '序列号差异',
+    })[scope] || '盘点任务详情';
+}
+
 function renderInventoryHistoryDetail(detail) {
     const task = detail && detail.task ? detail.task : {};
+    const scope = inventoryText(detail && detail.scope, 'differences');
+    const taskNumber = inventoryText(task.task_number, task.task_id);
     inventoryElement('inventoryHistoryDetailTitle').textContent =
-        `盘点任务单号 ${inventoryText(task.task_number, task.task_id)}`;
+        scope === 'differences'
+            ? `盘点任务单号 ${taskNumber}`
+            : `${inventoryHistoryScopeTitle(scope)} · ${taskNumber}`;
     inventoryElement('inventoryHistoryDetailMeta').textContent =
         `完成时间 ${inventoryText(task.completed_at)}`;
     const root = inventoryElement('inventoryHistoryDetailItems');
     root.replaceChildren();
+    if (scope === 'participants') {
+        const participants = Array.isArray(detail && detail.participants)
+            ? detail.participants : [];
+        if (!participants.length) {
+            root.append(inventoryNode('div', 'inventory-empty', '暂无参与人员记录。'));
+            return;
+        }
+        participants.forEach((participant) => {
+            const card = inventoryNode('article', 'inventory-history-detail-item inventory-history-participant');
+            card.append(
+                inventoryNode('strong', '', inventoryText(participant.actor, '未知账号')),
+                inventoryNode('span', '', participant.device_id
+                    ? `设备 ${participant.device_id}` : '未记录设备'),
+                inventoryNode('span', '', `${inventoryHistoryCount(participant.action_count)} 次操作`),
+                inventoryNode('span', '', `最后操作 ${inventoryText(participant.last_activity_at, '时间未知')}`),
+            );
+            root.append(card);
+        });
+        return;
+    }
     const items = Array.isArray(detail && detail.items) ? detail.items : [];
     if (!items.length) {
-        root.append(inventoryNode('div', 'inventory-empty', '该任务没有差异商品。'));
+        root.append(inventoryNode('div', 'inventory-empty', '该类别暂无记录。'));
         return;
     }
     items.forEach((item) => {
@@ -2139,10 +2174,16 @@ function renderInventoryHistoryDetail(detail) {
         const quantities = inventoryNode('div', 'inventory-history-detail-quantities');
         quantities.append(
             inventoryNode('span', '', `账面 ${inventoryText(item.completed_book_qty)}`),
-            inventoryNode('span', '', `实盘 ${inventoryText(item.completed_actual_qty)}`),
+            inventoryNode('span', '', `实盘 ${inventoryText(item.completed_actual_qty, '未录入')}`),
             inventoryNode('span', '', `差异 ${inventoryText(item.diff_qty)}`),
         );
-        card.append(quantities);
+        card.append(
+            quantities,
+            inventoryNode(
+                'span', 'inventory-history-detail-state',
+                `状态 ${item.completed_actual_qty === null || item.completed_actual_qty === undefined ? '未盘' : '已盘'}`,
+            ),
+        );
         const serials = Array.isArray(item.serial_discrepancies)
             ? item.serial_discrepancies : [];
         if (serials.length) {
@@ -2163,22 +2204,35 @@ function renderInventoryHistoryDetail(detail) {
     });
 }
 
-async function openInventoryHistoryDetail(taskId) {
+async function openInventoryHistoryDetail(taskId, scope = 'differences') {
     const dialog = inventoryElement('inventoryHistoryDetailDialog');
-    inventoryElement('inventoryHistoryDetailTitle').textContent = '盘点任务详情';
+    inventoryElement('inventoryHistoryDetailTitle').textContent = inventoryHistoryScopeTitle(scope);
     inventoryElement('inventoryHistoryDetailMeta').textContent = '';
     inventoryElement('inventoryHistoryDetailStatus').textContent = '正在读取任务详情…';
     inventoryElement('inventoryHistoryDetailItems').replaceChildren();
     if (!dialog.open) dialog.showModal();
     try {
         const detail = await inventoryRequest(
-            `/api/inventory/tasks/${encodeURIComponent(taskId)}/history-detail`
+            `/api/inventory/tasks/${encodeURIComponent(taskId)}/history-detail?scope=${encodeURIComponent(scope)}`
         );
         renderInventoryHistoryDetail(detail);
         inventoryElement('inventoryHistoryDetailStatus').textContent = '';
     } catch (error) {
         inventoryElement('inventoryHistoryDetailStatus').textContent = error.message;
     }
+}
+
+function inventoryHistoryMetric(task, label, value, scope) {
+    const metric = inventoryNode('button', 'inventory-metric inventory-history-metric-trigger');
+    metric.type = 'button';
+    metric.append(
+        inventoryNode('span', '', label),
+        inventoryNode('strong', '', inventoryHistoryCount(value)),
+    );
+    metric.addEventListener('click', () => {
+        openInventoryHistoryDetail(task.task_id, scope);
+    });
+    return metric;
 }
 
 function closeInventoryHistoryDetail() {
@@ -2222,12 +2276,12 @@ function renderInventoryHistory(tasks) {
         title.addEventListener('click', () => openInventoryHistoryDetail(task.task_id));
         const metrics = inventoryNode('div', 'inventory-history-metrics');
         metrics.append(
-            inventoryMetric('参与人数', inventoryHistoryCount(task.participant_count)),
-            inventoryMetric('商品总数', inventoryHistoryCount(task.product_total)),
-            inventoryMetric('已盘商品', inventoryHistoryCount(task.counted_product_count)),
-            inventoryMetric('未盘商品', inventoryHistoryCount(task.uncounted_product_count)),
-            inventoryMetric('数量差异', inventoryHistoryCount(task.quantity_difference_count)),
-            inventoryMetric('序列号差异', inventoryHistoryCount(task.serial_difference_count)),
+            inventoryHistoryMetric(task, '参与人数', task.participant_count, 'participants'),
+            inventoryHistoryMetric(task, '商品总数', task.product_total, 'all'),
+            inventoryHistoryMetric(task, '已盘商品', task.counted_product_count, 'counted'),
+            inventoryHistoryMetric(task, '未盘商品', task.uncounted_product_count, 'uncounted'),
+            inventoryHistoryMetric(task, '数量差异', task.quantity_difference_count, 'quantity'),
+            inventoryHistoryMetric(task, '序列号差异', task.serial_difference_count, 'serial'),
         );
         const download = inventoryNode('a', 'btn btn-secondary inventory-history-export', '下载 Excel');
         download.href = `/api/inventory/tasks/${encodeURIComponent(task.task_id)}/export`;

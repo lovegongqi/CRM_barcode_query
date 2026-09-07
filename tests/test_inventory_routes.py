@@ -1017,7 +1017,7 @@ class InventoryRouteTest(unittest.TestCase):
             "total": 1, "limit": 20, "offset": 0,
         }
         self.store.get_task_history_detail.return_value = {
-            "task": task,
+            "task": task, "scope": "counted", "participants": [],
             "items": [{
                 "barcode": "B2", "name": "序列号商品", "has_serial": True,
                 "completed_book_qty": "2", "completed_actual_qty": "1",
@@ -1032,17 +1032,27 @@ class InventoryRouteTest(unittest.TestCase):
 
         history = client.get("/api/inventory/tasks/history").get_json()
         detail_response = client.get(
-            "/api/inventory/tasks/task-history-1/history-detail"
+            "/api/inventory/tasks/task-history-1/history-detail?scope=counted"
         )
 
         self.assertEqual(history["tasks"][0]["task_number"], "PD20260907-081426")
         self.assertEqual(detail_response.status_code, 200)
         detail = detail_response.get_json()
         self.assertEqual(detail["task"]["task_number"], "PD20260907-081426")
+        self.assertEqual(detail["scope"], "counted")
         self.assertEqual(detail["items"][0]["serial_discrepancies"][0]["state"], "archived")
         self.store.get_task_history_detail.assert_called_once_with(
-            "counter-id", "task-history-1"
+            "counter-id", "task-history-1", scope="counted"
         )
+
+    def test_history_detail_route_rejects_unknown_metric_scope(self):
+        response = self.login_account("counter").get(
+            "/api/inventory/tasks/task-history-1/history-detail?scope=prices"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["success"])
+        self.store.get_task_history_detail.assert_not_called()
 
     def test_export_routes_are_owner_scoped_filtered_and_price_free(self):
         self.store.get_task_snapshot.return_value = {

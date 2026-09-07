@@ -2738,9 +2738,14 @@ class InventoryStore:
                        GROUP BY discrepancies.task_id
                    ), participant_counts AS (
                        SELECT audit_events.task_id,
-                              COUNT(DISTINCT NULLIF(
-                                  TRIM(audit_events.device_id), ''
-                              )) AS device_count
+                              COUNT(DISTINCT CASE
+                                  WHEN TRIM(COALESCE(
+                                      audit_events.device_id, ''
+                                  )) <> 'task-completion'
+                                  THEN NULLIF(TRIM(
+                                      audit_events.device_id
+                                  ), '')
+                              END) AS device_count
                        FROM inventory_audit_events AS audit_events
                        JOIN history_page USING (task_id)
                        GROUP BY audit_events.task_id
@@ -2795,49 +2800,124 @@ class InventoryStore:
             "offset": offset,
         }
 
-    def get_task_history_detail(self, owner, task_id):
+    def get_task_history_detail(self, owner, task_id, scope="differences"):
+        scope = str(scope or "differences").strip()
+        if scope not in {
+            "differences", "participants", "all", "counted", "uncounted",
+            "quantity", "serial",
+        }:
+            raise ValueError("历史详情类型不正确")
         with closing(self.connect()) as connection:
             task = self._task_for_owner(connection, owner, task_id)
             if task["phase"] != "completed":
                 raise InventoryConflict("盘点任务尚未完成")
+            if scope == "participants":
+                participant_rows = connection.execute(
+                    """SELECT actor, device_id, created_at
+                         FROM inventory_audit_events
+                        WHERE task_id = ?
+                          AND TRIM(COALESCE(device_id, '')) <> ''
+                          AND TRIM(device_id) <> 'task-completion'
+                        ORDER BY event_id""",
+                    (task_id,),
+                ).fetchall()
+                participants_by_device = {}
+                for row in participant_rows:
+                    participant = participants_by_device.get(row["device_id"])
+                    if participant is None:
+                        participant = {
+                            "actor": row["actor"],
+                            "device_id": row["device_id"],
+                            "action_count": 0,
+                            "first_activity_at": row["created_at"],
+                            "last_activity_at": row["created_at"],
+                        }
+                        participants_by_device[row["device_id"]] = participant
+                    participant["actor"] = row["actor"] or participant["actor"]
+                    participant["action_count"] += 1
+                    participant["last_activity_at"] = row["created_at"]
+                participants = list(participants_by_device.values())
+                if not participants and str(task["created_by"] or "").strip():
+                    participants.append({
+                        "actor": task["created_by"],
+                        "device_id": "",
+                        "action_count": 0,
+                        "first_activity_at": task["started_at"],
+                        "last_activity_at": task["completed_at"],
+                    })
+                return {
+                    "task": self._row_dict(task), "scope": scope,
+                    "items": [], "participants": participants,
+                }
             item_rows = connection.execute(
                 """SELECT * FROM inventory_items
                     WHERE task_id = ?
                     ORDER BY barcode""",
                 (task_id,),
             ).fetchall()
-            discrepancy_rows = connection.execute(
-                """SELECT discrepancy_id AS id, task_id, barcode, serial,
-                          kind, book_quantity, counted_quantity, difference,
-                          status AS state, archived_by, archived_at, created_at
-                     FROM inventory_discrepancies
-                    WHERE task_id = ?
-                    ORDER BY barcode, COALESCE(serial, ''), discrepancy_id""",
-                (task_id,),
-            ).fetchall()
             serials_by_barcode = {}
             discrepant_barcodes = set()
-            for row in discrepancy_rows:
-                discrepancy = self._row_dict(row)
-                discrepant_barcodes.add(discrepancy["barcode"])
-                if discrepancy["kind"] == "product_quantity":
-                    continue
-                serials_by_barcode.setdefault(
-                    discrepancy["barcode"], []
-                ).append(discrepancy)
+            if scope in {"differences", "serial"}:
+                discrepancy_rows = connection.execute(
+                    """SELECT discrepancy_id AS id, task_id, barcode, serial,
+                              kind, book_quantity, counted_quantity, difference,
+                              status AS state, archived_by, archived_at, created_at
+                         FROM inventory_discrepancies
+                        WHERE task_id = ?
+                        ORDER BY barcode, COALESCE(serial, ''), discrepancy_id""",
+                    (task_id,),
+                ).fetchall()
+                for row in discrepancy_rows:
+                    discrepancy = self._row_dict(row)
+                    discrepant_barcodes.add(discrepancy["barcode"])
+                    if discrepancy["kind"] == "product_quantity":
+                        continue
+                    serials_by_barcode.setdefault(
+                        discrepancy["barcode"], []
+                    ).append(discrepancy)
             items = []
             for row in item_rows:
                 item = self._item_dict(row)
-                if (
-                    item["barcode"] not in discrepant_barcodes
-                    and (item["diff_qty"] is None or item["diff_qty"] == "0")
-                ):
+                include = (
+                    scope == "all"
+                    or (
+                        scope == "counted"
+                        and item["completed_actual_qty"] is not None
+                    )
+                    or (
+                        scope == "uncounted"
+                        and item["completed_actual_qty"] is None
+                    )
+                    or (
+                        scope == "quantity"
+                        and item["diff_qty"] is not None
+                        and item["diff_qty"] != "0"
+                    )
+                    or (
+                        scope == "serial"
+                        and item["barcode"] in serials_by_barcode
+                    )
+                    or (
+                        scope == "differences"
+                        and (
+                            item["barcode"] in discrepant_barcodes
+                            or (
+                                item["diff_qty"] is not None
+                                and item["diff_qty"] != "0"
+                            )
+                        )
+                    )
+                )
+                if not include:
                     continue
                 item["serial_discrepancies"] = serials_by_barcode.get(
                     item["barcode"], []
                 )
                 items.append(item)
-        return {"task": self._row_dict(task), "items": items}
+        return {
+            "task": self._row_dict(task), "scope": scope,
+            "items": items, "participants": [],
+        }
 
     def list_audit_events(self, owner, task_id, barcode=None):
         barcode = str(barcode or "").strip()
