@@ -39,6 +39,7 @@ _AUDIT_EVENT_LABELS = {
     "serial_scan_removed": "删除序列号",
     "serial_item_completed": "完成序列号核对",
     "serial_item_reopened": "重新核对序列号",
+    "count_adjusted_for_stock_movement": "库存变动调整实盘",
     "task_completed": "完成盘点",
     "task_reopened": "继续盘点",
 }
@@ -2648,6 +2649,60 @@ class InventoryStore:
                       )""",
                 (task_id,),
             )
+            for item in items:
+                if (
+                    item["status"] == "data_error"
+                    or item["completed_counted_quantity"] is None
+                ):
+                    continue
+                completed_book = normalize_quantity(
+                    item["completed_book_quantity"] or item["book_quantity"]
+                )
+                completed_actual = normalize_quantity(
+                    item["completed_counted_quantity"]
+                )
+                adjusted_actual = _expected_current_quantity(
+                    completed_actual,
+                    normalized_totals[item["barcode"]],
+                    completed_book,
+                )
+                if Decimal(adjusted_actual) < 0:
+                    adjusted_actual = "0"
+                if adjusted_actual == completed_actual:
+                    continue
+                connection.execute(
+                    "DELETE FROM inventory_count_entries "
+                    "WHERE task_id = ? AND barcode = ?",
+                    (task_id, item["barcode"]),
+                )
+                connection.execute(
+                    """INSERT INTO inventory_count_entries
+                       (task_id, barcode, quantity, version,
+                        created_by, created_device_id, created_at,
+                        updated_by, updated_device_id, updated_at)
+                       VALUES (?, ?, ?, 1, 'system:stock-movement',
+                               'task-reopen', ?, 'system:stock-movement',
+                               'task-reopen', ?)""",
+                    (
+                        task_id, item["barcode"], adjusted_actual,
+                        timestamp, timestamp,
+                    ),
+                )
+                self._audit(
+                    connection, task_id,
+                    "count_adjusted_for_stock_movement", "system",
+                    barcode=item["barcode"], device_id="task-reopen",
+                    details=json.dumps(
+                        {
+                            "before": {"quantity": completed_actual},
+                            "after": {"quantity": adjusted_actual},
+                            "book_before": completed_book,
+                            "book_after": normalized_totals[item["barcode"]],
+                        },
+                        ensure_ascii=False, separators=(",", ":"),
+                    ),
+                    created_at=timestamp,
+                )
             connection.execute(
                 """UPDATE inventory_tasks
                    SET phase = 'counting', completed_at = NULL,
@@ -2996,6 +3051,7 @@ class InventoryStore:
                 details = {}
             if (
                 row["event_type"].startswith("count_entry_")
+                or row["event_type"] == "count_adjusted_for_stock_movement"
                 or row["event_type"] in {
                     "serial_scanned", "serial_scan_reclassified",
                     "serial_scan_removed",

@@ -324,6 +324,7 @@ function inventoryVisibleItems(items) {
     const filter = inventoryElement('inventoryFilters').value;
     if (filter === 'completed') return categoryItems.filter(inventoryIsCompleted);
     if (filter === 'variance') return categoryItems.filter((item) => decimalDirection(item.diff_qty) !== 0);
+    if (filter === 'serial_pending') return categoryItems.filter((item) => item.state === 'serial_pending');
     return categoryItems;
 }
 
@@ -363,7 +364,6 @@ function handleInventoryCategoryChange() {
     const select = inventoryCategoryElement();
     inventorySelectedCategory = select ? select.value : '';
     renderInventoryItems((inventoryTask && inventoryTask.items) || []);
-    renderSerialQueue(inventoryTask);
 }
 
 function inventoryDetailText(item) {
@@ -483,37 +483,6 @@ function renderInventoryItems(items) {
     });
 }
 
-function renderSerialQueue(task) {
-    const section = inventoryElement('inventorySerialQueueRoot');
-    const root = inventoryElement('inventorySerialQueue');
-    const rows = task && ['counting', 'serial_check'].includes(task.phase)
-        ? (task.items || []).filter(
-            (item) => item.state === 'serial_pending' && inventoryCategoryMatches(item)
-        )
-        : [];
-    section.hidden = !rows.length;
-    root.replaceChildren();
-    if (!rows.length) {
-        root.append(inventoryNode('div', 'inventory-empty', '没有待核对的序列号商品。'));
-        return;
-    }
-    rows.forEach((item) => {
-        const button = inventoryNode('button', 'inventory-item inventory-serial-queue-item');
-        button.type = 'button';
-        button.setAttribute('aria-label', `打开 ${inventoryText(item.name, item.barcode)} 序列号核对`);
-        button.addEventListener('click', () => openSerialItem(item.barcode));
-        const top = inventoryNode('div', 'inventory-item-top');
-        const product = inventoryNode('div', 'inventory-item-product');
-        product.append(
-            inventoryNode('span', 'inventory-item-barcode', item.barcode),
-            inventoryNode('strong', 'inventory-item-name', item.name),
-        );
-        top.append(product, inventoryNode('span', 'inventory-state-badge', '待序列号'));
-        button.append(top, inventoryNode('p', 'inventory-item-details', inventoryDetailText(item)));
-        root.append(button);
-    });
-}
-
 function renderInventoryTask(task) {
     const meta = inventoryElement('inventoryTaskMeta');
     const createButton = inventoryElement('inventoryCreateTask');
@@ -525,7 +494,6 @@ function renderInventoryTask(task) {
         renderInventorySummary(null);
         renderInventoryCategories([]);
         renderInventoryItems([]);
-        renderSerialQueue(null);
         return;
     }
     const phaseLabels = {loading: '正在载入商品', counting: '数量盘点', serial_check: '序列号核对', sync_error: '同步需重试'};
@@ -537,7 +505,6 @@ function renderInventoryTask(task) {
     renderInventorySummary(task);
     renderInventoryCategories(task.categories || []);
     renderInventoryItems(task.items || []);
-    renderSerialQueue(task);
     if (currentCountItem && inventoryElement('inventoryCountDialog').open) {
         const draft = inventoryElement('inventoryCountNewQuantity').value;
         const refreshed = (task.items || []).find(

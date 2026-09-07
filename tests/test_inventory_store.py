@@ -1682,10 +1682,10 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(restarted["task_id"], task["task_id"])
         snapshot = store.get_task_snapshot("admin", task["task_id"])
         items = {row["barcode"]: row for row in snapshot["items"]}
-        self.assertEqual(items["A1"]["count_expression"], "2")
+        self.assertEqual(items["A1"]["count_expression"], "3")
         self.assertEqual(items["A1"]["latest_book_qty"], "3")
-        self.assertEqual(items["A1"]["diff_qty"], "-1")
-        self.assertEqual(items["B2"]["count_expression"], "3")
+        self.assertEqual(items["A1"]["diff_qty"], "0")
+        self.assertEqual(items["B2"]["count_expression"], "4")
         self.assertEqual(items["B2"]["latest_book_qty"], "1")
         self.assertEqual(items["B2"]["state"], "serial_pending")
         self.assertEqual(store.list_discrepancies("admin", "open"), [])
@@ -1707,6 +1707,72 @@ class InventoryStoreTests(unittest.TestCase):
             json.loads(audit),
             {"from_phase": "completed", "to_phase": "counting"},
         )
+
+    def test_reopen_applies_book_movement_to_actual_and_preserves_variance(self):
+        store = InventoryStore(
+            self.db_path, now=lambda: datetime(2026, 9, 7, 17, 30, 0)
+        )
+        catalog = [{
+            "barcode": "A1", "name": "再生剂10KG", "spec": "", "model": "",
+            "category": "耗材", "unit": "袋", "has_serial": False,
+            "initial_stock": "120",
+        }]
+        task = store.create_task("admin", "管理员", catalog)
+        task = store.advance_count_phase_if_ready("admin", task["task_id"])
+        lock = store.claim_item(
+            task["task_id"], "A1", "device-a", "甲", "counting",
+            expected_version=task["version"],
+        )
+        store.set_open_book_quantity(
+            "admin", task["task_id"], "A1", "device-a", "甲", "120",
+            expected_version=lock["task_version"],
+        )
+        counted = store.record_count(
+            "admin", task["task_id"], "A1", "device-a", "甲",
+            completed_book_qty="120", completed_actual_qty="122",
+            diff_qty="2", state="variance",
+        )
+        store.complete_task(
+            "admin", task["task_id"], "管理员",
+            expected_version=counted["task_version"],
+        )
+
+        store.reopen_task(
+            "admin", task["task_id"], "管理员", {"A1": "118"},
+            synced_at=datetime(2026, 9, 7, 17, 31, 0),
+        )
+
+        item = store.get_task_snapshot("admin", task["task_id"])["items"][0]
+        self.assertEqual(item["latest_book_qty"], "118")
+        self.assertEqual(item["count_expression"], "120")
+        self.assertEqual(item["diff_qty"], "2")
+        adjustment = next(
+            event for event in store.list_audit_events("admin", task["task_id"])
+            if event["event_type"] == "count_adjusted_for_stock_movement"
+        )
+        self.assertEqual(adjustment["barcode"], "A1")
+        self.assertEqual(adjustment["before_quantity"], "122")
+        self.assertEqual(adjustment["after_quantity"], "120")
+
+    def test_reopen_stock_movement_adjustment_never_makes_actual_negative(self):
+        store = InventoryStore(self.db_path)
+        catalog = [{
+            "barcode": "A1", "name": "低库存商品", "spec": "", "model": "",
+            "category": "耗材", "unit": "个", "has_serial": False,
+            "initial_stock": "10",
+        }]
+        task = store.create_task("admin", "管理员", catalog)
+        store.advance_count_phase_if_ready("admin", task["task_id"])
+        store.add_count_entry(
+            "admin", task["task_id"], "A1", "甲", "device-a", "1", "10"
+        )
+        store.complete_task("admin", task["task_id"], "管理员")
+
+        store.reopen_task("admin", task["task_id"], "管理员", {"A1": "0"})
+
+        item = store.get_task_snapshot("admin", task["task_id"])["items"][0]
+        self.assertEqual(item["count_expression"], "0")
+        self.assertEqual(item["diff_qty"], "0")
 
     def test_reopen_keeps_historical_product_missing_from_latest_gyj_totals(self):
         store, task = self.completed_difference_store()

@@ -1055,7 +1055,8 @@ class InventoryServiceTests(unittest.TestCase):
             )["items"] if row["barcode"] == "A1"
         )
         self.assertEqual(item["latest_book_qty"], "3")
-        self.assertEqual(item["diff_qty"], "-1")
+        self.assertEqual(item["count_expression"], "3")
+        self.assertEqual(item["diff_qty"], "0")
 
     def test_submit_failure_keeps_lock_and_success_releases_it(self):
         task = self.create_task()

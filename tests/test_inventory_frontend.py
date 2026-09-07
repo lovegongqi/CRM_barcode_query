@@ -351,6 +351,55 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_summary_cards_share_one_row_at_tablet_and_desktop_widths(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                for width in (800, 1200):
+                    with self.subTest(width=width):
+                        page = browser.new_page(viewport={"width": width, "height": 800})
+                        cards = "".join(
+                            f'<div class="inventory-summary-card"><span>指标{index}</span><strong>{index}</strong></div>'
+                            for index in range(8)
+                        )
+                        page.set_content(
+                            f"<style>{STYLE.read_text(encoding='utf-8')}</style>"
+                            f'<div class="inventory-summary">{cards}</div>'
+                        )
+                        tops = page.locator(".inventory-summary-card").evaluate_all(
+                            "nodes => nodes.map(node => node.getBoundingClientRect().top)"
+                        )
+                        self.assertLess(max(tops) - min(tops), 1)
+                        page.close()
+            finally:
+                browser.close()
+
+    def test_serial_pending_filter_only_returns_items_awaiting_serial_check(self):
+        self.run_node(
+            r"""
+            const filter = {value: 'serial_pending'};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryFilters') return filter;
+                        return {value: '', addEventListener() {}};
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            const visible = vm.runInContext(`inventoryVisibleItems([
+                {barcode: 'A1', state: 'pending'},
+                {barcode: 'B2', state: 'serial_pending'},
+                {barcode: 'C3', state: 'serial_complete'},
+            ]).map(item => item.barcode)`, context);
+            assert.equal(JSON.stringify(visible), JSON.stringify(['B2']));
+            """
+        )
+
     def run_node(self, body):
         program = textwrap.dedent(
             f"""
@@ -1195,7 +1244,6 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 renderCountEntries = () => {};
                 updateCountBook = () => {};
                 renderInventoryItems = () => {};
-                renderSerialQueue = () => {};
             `, context);
             (async () => {
                 await vm.runInContext('addCountEntry()', context);
@@ -1338,7 +1386,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_counting_phase_exposes_serial_reconciliation(self):
+    def test_counting_phase_can_open_serial_reconciliation(self):
         self.run_node(
             r"""
             class FakeNode {
@@ -1385,10 +1433,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     barcode: 'B2', name: '序列商品', state: 'serial_pending', has_serial: true,
                 }]};
                 renderSerialReconciliation = value => { currentSerialData = value; };
-                renderSerialQueue(inventoryTask);
             `, context);
-            assert.equal(element('inventorySerialQueueRoot').hidden, false);
-            assert.equal(element('inventorySerialQueue').children.length, 1);
             (async () => {
                 await vm.runInContext("openSerialItem('B2')", context);
                 assert.equal(requests.length, 1);

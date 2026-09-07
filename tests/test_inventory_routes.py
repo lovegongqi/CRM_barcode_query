@@ -205,6 +205,12 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertNotIn("counter-pass", page)
         self.assertNotIn('value="archive"', page)
 
+    def test_inventory_page_uses_filter_instead_of_duplicate_serial_queue(self):
+        page = self.login_account("counter").get("/inventory").get_data(as_text=True)
+        self.assertIn('<option value="serial_pending">待序列号</option>', page)
+        self.assertNotIn('id="inventorySerialQueueRoot"', page)
+        self.assertNotIn('id="inventorySerialQueue"', page)
+
     def test_admin_default_and_account_save_allow_inventory_permission(self):
         os.remove(self.accounts_file)
         self.assertIn("inventory", app_module.load_accounts()[0]["permissions"])

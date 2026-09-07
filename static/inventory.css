@@ -44,8 +44,7 @@ body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
 }
 
 .inventory-current[hidden],
-.inventory-differences[hidden],
-.inventory-serial-queue[hidden] {
+.inventory-differences[hidden] {
     display: none !important;
 }
 
@@ -108,7 +107,7 @@ body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
 
 .inventory-summary {
     display: grid;
-    grid-template-columns: repeat(7, minmax(104px, 1fr));
+    grid-template-columns: repeat(8, minmax(0, 1fr));
     gap: 10px;
     margin: 10px 0 18px;
 }
@@ -176,12 +175,6 @@ body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
 }
 
 .inventory-scroll-region { min-height: 0; }
-
-.inventory-serial-queue {
-    margin-top: 20px;
-    padding-top: 18px;
-    border-top: 1px solid var(--aurora-line);
-}
 
 .inventory-subhead h3 {
     margin: 0 0 12px;
@@ -991,7 +984,7 @@ article.inventory-item { cursor: default; }
 .inventory-captcha-controls img { width: 120px; height: 44px; object-fit: contain; border-radius: 8px; background: #fff; }
 
 @media (max-width: 980px) {
-    .inventory-summary { grid-template-columns: repeat(4, minmax(100px, 1fr)); }
+    .inventory-summary { grid-template-columns: repeat(8, minmax(0, 1fr)); }
     .inventory-history-row { grid-template-columns: 1fr; }
 }
 
