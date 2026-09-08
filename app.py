@@ -4026,6 +4026,7 @@ class GYJWorker:
     """将 GYJ 的所有可见浏览器操作固定到同一线程。"""
     def __init__(self, owner, session_dir):
         self.owner = str(owner or '')
+        self.slot_id = self.owner
         self.session_dir = session_dir
         self.tasks = queue.Queue()
         self.state_lock = threading.Lock()
@@ -4127,27 +4128,106 @@ class GYJWorker:
 
 
 class GYJWorkerPool:
-    def __init__(self):
+    def __init__(self, worker_factory=None):
+        self.slot_ids = GYJ_SLOT_IDS
+        self.worker_factory = worker_factory or GYJWorker
         self.workers = {}
-        self.lock = threading.Lock()
+        self.reservations = {slot_id: 0 for slot_id in self.slot_ids}
+        self.cursor = 0
+        self.condition = threading.Condition()
 
-    def get(self, owner):
-        owner = str(owner or '').strip()
-        if not owner:
-            raise RuntimeError("未找到工具账号")
-        with self.lock:
-            if owner not in self.workers:
-                self.workers[owner] = GYJWorker(owner, _gyj_session_dir(owner))
-            return self.workers[owner]
+    def validate_slot_id(self, slot_id="gyj-1"):
+        slot_id = str(slot_id or "gyj-1").strip()
+        if slot_id not in self.slot_ids:
+            raise ValueError("无效的 GYJ 通道")
+        return slot_id
+
+    def get(self, slot_id="gyj-1"):
+        slot_id = self.validate_slot_id(slot_id)
+        with self.condition:
+            if slot_id not in self.workers:
+                self.workers[slot_id] = self.worker_factory(
+                    slot_id, _gyj_session_dir(slot_id)
+                )
+            return self.workers[slot_id]
+
+    def slot_status(self, slot_id):
+        slot_id = self.validate_slot_id(slot_id)
+        worker = self.get(slot_id)
+        with self.condition:
+            busy = self.reservations[slot_id] > 0
+        return {
+            "id": slot_id,
+            "label": f"GYJ 通道 {int(slot_id.rsplit('-', 1)[-1])}",
+            "browser_running": bool(worker.browser_running),
+            "logged_in": bool(worker.logged_in),
+            "waiting_captcha": bool(worker.waiting_captcha),
+            "busy": busy,
+        }
+
+    def slots_payload(self):
+        return [self.slot_status(slot_id) for slot_id in self.slot_ids]
+
+    def reserve(self, timeout=60):
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                workers = {slot_id: self.get(slot_id) for slot_id in self.slot_ids}
+                logged_in_slots = [
+                    slot_id for slot_id in self.slot_ids if workers[slot_id].logged_in
+                ]
+                if not logged_in_slots:
+                    raise RuntimeError("请先登录 GYJ")
+                for offset in range(len(self.slot_ids)):
+                    index = (self.cursor + offset) % len(self.slot_ids)
+                    slot_id = self.slot_ids[index]
+                    if workers[slot_id].logged_in and self.reservations[slot_id] == 0:
+                        self.reservations[slot_id] = 1
+                        self.cursor = (index + 1) % len(self.slot_ids)
+                        return GYJWorkerLease(self, slot_id, workers[slot_id])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("所有 GYJ 通道正忙，请稍后重试")
+                self.condition.wait(remaining)
+
+    def _release(self, slot_id):
+        with self.condition:
+            if self.reservations.get(slot_id, 0) > 0:
+                self.reservations[slot_id] -= 1
+            self.condition.notify_all()
 
     def shutdown(self):
-        with self.lock:
+        with self.condition:
             workers = list(self.workers.values())
         for worker in workers:
             try:
                 worker.shutdown()
             except Exception:
                 pass
+
+
+class GYJWorkerLease:
+    def __init__(self, pool, slot_id, worker):
+        self.pool = pool
+        self.slot_id = slot_id
+        self.worker = worker
+        self._released = False
+        self._release_lock = threading.Lock()
+
+    def __enter__(self):
+        return self.worker
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.release()
+        return False
+
+    def release(self):
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self.pool._release(self.slot_id)
 
 def _positive_int_env(name, default):
     try:
@@ -4218,9 +4298,14 @@ def _crm_session_base_dir():
         return os.path.join(RUNTIME_BASE_DIR, "session")
 
 
-def _gyj_session_dir(owner):
-    safe_owner = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(owner or "")) or "default"
-    return os.path.join(_runtime_data_base_dir(), "gyj_session", safe_owner)
+GYJ_SLOT_IDS = tuple(f"gyj-{index}" for index in range(1, 6))
+
+
+def _gyj_session_dir(slot_id):
+    slot_id = str(slot_id or "gyj-1").strip()
+    profile_name = "admin" if slot_id in {"gyj-1", "admin"} else slot_id
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", profile_name) or "gyj-1"
+    return os.path.join(_runtime_data_base_dir(), "gyj_session", safe_name)
 
 CRM_SLOT_STATE_FILE = os.path.join(_runtime_config_dir(), "crm_slot_state.json")
 crm_slot_state_lock = threading.Lock()
