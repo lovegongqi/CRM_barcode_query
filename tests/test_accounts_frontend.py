@@ -137,6 +137,48 @@ class AccountsFrontendTest(unittest.TestCase):
             ["renderBulkLoginJob"],
         )
 
+    def test_settings_contains_centralized_five_channel_gyj_workspace(self):
+        self.assertIn('id="gyjChannelCard"', self.source)
+        self.assertIn('id="gyjChannelTabs"', self.source)
+        self.assertIn('id="gyjLoggedInCount"', self.source)
+        self.assertIn("['gyj-1', 'gyj-2', 'gyj-3', 'gyj-4', 'gyj-5']", self.source)
+        self.assertIn('id="gyjCaptcha" inputmode="text"', self.source)
+        self.assertIn('autocapitalize="off"', self.source)
+
+    def test_settings_login_submits_the_selected_gyj_slot(self):
+        self.run_node(
+            r"""
+            const elements = {
+                gyjUsername: {value: 'gyj-user'},
+                gyjPassword: {value: 'secret'},
+                gyjRememberLogin: {checked: true},
+                gyjLoginButton: {disabled: false, textContent: ''},
+            };
+            let request = null;
+            const context = {
+                console,
+                selectedGyjSlotId: 'gyj-4',
+                document: {getElementById(id) { return elements[id]; }},
+                fetch: async (url, options) => {
+                    request = {url, options};
+                    return {json: async () => ({success: true, logged_in: true, slots: []})};
+                },
+                renderGyjManagementState() {},
+                loadGyjChannels: async () => {},
+                setGyjMessage() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext('startGyjChannelLogin()', context);
+                assert.equal(request.url, '/api/gyj/login');
+                assert.equal(JSON.parse(request.options.body).slot_id, 'gyj-4');
+                assert.equal(JSON.parse(request.options.body).remember, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["startGyjChannelLogin"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

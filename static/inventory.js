@@ -16,8 +16,6 @@ let countDialogEditable = false;
 let countMutationPending = false;
 let countDialogRequestId = 0;
 let countEntryDrafts = new Map();
-let gyjLoginPollTimer = null;
-let gyjLoginSession = 0;
 let inventoryActiveTab = 'current';
 let inventoryTabGeneration = 0;
 let inventoryDifferenceState = 'open';
@@ -2777,192 +2775,13 @@ function bindInventoryTablists() {
     ], switchDifferenceState);
 }
 
-function setGyjLoginMessage(message, kind = '') {
-    const target = inventoryElement('inventoryGyjLoginMessage');
-    target.textContent = message || '';
-    target.className = 'inventory-dialog-message' + (kind ? ` is-${kind}` : '');
-}
-
-function stopGyjLoginPolling() {
-    if (gyjLoginPollTimer) clearInterval(gyjLoginPollTimer);
-    gyjLoginPollTimer = null;
-}
-
-function clearGyjCaptcha() {
-    inventoryElement('inventoryGyjCaptcha').value = '';
-    const image = inventoryElement('inventoryGyjCaptchaImage');
-    image.removeAttribute('src');
-    inventoryElement('inventoryGyjCaptchaRow').hidden = true;
-}
-
-function closeGyjLogin() {
-    gyjLoginSession += 1;
-    stopGyjLoginPolling();
-    clearGyjCaptcha();
-    inventoryElement('inventoryGyjPassword').value = '';
-    const dialog = inventoryElement('inventoryGyjLoginDialog');
-    if (dialog.open) dialog.close();
-}
-
-function renderGyjLoginState(data) {
-    const loggedIn = Boolean(data.logged_in);
-    const waitingCaptcha = Boolean(data.waiting_captcha);
-    const button = inventoryElement('inventoryGyjLoginButton');
-    const captchaRow = inventoryElement('inventoryGyjCaptchaRow');
-    const wasWaitingCaptcha = !captchaRow.hidden;
-    button.textContent = loggedIn ? 'GYJ 已登录' : '登录 GYJ';
-    button.classList.toggle('btn-primary', !loggedIn);
-    button.classList.toggle('btn-secondary', loggedIn);
-    captchaRow.hidden = !waitingCaptcha;
-    if (waitingCaptcha) {
-        stopGyjLoginPolling();
-        if (!wasWaitingCaptcha) refreshGyjCaptcha();
-    }
-    if (loggedIn) {
-        setGyjLoginMessage('GYJ 登录成功。', 'success');
-        stopGyjLoginPolling();
-    } else if (data.message) {
-        setGyjLoginMessage(data.message, waitingCaptcha ? '' : 'error');
-    }
-    return loggedIn;
-}
-
-async function refreshGyjCaptcha(session = gyjLoginSession, regenerate = false) {
-    try {
-        const data = regenerate
-            ? await inventoryPost('/api/gyj/captcha/refresh', {})
-            : await inventoryRequest('/api/gyj/captcha-preview');
-        const dialog = inventoryElement('inventoryGyjLoginDialog');
-        if (session !== gyjLoginSession || !dialog.open) return;
-        const source = String(data.captcha_image || '');
-        const image = inventoryElement('inventoryGyjCaptchaImage');
-        if (source.startsWith('data:image/')) image.src = source;
-        else image.removeAttribute('src');
-    } catch (error) {
-        setGyjLoginMessage(error.message, 'error');
-    }
-}
-
-async function pollGyjLoginStatus() {
-    const dialog = inventoryElement('inventoryGyjLoginDialog');
-    if (!dialog.open) {
-        stopGyjLoginPolling();
-        return;
-    }
-    const session = gyjLoginSession;
-    try {
-        const data = await inventoryRequest('/api/gyj/login-status', {acceptFailureState: true});
-        if (session !== gyjLoginSession || !dialog.open) return;
-        if (renderGyjLoginState(data)) {
-            lastInventoryVersion = null;
-            pollInventoryTask({force: true});
-        }
-    } catch (error) {
-        if (error.data && ('logged_in' in error.data || 'waiting_captcha' in error.data)) {
-            renderGyjLoginState(error.data);
-        }
-        setGyjLoginMessage(error.message, 'error');
-    }
-}
-
-async function openGyjLogin() {
-    const dialog = inventoryElement('inventoryGyjLoginDialog');
-    const session = ++gyjLoginSession;
-    clearGyjCaptcha();
-    setGyjLoginMessage('正在读取登录状态…');
-    if (!dialog.open) dialog.showModal();
-    try {
-        const credentials = await inventoryRequest('/api/gyj/credentials');
-        if (session !== gyjLoginSession || !dialog.open) return;
-        inventoryElement('inventoryGyjUsername').value = credentials.username || '';
-        inventoryElement('inventoryGyjPassword').value = credentials.password || '';
-        inventoryElement('inventoryGyjRemember').checked = Boolean(credentials.remember);
-        await pollGyjLoginStatus();
-        if (session !== gyjLoginSession || !dialog.open) return;
-        stopGyjLoginPolling();
-        if (inventoryElement('inventoryGyjCaptchaRow').hidden) {
-            gyjLoginPollTimer = setInterval(pollGyjLoginStatus, 1000);
-        }
-        inventoryElement('inventoryGyjUsername').focus();
-    } catch (error) {
-        setGyjLoginMessage(error.message, 'error');
-    }
-}
-
-async function submitGyjLogin() {
-    const username = inventoryElement('inventoryGyjUsername').value.trim();
-    const password = inventoryElement('inventoryGyjPassword').value;
-    const remember = inventoryElement('inventoryGyjRemember').checked;
-    const dialog = inventoryElement('inventoryGyjLoginDialog');
-    const session = gyjLoginSession;
-    if (!username || !password) {
-        setGyjLoginMessage('请输入 GYJ 账号和密码。', 'error');
-        return;
-    }
-    const button = inventoryElement('inventoryGyjLoginSubmit');
-    button.disabled = true;
-    button.textContent = '正在登录…';
-    setGyjLoginMessage('正在连接 GYJ，请稍候。');
-    try {
-        const data = await inventoryPost('/api/gyj/login', {username, password, remember});
-        if (session !== gyjLoginSession || !dialog.open) return;
-        renderGyjLoginState(data);
-        if (data.waiting_captcha) inventoryElement('inventoryGyjCaptcha').focus();
-        if (data.logged_in) setTimeout(() => {
-            if (session === gyjLoginSession) closeGyjLogin();
-        }, 500);
-    } catch (error) {
-        if (session !== gyjLoginSession || !dialog.open) return;
-        if (error.data) renderGyjLoginState(error.data);
-        setGyjLoginMessage(error.message, 'error');
-    } finally {
-        button.disabled = false;
-        button.textContent = '登录 GYJ';
-    }
-}
-
-async function submitGyjCaptcha() {
-    const captcha = inventoryElement('inventoryGyjCaptcha').value.trim();
-    if (!captcha) {
-        setGyjLoginMessage('请输入验证码。', 'error');
-        return;
-    }
-    const button = inventoryElement('inventoryGyjCaptchaSubmit');
-    const dialog = inventoryElement('inventoryGyjLoginDialog');
-    const session = gyjLoginSession;
-    stopGyjLoginPolling();
-    button.disabled = true;
-    button.textContent = '正在提交…';
-    setGyjLoginMessage('正在提交验证码，请稍候。');
-    try {
-        const data = await inventoryPost('/api/gyj/login/captcha', {captcha});
-        if (session !== gyjLoginSession || !dialog.open) return;
-        inventoryElement('inventoryGyjCaptcha').value = '';
-        renderGyjLoginState(data);
-        if (data.logged_in) setTimeout(() => {
-            if (session === gyjLoginSession) closeGyjLogin();
-        }, 500);
-    } catch (error) {
-        if (session !== gyjLoginSession || !dialog.open) return;
-        inventoryElement('inventoryGyjCaptcha').value = '';
-        if (error.data) renderGyjLoginState(error.data);
-        setGyjLoginMessage(error.message, 'error');
-        await refreshGyjCaptcha();
-    } finally {
-        button.disabled = false;
-        button.textContent = '提交验证码';
-    }
-}
-
 async function refreshGyjStatusButton() {
     try {
-        const data = await inventoryRequest('/api/gyj/login-status');
-        const button = inventoryElement('inventoryGyjLoginButton');
-        button.textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
-        button.classList.toggle('btn-primary', !data.logged_in);
-        button.classList.toggle('btn-secondary', Boolean(data.logged_in));
+        const data = await inventoryRequest('/api/gyj/slots');
+        const loggedInCount = Number(data.logged_in_count || 0);
+        inventoryElement('inventoryGyjStatus').textContent = `GYJ 已登录 ${loggedInCount}/5`;
     } catch (_error) {
-        inventoryElement('inventoryGyjLoginButton').textContent = '登录 GYJ';
+        inventoryElement('inventoryGyjStatus').textContent = 'GYJ 已登录 0/5';
     }
 }
 
@@ -3040,20 +2859,6 @@ function initializeInventoryPage() {
         }
     });
     inventoryElement('inventoryDifferenceExport').addEventListener('click', exportDiscrepancies);
-    inventoryElement('inventoryGyjLoginButton').addEventListener('click', openGyjLogin);
-    inventoryElement('inventoryGyjLoginClose').addEventListener('click', closeGyjLogin);
-    inventoryElement('inventoryGyjLoginCancel').addEventListener('click', closeGyjLogin);
-    inventoryElement('inventoryGyjLoginSubmit').addEventListener('click', submitGyjLogin);
-    inventoryElement('inventoryGyjCaptchaSubmit').addEventListener('click', submitGyjCaptcha);
-    inventoryElement('inventoryGyjCaptchaRefresh').addEventListener('click', () => {
-        refreshGyjCaptcha(gyjLoginSession, true);
-    });
-    inventoryElement('inventoryGyjPassword').addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') submitGyjLogin();
-    });
-    inventoryElement('inventoryGyjCaptcha').addEventListener('keydown', (event) => {
-        if (event.key === 'Enter') submitGyjCaptcha();
-    });
     bindInventoryDialogBackdrop(inventoryElement('inventoryCountDialog'), closeCountDialog);
     const serialDialog = inventoryElement('inventorySerialWorkspace');
     serialDialog.addEventListener('click', (event) => {
@@ -3069,7 +2874,6 @@ function initializeInventoryPage() {
     bindInventoryDialogBackdrop(inventoryElement('inventoryCompletionConfirmDialog'), closeCompletionConfirmation);
     bindInventoryDialogBackdrop(inventoryElement('inventoryAuditDialog'), closeInventoryAudit);
     bindInventoryDialogBackdrop(inventoryElement('inventoryHistoryDetailDialog'), closeInventoryHistoryDetail);
-    bindInventoryDialogBackdrop(inventoryElement('inventoryGyjLoginDialog'), closeGyjLogin);
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
             stopInventoryCamera(false);
@@ -3079,7 +2883,6 @@ function initializeInventoryPage() {
     });
     window.addEventListener('beforeunload', () => {
         stopInventoryCamera(false);
-        stopGyjLoginPolling();
     });
     renderInventoryTask(null);
     pollInventoryTask({force: true});

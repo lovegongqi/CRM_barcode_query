@@ -586,25 +586,24 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertIn("document.hidden", inbound)
 
-    def test_inbound_page_exposes_gyj_login_and_plain_save_flow(self):
+    def test_inbound_page_exposes_shared_gyj_status_and_plain_save_flow(self):
         inbound = self.source("inbound.html")
         for element_id in (
             "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
-            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjLoginModal", "gyjStartBtn",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn",
             "gyjSelection", "gyjSelectionPackingSlip",
             "gyjLogs", "gyjResult",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', inbound)
         for function_name in (
-            "selectInboundWorkspace", "openGYJLoginModal", "closeGYJLoginModal",
-            "startGYJBackgroundLogin", "renderGYJSelection", "hasGYJSelection",
+            "selectInboundWorkspace", "checkGYJLoginStatus",
+            "renderGYJSelection", "hasGYJSelection",
             "collectGYJSelection",
             "startGYJPurchaseInbound", "pollGYJInboundStatus",
         ):
             self.assertIn(f"function {function_name}", inbound)
-        self.assertIn("fetch('/api/inbound/gyj/login'", inbound)
-        self.assertIn("fetch('/api/inbound/gyj/login-status'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/slots'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/start'", inbound)
         self.assertIn("fetch('/api/inbound/gyj/status?'", inbound)
         self.assertIn("selected_items", inbound)
@@ -618,30 +617,28 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('id="gyjStage"', inbound)
         self.assertNotIn('id="gyjProgress"', inbound)
 
-    def test_inbound_gyj_login_uses_backend_credentials_contract(self):
-        inbound = self.source("inbound.html")
+    def test_settings_gyj_login_uses_backend_credentials_contract(self):
+        inbound = self.source("accounts.html")
         for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', inbound)
-        for function_name in ("loadGYJCredentials", "startGYJBackgroundLogin", "submitGYJCaptcha"):
+        for function_name in ("loadGyjCredentials", "startGyjChannelLogin", "submitGyjCaptcha"):
             self.assertIn(f"function {function_name}", inbound)
-        self.assertIn("fetch('/api/inbound/gyj/credentials'", inbound)
-        self.assertIn("fetch('/api/inbound/gyj/login/captcha'", inbound)
-        self.assertIn("if (data.logged_in || data.waiting_captcha)", inbound)
+        self.assertIn("fetch('/api/gyj/credentials'", inbound)
+        self.assertIn("fetch('/api/gyj/login/captcha'", inbound)
+        self.assertIn("slot_id: selectedGyjSlotId", inbound)
 
-    def test_inbound_gyj_captcha_preview_can_be_refreshed_without_storage(self):
-        inbound = self.source("inbound.html")
-        for element_id in ("gyjCaptchaImage", "gyjCaptchaRefreshBtn"):
-            self.assertIn(f'id="{element_id}"', inbound)
-        self.assertIn("function refreshGYJCaptchaPreview", inbound)
-        self.assertIn("fetch('/api/inbound/gyj/captcha-preview'", inbound)
+    def test_settings_gyj_captcha_preview_can_be_refreshed_without_storage(self):
+        inbound = self.source("accounts.html")
+        self.assertIn('id="gyjCaptchaImage"', inbound)
+        self.assertIn("function refreshGyjCaptcha", inbound)
+        self.assertIn("'/api/gyj/captcha-preview?'", inbound)
         self.assertNotIn("gyj_captcha_image", inbound)
 
-    def test_inbound_gyj_captcha_preview_hides_empty_response(self):
-        inbound = self.source("inbound.html")
+    def test_settings_gyj_captcha_preview_hides_empty_response(self):
+        inbound = self.source("accounts.html")
 
-        self.assertIn("const captchaImage = data && data.success ? data.captcha_image : ''", inbound)
-        self.assertIn("captchaImage && captchaImage.startsWith('data:image/')", inbound)
+        self.assertIn("String(data.captcha_image || '').startsWith('data:image/')", inbound)
         self.assertIn("image.removeAttribute('src');", inbound)
 
     def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
@@ -719,10 +716,10 @@ class FrontendContractTest(unittest.TestCase):
             'id="inventoryTaskSummary"', 'id="inventorySearch"',
             'id="inventoryFilters"', 'id="inventoryCategoryFilter"',
             'id="inventoryItems"',
-            'id="inventoryCountDialog"', 'id="inventoryGyjLoginDialog"',
+            'id="inventoryCountDialog"', 'id="inventoryGyjStatus"',
             "pollInventoryTask", "renderInventoryItems", "openCountItem",
             "renderCountEntries", "addCountEntry", "updateCountEntry",
-            "deleteCountEntry", "openGyjLogin",
+            "deleteCountEntry", "refreshGyjStatusButton",
             'id="inventoryCompleteTask"',
             'id="inventoryCompletionConfirmDialog"',
             'id="inventoryCompletionConfirm"',
@@ -789,9 +786,7 @@ class FrontendContractTest(unittest.TestCase):
         for endpoint in (
             "/api/inventory/tasks/active",
             "/count-entries",
-            "/api/gyj/credentials", "/api/gyj/login",
-            "/api/gyj/login/captcha", "/api/gyj/captcha-preview",
-            "/api/gyj/login-status",
+            "/api/gyj/slots",
         ):
             with self.subTest(endpoint=endpoint):
                 self.assertIn(endpoint, script)
@@ -848,7 +843,7 @@ class FrontendContractTest(unittest.TestCase):
         source = self.source("inventory.html")
         css = (STATIC / "inventory.css").read_text(encoding="utf-8")
         self.assertRegex(source, r'<dialog[^>]+id="inventoryCountDialog"[^>]+aria-labelledby="inventoryCountDialogTitle"')
-        self.assertRegex(source, r'<dialog[^>]+id="inventoryGyjLoginDialog"[^>]+aria-labelledby="inventoryGyjLoginDialogTitle"')
+        self.assertNotIn('id="inventoryGyjLoginDialog"', source)
         self.assertIn('aria-live="polite"', source)
         self.assertIn('inputmode="decimal"', source)
         self.assertIn("@media (max-width: 720px)", css)
@@ -872,23 +867,38 @@ class FrontendContractTest(unittest.TestCase):
         )
 
     def test_inventory_gyj_captcha_accepts_alphanumeric_codes(self):
-        source = self.source("inventory.html")
-        self.assertRegex(
-            source,
-            r'<input id="inventoryGyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
-        )
-
-    def test_inbound_gyj_captcha_accepts_alphanumeric_codes(self):
-        source = self.source("inbound.html")
+        source = self.source("accounts.html")
         self.assertRegex(
             source,
             r'<input id="gyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
         )
 
-    def test_inventory_has_one_gyj_button_and_cache_busted_assets(self):
+    def test_gyj_login_management_is_centralized_in_settings(self):
+        accounts = self.source("accounts.html")
+        inventory = self.source("inventory.html")
+        inbound = self.source("inbound.html")
+
+        self.assertIn('id="gyjChannelCard"', accounts)
+        self.assertIn('href="/accounts#gyjChannelCard"', inventory)
+        self.assertIn('href="/accounts#gyjChannelCard"', inbound)
+        for duplicate_id in (
+            "inventoryGyjUsername", "inventoryGyjPassword", "inventoryGyjCaptcha",
+            "gyjUsername", "gyjPassword", "gyjCaptcha",
+        ):
+            with self.subTest(duplicate_id=duplicate_id):
+                self.assertNotIn(f'id="{duplicate_id}"', inventory + inbound)
+        self.assertIn("GYJ 已登录 ${loggedInCount}/5", accounts)
+        self.assertIn("GYJ 已登录 ${loggedInCount}/5", inventory + inbound)
+
+    def test_inbound_gyj_captcha_accepts_alphanumeric_codes(self):
+        source = self.source("inbound.html")
+        self.assertNotIn('id="gyjCaptcha"', source)
+
+    def test_inventory_has_shared_gyj_status_and_cache_busted_assets(self):
         source = self.source("inventory.html")
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        self.assertEqual(source.count('id="inventoryGyjLoginButton"'), 1)
+        self.assertIn('id="inventoryGyjStatus"', source)
+        self.assertNotIn('id="inventoryGyjLoginButton"', source)
         self.assertNotIn("查询通道", source)
         self.assertIn("CURRENT_ACCOUNT.is_admin", source)
         self.assertIn('/static/inventory.css{{ inventory_css_v }}', source)
@@ -947,16 +957,12 @@ class FrontendContractTest(unittest.TestCase):
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         self.assertNotIn("const requestId = ++countDialogRequestId;", script)
-        self.assertIn("const session = ++gyjLoginSession;", script)
         self.assertRegex(
             script,
             r"function closeCountDialog[\s\S]*countDialogRequestId \+= 1;",
         )
-        self.assertRegex(
-            script,
-            r"function closeGyjLogin[\s\S]*gyjLoginSession \+= 1;[\s\S]*stopGyjLoginPolling\(\);[\s\S]*clearGyjCaptcha\(\);",
-        )
-        self.assertIn("if (session !== gyjLoginSession || !dialog.open) return;", script)
+        self.assertNotIn("gyjLoginSession", script)
+        self.assertNotIn("closeGyjLogin", script)
 
     def test_inventory_serial_and_history_contract(self):
         source = self.source("inventory.html")

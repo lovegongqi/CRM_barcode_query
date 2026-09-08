@@ -190,7 +190,11 @@
                     <label>GYJ 采购入库</label>
                     <div class="muted">使用当前账号最近一次成功读取的 CRM 装箱单。默认供应商：昆山怡口净水系统有限公司；结算账户：江西天麓；仓库：沈桥仓。</div>
                 </div>
-                <button class="btn btn-secondary" id="gyjLoginBtn" type="button" onclick="openGYJLoginModal()">登录 GYJ</button>
+                {% if account.is_admin %}
+                <a class="btn btn-secondary" id="gyjLoginBtn" href="/accounts#gyjChannelCard">GYJ 已登录 0/5</a>
+                {% else %}
+                <span class="btn btn-secondary" id="gyjLoginBtn">GYJ 已登录 0/5</span>
+                {% endif %}
             </div>
             <div class="gyj-selection-head">
                 <div>
@@ -218,49 +222,7 @@
     </div>
 </div>
 
-    <div class="gyj-login-overlay" id="gyjLoginModal" hidden onclick="if(event.target.id==='gyjLoginModal')closeGYJLoginModal()">
-        <div class="login-modal gyj-login-modal" role="dialog" aria-modal="true" aria-labelledby="gyjLoginModalTitle">
-            <div class="login-modal-head">
-                <h3 id="gyjLoginModalTitle">登录 GYJ</h3>
-                <button class="modal-close" type="button" onclick="closeGYJLoginModal()" aria-label="关闭">×</button>
-            </div>
-            <div class="login-modal-body">
-                <div>
-                    <label for="gyjUsername">GYJ 账号</label>
-                    <input id="gyjUsername" autocomplete="username" placeholder="GYJ 用户名">
-                </div>
-                <div>
-                    <label for="gyjPassword">GYJ 密码</label>
-                    <input id="gyjPassword" type="password" autocomplete="current-password" placeholder="GYJ 密码" onkeydown="if(event.key==='Enter')startGYJBackgroundLogin()">
-                </div>
-                <label class="gyj-remember"><input id="gyjRememberLogin" type="checkbox">记住账号密码</label>
-                <div id="gyjCaptchaRow" style="display:none;">
-                    <label for="gyjCaptcha">验证码</label>
-                    <input id="gyjCaptcha" inputmode="text" autocapitalize="off" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()">
-                    <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
-                        <img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;">
-                        <button class="btn btn-secondary" type="button" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button>
-                        <button class="btn btn-secondary" type="button" id="gyjCaptchaBtn" onclick="submitGYJCaptcha()">提交验证码</button>
-                    </div>
-                </div>
-                <div class="modal-actions">
-                    <button class="btn btn-secondary" type="button" onclick="closeGYJLoginModal()">取消</button>
-                    <button class="btn btn-primary" type="button" id="gyjLoginSubmitBtn" onclick="startGYJBackgroundLogin()">登录 GYJ</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
 <script>
-function openGYJLoginModal() {
-    document.getElementById('gyjLoginModal').hidden = false;
-    document.getElementById('gyjUsername').focus();
-}
-
-function closeGYJLoginModal() {
-    document.getElementById('gyjLoginModal').hidden = true;
-}
-
 const INBOUND_STAGE_LABELS = {
     waiting: '等待开始', navigation: '打开 CRM 页面', search: '查询装箱单',
     reading: '逐页读取', organizing: '整理入库明细', success: '读取完成', failed: '读取失败'
@@ -703,112 +665,18 @@ function setGYJStatus(message) {
 
 async function checkGYJLoginStatus() {
     try {
-        const response = await fetch('/api/inbound/gyj/login-status');
+        const response = await fetch('/api/inbound/gyj/slots');
         const data = await response.json();
         const button = document.getElementById('gyjLoginBtn');
         gyjLoggedIn = !!data.logged_in;
-        button.textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
+        const loggedInCount = Number(data.logged_in_count || 0);
+        button.textContent = `GYJ 已登录 ${loggedInCount}/5`;
         updateGYJStartButton();
-        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
-        if (data.waiting_captcha) {
-            openGYJLoginModal();
-            refreshGYJCaptchaPreview();
-        }
-        setGYJStatus(data.logged_in ? 'GYJ 已登录，待创建' : (data.message || '请先登录 GYJ'));
+        setGYJStatus(data.logged_in ? `GYJ 已登录 ${loggedInCount}/5，待创建` : '请管理员先在设置页登录 GYJ 通道');
         return !!data.logged_in;
     } catch (error) {
         setGYJStatus('无法确认 GYJ 登录状态');
         return false;
-    }
-}
-
-async function refreshGYJCaptchaPreview() {
-    const image = document.getElementById('gyjCaptchaImage');
-    try {
-        const data = await fetch('/api/inbound/gyj/captcha-preview').then(response => response.json());
-        const captchaImage = data && data.success ? data.captcha_image : '';
-        if (captchaImage && captchaImage.startsWith('data:image/')) {
-            image.src = captchaImage;
-            image.style.display = '';
-        } else {
-            image.removeAttribute('src');
-            image.style.display = 'none';
-        }
-    } catch (error) {
-        image.removeAttribute('src');
-        image.style.display = 'none';
-    }
-}
-
-async function loadGYJCredentials() {
-    try {
-        const data = await fetch('/api/inbound/gyj/credentials').then(response => response.json());
-        if (!data || !data.success) return;
-        document.getElementById('gyjRememberLogin').checked = !!data.remember;
-        document.getElementById('gyjUsername').value = data.username || '';
-    } catch (error) {}
-}
-
-async function startGYJBackgroundLogin() {
-    const username = document.getElementById('gyjUsername').value.trim();
-    const password = document.getElementById('gyjPassword').value;
-    const remember = document.getElementById('gyjRememberLogin').checked;
-    if (!username || !password) {
-        setGYJStatus('请输入 GYJ 账号和密码');
-        return;
-    }
-    const button = document.getElementById('gyjLoginSubmitBtn');
-    button.disabled = true;
-    button.textContent = '后台登录中...';
-    try {
-        const response = await fetch('/api/inbound/gyj/login', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({username, password, remember})
-        });
-        const data = await response.json();
-        if (data.logged_in || data.waiting_captcha) {
-            document.getElementById('gyjPassword').value = '';
-        }
-        gyjLoggedIn = !!data.logged_in;
-        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
-        if (data.waiting_captcha) refreshGYJCaptchaPreview();
-        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
-        updateGYJStartButton();
-        setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败'));
-        if (data.logged_in) closeGYJLoginModal();
-    } catch (error) {
-        setGYJStatus('GYJ 后台登录失败');
-    } finally {
-        button.disabled = false;
-        button.textContent = '登录 GYJ';
-    }
-}
-
-async function submitGYJCaptcha() {
-    const captcha = document.getElementById('gyjCaptcha').value.trim();
-    if (!captcha) {
-        setGYJStatus('请输入 GYJ 验证码');
-        return;
-    }
-    const button = document.getElementById('gyjCaptchaBtn');
-    button.disabled = true;
-    try {
-        const response = await fetch('/api/inbound/gyj/login/captcha', {
-            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({captcha})
-        });
-        const data = await response.json();
-        document.getElementById('gyjCaptcha').value = '';
-        gyjLoggedIn = !!data.logged_in;
-        document.getElementById('gyjCaptchaRow').style.display = data.waiting_captcha ? '' : 'none';
-        if (data.waiting_captcha) refreshGYJCaptchaPreview();
-        updateGYJStartButton();
-        document.getElementById('gyjLoginBtn').textContent = data.logged_in ? 'GYJ 已登录' : '登录 GYJ';
-        setGYJStatus(data.message || (data.success ? 'GYJ 登录成功' : 'GYJ 验证码验证失败'));
-        if (data.logged_in) closeGYJLoginModal();
-    } catch (error) {
-        setGYJStatus('GYJ 验证码提交失败');
-    } finally {
-        button.disabled = false;
     }
 }
 
@@ -932,7 +800,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const packingSlipNo = sessionStorage.getItem('inbound_history_packing_slip_no') || '';
         if (packingSlipNo) selectInboundHistory(packingSlipNo, false);
     });
-    loadGYJCredentials();
     if (sessionStorage.getItem('inbound_workspace') === 'gyj') selectInboundWorkspace('gyj');
 });
 </script>

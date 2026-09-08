@@ -211,7 +211,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
         )
         self.assertLess(
             status_markup.index('class="aurora-account-session"'),
-            status_markup.index('id="inventoryGyjLoginButton"'),
+            status_markup.index('id="inventoryGyjStatus"'),
         )
         self.assertIn('<span class="inventory-label-mobile">历史</span>', status_markup)
 
@@ -1939,173 +1939,18 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_reopening_login_renders_http_200_captcha_waiting_state(self):
-        self.run_node(
-            r"""
-            function classList() { return {toggle() {}, add() {}}; }
-            const elements = new Map();
-            function element(id) {
-                if (!elements.has(id)) elements.set(id, {
-                    id, value: '', textContent: '', hidden: true, checked: false,
-                    open: false, className: '', classList: classList(),
-                    focus() {}, removeAttribute() {},
-                    showModal() { this.open = true; }, close() { this.open = false; },
-                });
-                return elements.get(id);
-            }
-            const context = {
-                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                document: {hidden: false, addEventListener() {}, getElementById: element},
-                fetch: async url => ({
-                    ok: true,
-                    status: 200,
-                    json: async () => url.endsWith('/credentials')
-                        ? {success: true, username: 'worker', remember: true}
-                        : {success: false, logged_in: false, waiting_captcha: true, message: 'GYJ 等待验证码'},
-                }),
-                setTimeout() { return 1; }, clearTimeout() {},
-                setInterval() { return 1; }, clearInterval() {},
-            };
-            vm.createContext(context);
-            vm.runInContext(source, context);
-            vm.runInContext('refreshGyjCaptcha = async () => {}', context);
-
-            (async () => {
-                await vm.runInContext('openGyjLogin()', context);
-                assert.equal(element('inventoryGyjCaptchaRow').hidden, false);
-                vm.runInContext('closeGyjLogin()', context);
-                assert.equal(element('inventoryGyjCaptchaRow').hidden, true);
-                await vm.runInContext('openGyjLogin()', context);
-                assert.equal(element('inventoryGyjCaptchaRow').hidden, false);
-                assert.equal(element('inventoryGyjLoginButton').textContent, '登录 GYJ');
-            })().catch(error => { console.error(error); process.exitCode = 1; });
-            """
-        )
-
-    def test_opening_an_already_logged_in_account_keeps_dialog_open(self):
-        self.run_node(
-            r"""
-            function classList() { return {toggle() {}, add() {}}; }
-            const elements = new Map();
-            function element(id) {
-                if (!elements.has(id)) elements.set(id, {
-                    id, value: '', textContent: '', hidden: true, checked: false,
-                    open: false, className: '', classList: classList(),
-                    focus() {}, removeAttribute() {},
-                    showModal() { this.open = true; }, close() { this.open = false; },
-                });
-                return elements.get(id);
-            }
-            const timers = [];
-            const context = {
-                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                document: {hidden: false, addEventListener() {}, getElementById: element},
-                fetch: async url => ({
-                    ok: true,
-                    status: 200,
-                    json: async () => url.endsWith('/credentials')
-                        ? {success: true, username: 'worker', remember: true}
-                        : {success: true, logged_in: true, waiting_captcha: false},
-                }),
-                setTimeout(callback) { timers.push(callback); return timers.length; },
-                clearTimeout() {}, setInterval() { return 1; }, clearInterval() {},
-            };
-            vm.createContext(context);
-            vm.runInContext(source, context);
-            vm.runInContext('pollInventoryTask = async () => {}', context);
-
-            (async () => {
-                await vm.runInContext('openGyjLogin()', context);
-                for (const callback of timers) callback();
-                assert.equal(element('inventoryGyjLoginDialog').open, true);
-                assert.equal(element('inventoryGyjLoginMessage').textContent, 'GYJ 登录成功。');
-            })().catch(error => { console.error(error); process.exitCode = 1; });
-            """
-        )
-
-    def test_waiting_captcha_stops_polling_and_only_loads_preview_once(self):
-        self.run_node(
-            r"""
-            function classList() { return {toggle() {}}; }
-            const elements = new Map();
-            function element(id) {
-                if (!elements.has(id)) elements.set(id, {
-                    id, hidden: true, textContent: '', className: '',
-                    classList: classList(),
-                });
-                return elements.get(id);
-            }
-            let clearedTimer = null;
-            const context = {
-                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                refreshCalls: 0,
-                document: {hidden: false, addEventListener() {}, getElementById: element},
-                setTimeout, clearTimeout, setInterval() { return 1; },
-                clearInterval(timer) { clearedTimer = timer; },
-            };
-            vm.createContext(context);
-            vm.runInContext(source, context);
-            vm.runInContext(`
-                gyjLoginPollTimer = 9;
-                refreshGyjCaptcha = async () => { refreshCalls += 1; };
-            `, context);
-
-            vm.runInContext(`renderGyjLoginState({
-                logged_in: false, waiting_captcha: true, message: 'GYJ 等待验证码'
-            })`, context);
-            vm.runInContext(`renderGyjLoginState({
-                logged_in: false, waiting_captcha: true, message: 'GYJ 等待验证码'
-            })`, context);
-
-            assert.equal(vm.runInContext('refreshCalls', context), 1);
-            assert.equal(clearedTimer, 9);
-            assert.equal(vm.runInContext('gyjLoginPollTimer', context), null);
-            """
-        )
-
-    def test_manual_captcha_refresh_requests_new_challenge(self):
-        self.run_node(
-            r"""
-            const requests = [];
-            const image = {src: '', removeAttribute() { this.src = ''; }};
-            const message = {textContent: '', className: ''};
-            const dialog = {open: true};
-            const elements = new Map([
-                ['inventoryGyjCaptchaImage', image],
-                ['inventoryGyjLoginMessage', message],
-                ['inventoryGyjLoginDialog', dialog],
-            ]);
-            const context = {
-                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                document: {
-                    hidden: false, addEventListener() {},
-                    getElementById(id) { return elements.get(id); },
-                },
-                fetch: async (url, options = {}) => {
-                    requests.push({url, options});
-                    return {
-                        ok: true, status: 200,
-                        json: async () => ({
-                            success: true,
-                            captcha_image: 'data:image/png;base64,bmV3',
-                        }),
-                    };
-                },
-                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
-            };
-            vm.createContext(context);
-            vm.runInContext(source, context);
-            vm.runInContext('gyjLoginSession = 3', context);
-
-            (async () => {
-                await vm.runInContext('refreshGyjCaptcha(3, true)', context);
-                assert.equal(requests.length, 1);
-                assert.equal(requests[0].url, '/api/gyj/captcha/refresh');
-                assert.equal(requests[0].options.method, 'POST');
-                assert.equal(image.src, 'data:image/png;base64,bmV3');
-            })().catch(error => { console.error(error); process.exitCode = 1; });
-            """
-        )
+    def test_inventory_uses_shared_gyj_status_without_login_dialog(self):
+        script = (ROOT / "static" / "inventory.js").read_text(encoding="utf-8")
+        template = (ROOT / "templates" / "inventory.html").read_text(encoding="utf-8")
+        self.assertIn("/api/gyj/slots", script)
+        self.assertIn("GYJ 已登录 ${loggedInCount}/5", script)
+        self.assertIn('id="inventoryGyjStatus"', template)
+        for obsolete in (
+            "openGyjLogin", "closeGyjLogin", "gyjLoginSession",
+            "inventoryGyjLoginDialog", "inventoryGyjCaptcha",
+        ):
+            with self.subTest(obsolete=obsolete):
+                self.assertNotIn(obsolete, script + template)
 
     def test_device_id_survives_throwing_storage_and_missing_random_uuid(self):
         self.run_node(

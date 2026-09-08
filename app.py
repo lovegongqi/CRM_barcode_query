@@ -9150,6 +9150,16 @@ def get_remembered_gyj_credentials():
     return {"remember": True, "username": str(row.get("username") or "")}
 
 
+def get_remembered_gyj_credentials_secret():
+    row = load_gyj_credentials_store().get(gyj_credentials_owner_key()) or {}
+    if not isinstance(row, dict) or not row.get("remember"):
+        return {"username": "", "password": ""}
+    return {
+        "username": str(row.get("username") or ""),
+        "password": str(row.get("password") or ""),
+    }
+
+
 def save_remembered_gyj_credentials(remember, username="", password=""):
     key = gyj_credentials_owner_key()
     if not key:
@@ -10508,6 +10518,10 @@ def api_gyj_login():
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     remember = bool(data.get("remember"))
+    if data.get("use_saved") and (not username or not password):
+        saved = get_remembered_gyj_credentials_secret()
+        username = username or saved["username"]
+        password = password or saved["password"]
     if not username or not password:
         return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
     try:

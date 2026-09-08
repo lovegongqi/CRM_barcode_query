@@ -814,10 +814,9 @@ class InboundRouteTest(unittest.TestCase):
         self.assertNotIn("password", payload)
 
         other = self._login("inbound-other", "inbound-pass")
-        other_payload = other.get("/api/inbound/gyj/credentials").get_json()
-        self.assertTrue(other_payload["remember"])
-        self.assertEqual(other_payload["username"], "gyj-admin")
-        self.assertNotIn("password", other_payload)
+        other_response = other.get("/api/inbound/gyj/credentials")
+        self.assertEqual(other_response.status_code, 403)
+        self.assertNotIn("password", other_response.get_json())
 
     def test_gyj_background_login_forwards_credentials_only_to_owner_worker(self):
         client = self._login("admin", "88293529")
@@ -887,6 +886,27 @@ class InboundRouteTest(unittest.TestCase):
         self.assertNotIn("gyj-1", workers)
         self.assertEqual(invalid.status_code, 400)
         self.assertIn("无效", invalid.get_json()["error"])
+
+    def test_gyj_login_can_reuse_remembered_secret_without_returning_it(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        saved_store = {
+            "admin": {
+                "remember": True,
+                "username": "saved-user",
+                "password": "saved-secret",
+            }
+        }
+        with mock.patch.object(app_module, "gyj_worker", worker), mock.patch.object(
+            app_module, "load_gyj_credentials_store", return_value=saved_store
+        ), mock.patch.object(app_module, "save_remembered_gyj_credentials", return_value=True):
+            response = client.post("/api/gyj/login", json={
+                "slot_id": "gyj-2", "use_saved": True, "remember": True
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(worker.login_calls, [("saved-user", "saved-secret")])
+        self.assertNotIn("password", response.get_json())
 
     def test_gyj_captcha_targets_selected_channel_and_busy_login_is_rejected(self):
         client = self._login("admin", "88293529")
@@ -1035,7 +1055,7 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(inbound.status_code, 403)
 
     def test_gyj_routes_and_inventory_provider_share_one_worker_when_account_id_differs(self):
-        client = self._login("warehouse-user", "warehouse-pass")
+        client = self._login("admin", "88293529")
         app_module.upsert_inbound_history({
             "packing_slip_no": PACKING_SLIP_NO,
             "packing_slip_type": "销售订单",
@@ -1098,9 +1118,9 @@ class InboundRouteTest(unittest.TestCase):
             self.assertEqual(worker_factory.call_count, 5)
 
         job_id = started.get_json()["job_id"]
-        self.assertEqual(app_module.inbound_gyj_jobs[job_id]["owner"], "warehouse-account-id")
+        self.assertEqual(app_module.inbound_gyj_jobs[job_id]["owner"], "admin")
         self.assertEqual(
-            app_module.latest_inbound_gyj_job_by_owner["warehouse-account-id"], job_id
+            app_module.latest_inbound_gyj_job_by_owner["admin"], job_id
         )
 
     def test_invalid_number_is_rejected_before_selecting_a_channel(self):

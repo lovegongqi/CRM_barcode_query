@@ -36,7 +36,11 @@
             <span class="aurora-account-name">{{ account.display_name or account.username }}</span>
             {% if not is_desktop_app %}<a class="aurora-account-logout" href="/logout" aria-label="退出工具账号"><span class="inventory-label-full">退出工具账号</span><span class="inventory-label-mobile">退出</span></a>{% endif %}
         </div>
-        <button class="btn btn-primary" id="inventoryGyjLoginButton" type="button">登录 GYJ</button>
+        {% if account.is_admin %}
+        <a class="btn btn-secondary" id="inventoryGyjStatus" href="/accounts#gyjChannelCard">GYJ 已登录 0/5</a>
+        {% else %}
+        <span class="btn btn-secondary" id="inventoryGyjStatus">GYJ 已登录 0/5</span>
+        {% endif %}
     </div>
 
     <main id="inventoryRoot" class="inventory-shell">
@@ -280,36 +284,6 @@
     </div>
 </dialog>
 
-<dialog id="inventoryGyjLoginDialog" aria-labelledby="inventoryGyjLoginDialogTitle" aria-modal="true" class="inventory-dialog">
-    <div class="inventory-dialog-card inventory-login-card">
-        <div class="inventory-dialog-head">
-            <div>
-                <p class="inventory-eyebrow">ACCOUNT CONNECTION</p>
-                <h2 id="inventoryGyjLoginDialogTitle">登录 GYJ</h2>
-            </div>
-            <button class="inventory-icon-button" id="inventoryGyjLoginClose" type="button" aria-label="关闭 GYJ 登录窗口">×</button>
-        </div>
-        <label for="inventoryGyjUsername">GYJ 账号</label>
-        <input id="inventoryGyjUsername" autocomplete="username" placeholder="请输入 GYJ 账号">
-        <label for="inventoryGyjPassword">GYJ 密码</label>
-        <input id="inventoryGyjPassword" type="password" autocomplete="current-password" placeholder="请输入 GYJ 密码">
-        <label class="inventory-remember"><input id="inventoryGyjRemember" type="checkbox">记住账号密码</label>
-        <div id="inventoryGyjCaptchaRow" class="inventory-captcha" hidden>
-            <label for="inventoryGyjCaptcha">验证码</label>
-            <div class="inventory-captcha-controls">
-                <input id="inventoryGyjCaptcha" inputmode="text" autocapitalize="off" autocomplete="one-time-code" placeholder="请输入验证码">
-                <img id="inventoryGyjCaptchaImage" alt="GYJ 验证码">
-                <button class="btn btn-secondary" id="inventoryGyjCaptchaRefresh" type="button">刷新</button>
-            </div>
-            <button class="btn btn-primary" id="inventoryGyjCaptchaSubmit" type="button">提交验证码</button>
-        </div>
-        <p id="inventoryGyjLoginMessage" class="inventory-dialog-message" role="status" aria-live="polite"></p>
-        <div class="inventory-dialog-actions">
-            <button class="btn btn-secondary" id="inventoryGyjLoginCancel" type="button">取消</button>
-            <button class="btn btn-primary" id="inventoryGyjLoginSubmit" type="button">登录 GYJ</button>
-        </div>
-    </div>
-</dialog>
 <script>
 const CURRENT_ACCOUNT = {{ account|tojson }};
 const INVENTORY_IS_ADMIN = Boolean(CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin);
