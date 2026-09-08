@@ -878,6 +878,13 @@ class FrontendContractTest(unittest.TestCase):
             r'<input id="inventoryGyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
         )
 
+    def test_inbound_gyj_captcha_accepts_alphanumeric_codes(self):
+        source = self.source("inbound.html")
+        self.assertRegex(
+            source,
+            r'<input id="gyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
+        )
+
     def test_inventory_has_one_gyj_button_and_cache_busted_assets(self):
         source = self.source("inventory.html")
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")

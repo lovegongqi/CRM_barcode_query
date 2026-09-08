@@ -236,7 +236,7 @@
                 <label class="gyj-remember"><input id="gyjRememberLogin" type="checkbox">记住账号密码</label>
                 <div id="gyjCaptchaRow" style="display:none;">
                     <label for="gyjCaptcha">验证码</label>
-                    <input id="gyjCaptcha" inputmode="numeric" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()">
+                    <input id="gyjCaptcha" inputmode="text" autocapitalize="off" autocomplete="one-time-code" placeholder="请输入 GYJ 验证码" onkeydown="if(event.key==='Enter')submitGYJCaptcha()">
                     <div style="display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap;">
                         <img id="gyjCaptchaImage" alt="GYJ 验证码图片" style="display:none;height:38px;max-width:130px;background:#fff;border-radius:5px;">
                         <button class="btn btn-secondary" type="button" id="gyjCaptchaRefreshBtn" onclick="refreshGYJCaptchaPreview()">刷新验证码</button>

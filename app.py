@@ -4688,6 +4688,8 @@ def _empty_bulk_login_job(scope, slots=None):
         'password': '',
         'stop_requested': False,
         'captcha': '',
+        'captcha_generation': 0,
+        'captcha_submitting': False,
         'step1_done': False,
         'log_seq': 0,
         'logs': [],
@@ -4698,6 +4700,7 @@ def _empty_bulk_login_job(scope, slots=None):
                 'label': slot['label'],
                 'status': 'pending',
                 'message': '',
+                'captcha_generation': -1,
             }
             for slot in (slots or [])
         ],
@@ -4951,18 +4954,24 @@ def _update_bulk_login_slot(job_id, slot_id, status, message=''):
         dispatch_priority_query_work()
     return updated
 
-def _submit_bulk_login_slot(job_id, slot, captcha):
+def _submit_bulk_login_slot(job_id, slot, captcha, captcha_generation=None):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
             return False
+        generation = int(job.get('captcha_generation') or 0) if captcha_generation is None else int(captcha_generation)
         username = job.get('username') or ''
         password = job.get('password') or ''
         target = next((row for row in job.get('slots') or [] if row.get('id') == slot['id']), None)
-        if not target or target.get('status') != 'waiting_captcha':
+        if (
+            not target
+            or target.get('status') != 'waiting_captcha'
+            or int(target.get('captcha_generation', -1)) == generation
+        ):
             return False
         target['status'] = 'submitting_captcha'
         target['message'] = '正在提交验证码'
+        target['captcha_generation'] = generation
     _bulk_login_job_log(job_id, f"{slot['label']} 提交验证码", 'info')
     try:
         worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
@@ -4991,26 +5000,40 @@ def _submit_bulk_login_slot(job_id, slot, captcha):
     keep_waiting = any(text in message_text for text in ["验证码可能错误", "验证码不能为空", "验证码已填入"])
     _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha' if keep_waiting else 'failed', message_text)
     _bulk_login_job_log(job_id, f"{slot['label']} 验证码提交失败：{message or '未知错误'}", 'error')
-    with bulk_login_job_lock:
-        job = bulk_login_jobs.get(job_id)
-        if job:
-            job['captcha'] = ''
     return False
 
 def _submit_bulk_login_pending(job_id):
-    while True:
+    try:
         with bulk_login_job_lock:
             job = bulk_login_jobs.get(job_id)
             if not job or not job.get('captcha'):
                 return
             captcha = job['captcha']
-            pending = [dict(slot) for slot in job.get('slots') or [] if slot.get('status') == 'waiting_captcha']
-        if not pending:
-            _finalize_bulk_login_job_if_ready(job_id)
-            return
-        for slot in pending:
-            _submit_bulk_login_slot(job_id, slot, captcha)
+            generation = int(job.get('captcha_generation') or 0)
+            pending = [
+                dict(slot)
+                for slot in job.get('slots') or []
+                if slot.get('status') == 'waiting_captcha'
+                and int(slot.get('captcha_generation', -1)) != generation
+            ]
+        if pending:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending)) as executor:
+                futures = [
+                    executor.submit(
+                        _submit_bulk_login_slot, job_id, slot, captcha, generation
+                    )
+                    for slot in pending
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
         _finalize_bulk_login_job_if_ready(job_id)
+    finally:
+        with bulk_login_job_lock:
+            job = bulk_login_jobs.get(job_id)
+            if job:
+                job['captcha_submitting'] = False
+                if job.get('step1_done'):
+                    job['captcha'] = ''
 
 def _run_bulk_login_one_slot(job_id, slot, username, password):
     """Per-slot login worker. Each slot has its own Playwright Chromium instance
@@ -5054,8 +5077,9 @@ def _run_bulk_login_one_slot(job_id, slot, username, password):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         captcha = (job or {}).get('captcha') or ''
+        captcha_generation = int((job or {}).get('captcha_generation') or 0)
     if captcha:
-        _submit_bulk_login_slot(job_id, slot, captcha)
+        _submit_bulk_login_slot(job_id, slot, captcha, captcha_generation)
 
 
 def _run_bulk_login_job(job_id, username, password):
@@ -11820,6 +11844,7 @@ def _bulk_login_status_payload(job):
         'error': job.get('error') or '',
         'waiting_captcha': bool(waiting),
         'captcha_received': bool(job.get('captcha')),
+        'captcha_submitting': bool(job.get('captcha_submitting')),
         'pending_slots': waiting,
         'active_slots': active,
         'slots': slots,
@@ -11887,7 +11912,11 @@ def api_crm_bulk_login_captcha():
         job = bulk_login_jobs.get(job_id)
         if not job:
             return jsonify({'success': False, 'error': '没有批量登录任务'})
+        if job.get('captcha_submitting'):
+            return jsonify(_bulk_login_status_payload(job))
         job['captcha'] = captcha
+        job['captcha_generation'] = int(job.get('captcha_generation') or 0) + 1
+        job['captcha_submitting'] = True
         _append_job_log_unlocked(job, '已收到验证码，正在同步提交到等待中的通道', 'info', 1000)
         payload = _bulk_login_status_payload(job)
     threading.Thread(target=_submit_bulk_login_pending, args=(job_id,), daemon=True).start()

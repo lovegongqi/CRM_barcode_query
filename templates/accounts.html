@@ -419,9 +419,11 @@ async function submitBulkCrmCaptcha() {
             renderBulkLoginJob(data);
             startBulkLoginPolling();
         }
-    } finally {
+    } catch (e) {
+        bulkLog('提交验证码出错：' + e, 'error');
         btn.disabled = false;
         btn.textContent = '提交验证码';
+    } finally {
         await loadBulkCrmSlots();
     }
 }
@@ -441,11 +443,13 @@ function renderBulkLoginJob(data) {
     mergeBulkCrmSlotProgress(data.slots || []);
     document.getElementById('bulkCrmLoginBtn').disabled = !!data.running;
     document.getElementById('bulkCrmLoginBtn').textContent = data.running ? '登录中...' : '批量登录';
+    const captchaButton = document.getElementById('bulkCaptchaBtn');
+    captchaButton.disabled = !!data.captcha_submitting || !!data.captcha_received;
+    captchaButton.textContent = data.captcha_submitting ? '提交中...' : '提交验证码';
     if (data.waiting_captcha) {
         document.getElementById('bulkCaptchaRow').style.display = '';
         if (!data.captcha_received) {
-            document.getElementById('bulkCaptchaBtn').disabled = false;
-            document.getElementById('bulkCaptchaBtn').textContent = '提交验证码';
+            captchaButton.disabled = false;
         }
         const input = document.getElementById('bulkCrmCaptcha');
         if (!input.value) input.focus();
