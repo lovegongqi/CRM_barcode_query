@@ -808,7 +808,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("BigInt", script)
         self.assertNotIn("parseFloat", script)
         self.assertIn("item.count_expression", script)
-        self.assertIn("正在保存这一笔数量并读取 GYJ 最新库存", script)
+        self.assertIn("可立即录入实盘数量，账面库存由后台自动更新", script)
         self.assertNotIn("sendInventoryHeartbeat", script)
 
     def test_inventory_renders_allowlisted_fields_without_html_injection(self):
@@ -939,7 +939,7 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
-        self.assertIn("const requestId = ++countDialogRequestId;", script)
+        self.assertNotIn("const requestId = ++countDialogRequestId;", script)
         self.assertIn("const session = ++gyjLoginSession;", script)
         self.assertRegex(
             script,

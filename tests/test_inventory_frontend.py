@@ -1117,6 +1117,58 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_count_dialog_is_immediately_editable_without_gyj_request(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.open = false; this.value = '';
+                    this.disabled = false; this.textContent = ''; this.className = '';
+                    this.dataset = {}; this.parentElement = {className: '', classList: {add() {}}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                showModal() { this.open = true; }
+                focus() { this.focused = true; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            let requestCount = 0;
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async () => { requestCount += 1; throw new Error('must not request'); },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'T1', items: [{
+                    barcode: 'A1', name: '商品', state: 'pending', latest_book_qty: '12',
+                    count_total: null, count_entries: [],
+                }]};
+                renderCountProduct = () => {};
+                renderCountEntries = () => {};
+                renderInventoryItems = () => {};
+            `, context);
+
+            const opening = vm.runInContext("openCountItem('A1')", context);
+            assert.equal(element('inventoryCountDialog').open, true);
+            assert.equal(element('inventoryCountNewQuantity').disabled, false);
+            assert.equal(element('inventoryCountAdd').disabled, false);
+            assert.equal(element('inventoryCountNewQuantity').focused, true);
+            assert.match(element('inventoryCountMessage').textContent, /立即录入/);
+            assert.equal(requestCount, 0);
+            Promise.resolve(opening).catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_partial_count_update_and_delete_use_entry_versions(self):
         self.run_node(
             r"""
@@ -1247,6 +1299,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext('addCountEntry()', context);
+                for (let i = 0; i < 10 && element('inventoryTaskSummary').children.length < 2; i += 1) {
+                    await new Promise(setImmediate);
+                }
                 assert.equal(requests.length, 2);
                 assert.equal(requests[1].url, '/api/inventory/tasks/active');
                 const cards = element('inventoryTaskSummary').children;
@@ -1326,7 +1381,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 await first;
                 await duplicate;
                 assert.equal(requests.filter(request => request.options.method === 'POST').length, 1);
-                assert.match(element('inventoryCountMessage').textContent, /已保存，但统计刷新失败/);
+                assert.equal(element('inventoryCountMessage').textContent, '已加入这一笔数量。');
                 assert.equal(vm.runInContext('inventoryTask.items[0].count_total', context), '3');
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -1374,7 +1429,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext("updateCountEntry({entry_id: 9, version: 3}, '8')", context);
+                for (let i = 0; i < 10 && rendered.length < 1; i += 1) await new Promise(setImmediate);
                 await vm.runInContext("deleteCountEntry({entry_id: 9, version: 4})", context);
+                for (let i = 0; i < 10 && rendered.length < 2; i += 1) await new Promise(setImmediate);
                 assert.deepEqual(requests.map(request => request.url), [
                     '/api/inventory/tasks/T1/items/A1/count-entries/9',
                     '/api/inventory/tasks/active',
@@ -1436,9 +1493,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext("openSerialItem('B2')", context);
-                assert.equal(requests.length, 1);
+                assert.equal(requests.length, 2);
                 assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/B2/serial/open');
                 assert.deepEqual(JSON.parse(requests[0].options.body), {device_id: 'device-a'});
+                assert.equal(requests[1].url, '/api/inventory/tasks/T1/items/B2/serial/refresh');
+                assert.deepEqual(JSON.parse(requests[1].options.body), {
+                    device_id: 'device-a', force: true,
+                });
                 assert.equal(vm.runInContext('serialWorkspaceEditable', context), true);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -1492,6 +1553,92 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_serial_dialog_refreshes_in_background_and_failure_keeps_scanning_enabled(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let reject;
+                const promise = new Promise((_resolve, fail) => { reject = fail; });
+                return {promise, reject};
+            }
+            function response(payload) {
+                return {ok: true, status: 200, json: async () => payload};
+            }
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.hidden = true; this.open = false;
+                    this.value = ''; this.disabled = false; this.textContent = '';
+                    this.dataset = {}; this.className = '';
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+                addEventListener() {}
+                setAttribute() {}
+                showModal() { this.open = true; }
+                close() { this.open = false; }
+                focus() { this.focused = true; }
+            }
+            const refresh = deferred();
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const requests = [];
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array, refresh,
+                document: {
+                    hidden: false, addEventListener() {}, createElement() { return new FakeNode(); },
+                    getElementById: element,
+                },
+                fetch: async (url, options) => {
+                    requests.push({url, options});
+                    if (url.endsWith('/serial/open')) return response({
+                        success: true, version: 4,
+                        serial: {
+                            barcode: 'B2', item: {barcode: 'B2', state: 'serial_pending'},
+                            counts: {}, expected: [], matched: [], system_only: [],
+                            physical_only: [], other_product: [], duplicates: [],
+                        },
+                    });
+                    if (url.endsWith('/serial/refresh')) return refresh.promise;
+                    throw new Error('unexpected request ' + url);
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryDeviceId = 'device-a';
+                inventoryTask = {task_id: 'T1', phase: 'counting', version: 3, items: [{
+                    barcode: 'B2', name: '序列商品', state: 'serial_pending', has_serial: true,
+                }]};
+                renderSerialReconciliation = value => { currentSerialData = value; };
+            `, context);
+            (async () => {
+                await vm.runInContext("openSerialItem('B2')", context);
+                assert.equal(requests.length, 2);
+                assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/B2/serial/open');
+                assert.equal(requests[1].url, '/api/inventory/tasks/T1/items/B2/serial/refresh');
+                assert.equal(element('inventorySerialInput').disabled, false);
+                assert.equal(element('inventoryCameraStart').disabled, false);
+                assert.equal(element('inventorySerialRefresh').disabled, true);
+                assert.match(element('inventorySerialMessage').textContent, /后台刷新/);
+
+                refresh.reject(new Error('GYJ unavailable'));
+                await Promise.resolve();
+                await Promise.resolve();
+                await new Promise(resolve => setTimeout(resolve, 0));
+                assert.equal(element('inventorySerialInput').disabled, false);
+                assert.equal(element('inventoryCameraStart').disabled, false);
+                assert.equal(element('inventorySerialRefresh').disabled, false);
+                assert.match(element('inventorySerialMessage').textContent, /重新获取/);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
     def test_serial_refresh_preserves_unsubmitted_scan(self):
         self.run_node(
             r"""
@@ -1538,7 +1685,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 await vm.runInContext('refreshSerialItem()', context);
                 await vm.runInContext('refreshSerialItem()', context);
                 assert.equal(input.value, 'UNSUBMITTED');
-                assert.equal(vm.runInContext('currentSerialData.counts.matched', context), 2);
+                assert.equal(vm.runInContext('currentSerialData.counts.matched', context), 4);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -2041,54 +2188,6 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_open_count_409_shows_server_error_without_lock_copy(self):
-        self.run_node(
-            r"""
-            const elements = new Map();
-            function element(id) {
-                if (!elements.has(id)) elements.set(id, {
-                    id, value: '', textContent: '', disabled: false, open: false,
-                    className: '', dataset: {}, focus() {},
-                    showModal() { this.open = true; }, close() { this.open = false; },
-                });
-                return elements.get(id);
-            }
-            const context = {
-                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
-                document: {hidden: false, addEventListener() {}, getElementById: element},
-                fetch: async () => ({
-                    ok: false,
-                    status: 409,
-                    json: async () => ({success: false, error: '当前任务不在数量盘点阶段'}),
-                }),
-                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
-            };
-            vm.createContext(context);
-            vm.runInContext(source, context);
-            vm.runInContext(`
-                renderCountProduct = () => {};
-                updateCountBook = () => {};
-                renderCountEntries = () => {};
-                pollInventoryTask = async () => {};
-                inventoryDeviceId = 'device-a';
-                inventoryTask = {task_id: 'task-1', items: [{
-                    barcode: 'A1', name: '商品', state: 'pending',
-                    completed_actual_qty: null, lock_actor: '过期显示',
-                }]};
-            `, context);
-            (async () => {
-                await vm.runInContext("openCountItem('A1')", context);
-                assert.equal(
-                    element('inventoryCountMessage').textContent,
-                    '当前任务不在数量盘点阶段',
-                );
-                assert.equal(element('inventoryCountNewQuantity').disabled, true);
-                assert.equal(element('inventoryCountAdd').disabled, true);
-                assert.equal(vm.runInContext('countDialogEditable', context), false);
-            })().catch(error => { console.error(error); process.exitCode = 1; });
-            """
-        )
-
     def test_serial_scan_clears_and_refocuses_input_and_delete_uses_delete_route(self):
         self.run_node(
             r"""
@@ -2215,11 +2314,12 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             `, context);
             (async () => {
                 await vm.runInContext('manualRefreshSerialItem()', context);
-                assert.equal(requests.length, 1);
-                assert.equal(requests.at(-1).url, '/api/inventory/tasks/T1/items/B2/serial/refresh');
-                assert.deepEqual(JSON.parse(requests.at(-1).options.body), {
+                assert.equal(requests.length, 2);
+                assert.equal(requests[0].url, '/api/inventory/tasks/T1/items/B2/serial/refresh');
+                assert.deepEqual(JSON.parse(requests[0].options.body), {
                     device_id: 'device-a', force: true,
                 });
+                assert.equal(requests[1].url, '/api/inventory/tasks/T1/items/B2/serial/open');
                 assert.match(element('inventorySerialSyncedAt').textContent, /最近获取/);
                 assert.equal(element('inventorySerialRefresh').disabled, false);
                 assert.equal(focusCount, 1);
@@ -2229,7 +2329,6 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     source,
                     /visibilitychange[\s\S]*refreshSerialItem\([\s\S]*inventoryActiveTab/,
                 );
-                assert.equal((source.match(/refreshSerialItem\(true\)/g) || []).length, 1);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -2269,7 +2368,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 const message = elements.get('inventorySerialMessage').textContent;
                 assert.equal(
                     message,
-                    '重新获取失败。已保留上次成功获取的数据，请确认 GYJ 已登录后重试。',
+                    '账面序列号获取失败，已保留实物条码，请点击“重新获取”。',
                 );
                 assert.doesNotMatch(message, /SENTINEL_PRIVATE_GYJ_ERROR/);
                 assert.equal(elements.get('inventorySerialRefresh').disabled, false);
@@ -2291,6 +2390,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             }
             const oldRefresh = deferred();
             const newOpen = deferred();
+            const newRefresh = deferred();
             let focusCount = 0;
             const input = {value: '', disabled: false, focus() { focusCount += 1; }};
             const refreshButton = {disabled: false};
@@ -2321,6 +2421,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 fetch: async url => {
                     if (url.endsWith('/items/A1/serial/refresh')) return oldRefresh.promise;
                     if (url.endsWith('/items/B2/serial/open')) return newOpen.promise;
+                    if (url.endsWith('/items/B2/serial/refresh')) return newRefresh.promise;
                     throw new Error('unexpected request ' + url);
                 },
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
@@ -2362,7 +2463,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     success: true, serial: {barcode: 'B2', counts: {}},
                 }));
                 await opening;
-                assert.equal(refreshButton.disabled, false);
+                assert.equal(refreshButton.disabled, true);
                 assert.equal(focusCount, 1);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -3302,7 +3403,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 const scan = vm.runInContext("scanSerial({key: 'Enter', preventDefault() {}})", context);
                 oldRefresh.resolve(response({success: true, serial: {marker: 'OLD'}}));
                 await Promise.all([refresh, scan]);
-                assert.deepEqual(rendered, ['OLD', 'NEW']);
+                assert.deepEqual(rendered, ['NEW', 'NEW']);
                 assert.equal(rendered.at(-1), 'NEW');
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -3352,7 +3453,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 const deletion = vm.runInContext("deleteSerialScan('OLD')", context);
                 oldRefresh.resolve(response({success: true, serial: {marker: 'OLD'}}));
                 await Promise.all([refresh, deletion]);
-                assert.deepEqual(rendered, ['OLD', 'DELETED']);
+                assert.deepEqual(rendered, ['DELETED', 'DELETED']);
                 assert.equal(rendered.at(-1), 'DELETED');
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
@@ -3560,6 +3661,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 return {ok: status >= 200 && status < 300, status, json: async () => payload};
             }
             const oldRefresh = deferred();
+            const newRefresh = deferred();
             const input = {value: '', disabled: false, focus() {}};
             const finishButton = {disabled: false};
             const message = {textContent: '', className: ''};
@@ -3589,6 +3691,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     if (url.endsWith('/items/B2/serial/open')) return response({
                         success: true, serial: {barcode: 'B2', counts: {}},
                     });
+                    if (url.endsWith('/items/B2/serial/refresh')) return newRefresh.promise;
                     throw new Error('unexpected request ' + url);
                 },
                 setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
@@ -3622,7 +3725,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(input.disabled, false);
                 assert.equal(finishButton.disabled, false);
                 assert.equal(message.textContent, newMessage);
-                assert.match(message.textContent, /可以开始扫描/);
+                assert.match(message.textContent, /后台刷新/);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )

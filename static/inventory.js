@@ -37,6 +37,8 @@ let serialFinishPending = false;
 let serialOperationQueue = Promise.resolve();
 let serialOperationGeneration = 0;
 let serialRenderedGeneration = 0;
+let serialRefreshPromise = null;
+let serialRefreshRequestId = 0;
 let serialMutationFailures = new Map();
 let inventoryCameraControls = null;
 let inventoryCameraStartPromise = null;
@@ -823,7 +825,7 @@ function renderCountEntries(item) {
     });
 }
 
-async function applyCountEntryResult(data, message) {
+function applyCountEntryResult(data, message) {
     acceptInventoryMutationVersion(data);
     currentCountItem = data.item;
     replaceInventoryItem(data.item);
@@ -831,11 +833,8 @@ async function applyCountEntryResult(data, message) {
     updateCountBook(data.item);
     renderInventoryItems(inventoryTask.items || []);
     lastInventoryVersion = null;
-    const refreshed = await pollInventoryTask({force: true});
-    setCountMessage(
-        refreshed === false ? `${message} 已保存，但统计刷新失败。` : message,
-        refreshed === false ? 'error' : 'success',
-    );
+    setCountMessage(message, 'success');
+    Promise.resolve(pollInventoryTask({force: true})).catch(() => null);
 }
 
 function setCountMutationPending(pending) {
@@ -880,44 +879,22 @@ async function openCountItem(barcode) {
         setInventoryNotice(`资料异常，不可盘：${item.data_error}`, 'error');
         return;
     }
-    const requestId = ++countDialogRequestId;
+    countDialogRequestId += 1;
     countEntryDrafts.clear();
     currentCountItem = item;
-    countDialogEditable = false;
+    countDialogEditable = true;
     renderCountProduct(item);
     updateCountBook(item);
     renderCountEntries(item);
     const input = inventoryElement('inventoryCountNewQuantity');
     input.value = '';
-    input.disabled = true;
-    inventoryElement('inventoryCountAdd').disabled = true;
-    setCountMessage('正在读取 GYJ 当前账面数量。');
+    input.disabled = false;
+    inventoryElement('inventoryCountAdd').disabled = false;
+    setCountMessage('可立即录入实盘数量，账面库存由后台自动更新。', 'success');
     const dialog = inventoryElement('inventoryCountDialog');
     if (!dialog.open) dialog.showModal();
-    try {
-        const data = await inventoryRequest(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(barcode)}/count-entries`,
-        );
-        if (requestId !== countDialogRequestId || !dialog.open) return;
-        acceptInventoryMutationVersion(data);
-        currentCountItem = data.item;
-        replaceInventoryItem(data.item);
-        renderCountProduct(data.item);
-        updateCountBook(data.item);
-        renderCountEntries(data.item);
-        input.disabled = false;
-        inventoryElement('inventoryCountAdd').disabled = false;
-        countDialogEditable = true;
-        renderCountEntries(data.item);
-        setCountMessage('已读取最新账面数量，可新增或修改任意一笔。', 'success');
-        input.focus();
-        renderLiveDifference();
-    } catch (error) {
-        if (requestId !== countDialogRequestId || !dialog.open) return;
-        input.disabled = true;
-        inventoryElement('inventoryCountAdd').disabled = true;
-        setCountMessage(error.message, 'error');
-    }
+    input.focus();
+    renderLiveDifference();
 }
 
 async function addCountEntry() {
@@ -930,7 +907,7 @@ async function addCountEntry() {
         return;
     }
     setCountMutationPending(true);
-    setCountMessage('正在保存这一笔数量并读取 GYJ 最新库存。');
+    setCountMessage('正在保存这一笔数量…');
     try {
         const data = await inventoryPost(
             `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentCountItem.barcode)}/count-entries`,
@@ -1895,8 +1872,9 @@ async function openSerialItem(barcode) {
         inventoryElement('inventorySerialRefresh').disabled = false;
         closeButton.textContent = '关闭并保存';
         inventoryElement('inventoryCameraStart').disabled = false;
-        setSerialMessage('已读取账面序列号缓存，可以开始扫描。', 'success');
+        setSerialMessage('已载入缓存，可立即扫描；正在后台刷新账面序列号…');
         input.focus();
+        refreshSerialItem(true, 'opening').catch(() => null);
     } catch (_error) {
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
         serialWorkspaceEditable = false;
@@ -1908,30 +1886,64 @@ async function openSerialItem(barcode) {
     }
 }
 
-async function performSerialRefresh(force, requestId, generation) {
-    if (!serialWorkspaceOpen || !serialWorkspaceEditable || !currentSerialBarcode || !inventoryTask) return null;
-    try {
-        const data = await inventoryPost(
-            `/api/inventory/tasks/${encodeURIComponent(inventoryTask.task_id)}/items/${encodeURIComponent(currentSerialBarcode)}/serial/refresh`,
-            {device_id: inventoryDeviceId, force: force === true},
-        );
-        acceptInventoryMutationVersion(data);
-        if (!renderSerialOperation(data.serial, requestId, generation)) return null;
-        return data.serial;
-    } catch (error) {
-        if (!serialOperationIsOpen(requestId)) return null;
-        setSerialMessage('暂时无法读取账面序列号缓存，请稍后重试。', 'error');
-        throw error;
-    }
+async function loadSerialCache(taskId, barcode, requestId, generation) {
+    const data = await inventoryPost(
+        `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serial/open`,
+        {device_id: inventoryDeviceId},
+    );
+    if (!renderSerialOperation(data.serial, requestId, generation)) return null;
+    acceptInventoryMutationVersion(data);
+    return data.serial;
 }
 
-function refreshSerialItem(force = false) {
+function refreshSerialItem(force = false, reason = 'automatic') {
     if (!serialWorkspaceOpen || !serialWorkspaceEditable || serialFinishPending || !currentSerialBarcode || !inventoryTask) {
         return Promise.resolve(null);
     }
-    return queueSerialOperation((requestId, generation) => (
-        performSerialRefresh(force, requestId, generation)
-    ));
+    const requestId = serialWorkspaceRequestId;
+    const taskId = inventoryTask.task_id;
+    const barcode = currentSerialBarcode;
+    if (serialRefreshPromise && serialRefreshRequestId === requestId) return serialRefreshPromise;
+    const refreshButton = inventoryElement('inventorySerialRefresh');
+    refreshButton.disabled = true;
+    const pending = (async () => {
+        try {
+            await inventoryPost(
+                `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/serial/refresh`,
+                {device_id: inventoryDeviceId, force: force === true},
+            );
+            if (!serialOperationIsOpen(requestId) || currentSerialBarcode !== barcode) return null;
+            const result = await queueSerialOperation(async (queuedRequestId, generation) => {
+                if (queuedRequestId !== requestId || currentSerialBarcode !== barcode) return null;
+                return loadSerialCache(taskId, barcode, queuedRequestId, generation);
+            });
+            if (result && reason === 'opening') {
+                setSerialMessage('账面序列号已后台刷新，可以继续扫描。', 'success');
+            } else if (result && reason === 'manual') {
+                setSerialMessage('账面序列号已重新获取。', 'success');
+            }
+            return result;
+        } catch (error) {
+            if (
+                serialOperationIsOpen(requestId) && currentSerialBarcode === barcode
+                && reason !== 'automatic'
+            ) {
+                setSerialMessage('账面序列号获取失败，已保留实物条码，请点击“重新获取”。', 'error');
+            }
+            throw error;
+        } finally {
+            if (serialRefreshPromise === pending) serialRefreshPromise = null;
+            if (
+                serialOperationIsOpen(requestId) && currentSerialBarcode === barcode
+                && serialWorkspaceEditable && !serialFinishPending
+            ) {
+                refreshButton.disabled = false;
+            }
+        }
+    })();
+    serialRefreshPromise = pending;
+    serialRefreshRequestId = requestId;
+    return pending;
 }
 
 async function manualRefreshSerialItem() {
@@ -1941,15 +1953,13 @@ async function manualRefreshSerialItem() {
     button.disabled = true;
     setSerialMessage('正在重新获取 GYJ 账面序列号…');
     try {
-        const result = await refreshSerialItem(true);
+        const result = await refreshSerialItem(true, 'manual');
         if (
             result === null || !serialOperationIsOpen(requestId)
             || !serialWorkspaceEditable || serialFinishPending
         ) return;
-        setSerialMessage('账面序列号已重新获取。', 'success');
     } catch (_error) {
         if (!serialOperationIsOpen(requestId) || !serialWorkspaceEditable || serialFinishPending) return;
-        setSerialMessage('重新获取失败。已保留上次成功获取的数据，请确认 GYJ 已登录后重试。', 'error');
     } finally {
         if (serialOperationIsOpen(requestId) && serialWorkspaceEditable && !serialFinishPending) {
             button.disabled = false;
@@ -2019,7 +2029,7 @@ async function submitDecodedSerial(serial) {
                 }, requestId, generation);
             } else {
                 try {
-                    await performSerialRefresh(false, requestId, generation);
+                    await loadSerialCache(taskId, barcode, requestId, generation);
                 } catch (_error) {
                     return true;
                 }

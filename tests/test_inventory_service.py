@@ -111,8 +111,8 @@ class InventoryServiceTests(unittest.TestCase):
             {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
             {"serial": "B-2", "barcode": "B2", "name": "序列商品", "warehouse": "其他仓", "shipped": False},
         ]}
-        detail = self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        detail = self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.assertEqual(
             [(row["serial"], row["warehouse"]) for row in detail["system_only"]],
@@ -151,8 +151,8 @@ class InventoryServiceTests(unittest.TestCase):
             }
             for serial in ("S001", "S002")
         ]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         serial_reads = list(self.worker.serial_reads)
 
@@ -168,8 +168,8 @@ class InventoryServiceTests(unittest.TestCase):
     def test_carton_validation_rejects_invalid_payloads(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         task_id = task["task_id"]
 
@@ -219,8 +219,8 @@ class InventoryServiceTests(unittest.TestCase):
             "serial": "S001", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.service.open_serial_item(
-            "admin", task_id, "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task_id, "B2", "device-a", "甲", force=True
         )
         serial_reads = list(self.worker.serial_reads)
         preset = self.service.save_carton_preset(
@@ -252,8 +252,8 @@ class InventoryServiceTests(unittest.TestCase):
         self.worker.serials = {"B2": [
             {"serial": "B-1", "barcode": "B2", "name": "序列商品", "warehouse": "沈桥仓", "shipped": False},
         ]}
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.service.scan_serial(
             "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
@@ -299,6 +299,9 @@ class InventoryServiceTests(unittest.TestCase):
             "warehouse": "沈桥仓", "shipped": False,
         }]
 
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
+        )
         first = self.service.open_serial_item(
             "admin", task["task_id"], "B2", "device-a", "甲"
         )
@@ -321,7 +324,7 @@ class InventoryServiceTests(unittest.TestCase):
             "admin", task["task_id"], "B2", "device-b", "乙"
         )
 
-        self.assertFalse(first["skipped"])
+        self.assertTrue(first["skipped"])
         self.assertTrue(second["skipped"])
         self.assertEqual(matched["classification"], "matched")
         self.assertEqual(duplicate["classification"], "duplicate")
@@ -355,8 +358,8 @@ class InventoryServiceTests(unittest.TestCase):
             }
             for serial in ("B-1", "B-2")
         ]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         for serial in ("B-1", "B-2"):
             self.service.scan_serial(
@@ -376,7 +379,7 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(item["completed_actual_qty"], "2")
         self.assertEqual(item["diff_qty"], "0")
 
-    def test_serial_open_failure_has_no_lock_or_progress(self):
+    def test_serial_refresh_failure_has_no_lock_or_progress(self):
         task = self.create_serial_task()
 
         def assert_no_serial_lock(barcode):
@@ -401,8 +404,8 @@ class InventoryServiceTests(unittest.TestCase):
             ).fetchone()[0]
 
         with self.assertRaisesRegex(InventoryServiceError, "序列号报表暂时不可用"):
-            self.service.open_serial_item(
-                "admin", task["task_id"], "B2", "device-a", "甲"
+            self.service.refresh_serial_item(
+                "admin", task["task_id"], "B2", "device-a", "甲", force=True
             )
 
         snapshot = self.store.get_task_snapshot("admin", task["task_id"])
@@ -439,8 +442,8 @@ class InventoryServiceTests(unittest.TestCase):
         self.submit(task["task_id"], "B2", "1", device_id="device-b")
         self.submit(task["task_id"], "A1", "1")
         self.worker.serials["B2"] = []
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         reads_before = len(self.worker.serial_reads)
         with self.assertRaises(InventoryNotFound):
@@ -463,8 +466,8 @@ class InventoryServiceTests(unittest.TestCase):
             "serial": "B-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.worker.serials["B2"] = [{
             "serial": "B-2", "barcode": "B2", "name": "序列商品",
@@ -492,14 +495,83 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(self.worker.serial_reads, ["B2", "B2"])
         self.assertEqual([row["serial"] for row in refreshed["system_only"]], ["B-2"])
 
+    def test_serial_open_returns_cache_without_worker_read(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+
+        opened = self.service.open_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲"
+        )
+
+        self.assertEqual(opened["expected"], [])
+        self.assertEqual(self.worker.serial_reads, [])
+
+    def test_scan_does_not_wait_for_serial_refresh_and_is_reclassified(self):
+        task = self.create_serial_task()
+        task_id = task["task_id"]
+        refresh_started = threading.Event()
+        allow_refresh = threading.Event()
+        scan_finished = threading.Event()
+        results = {}
+        errors = []
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+
+        def block_serial_read(_barcode):
+            refresh_started.set()
+            allow_refresh.wait(2)
+
+        def refresh():
+            try:
+                results["refresh"] = self.service.refresh_serial_item(
+                    "admin", task_id, "B2", "prefetch", "system", force=True
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        def scan():
+            try:
+                results["scan"] = self.service.scan_serial(
+                    "admin", task_id, "B2", "device-a", "甲", "B-1"
+                )
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                scan_finished.set()
+
+        self.worker.on_serial_read = block_serial_read
+        refresh_thread = threading.Thread(target=refresh)
+        refresh_thread.start()
+        self.assertTrue(refresh_started.wait(1))
+        scan_thread = threading.Thread(target=scan)
+        scan_thread.start()
+        try:
+            self.assertTrue(scan_finished.wait(0.5), "scan waited for GYJ refresh")
+            self.assertEqual(results["scan"]["classification"], "unknown")
+        finally:
+            allow_refresh.set()
+            scan_thread.join(2)
+            refresh_thread.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [row["serial"] for row in results["refresh"]["matched"]],
+            ["B-1"],
+        )
+
     def test_count_entry_mutations_preserve_successful_serial_cache(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = [{
             "serial": "B-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        cached = self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        cached = self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         synced_at = cached["item"]["serial_synced_at"]
         self.worker.serials["B2"] = [{
@@ -547,6 +619,105 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual([row["serial"] for row in reopened["expected"]], ["B-1"])
         self.assertEqual(self.worker.serial_reads, ["B2"])
 
+    def test_count_entry_mutations_do_not_wait_for_live_stock(self):
+        self.worker.catalog[1]["initial_stock"] = "7"
+        task = self.create_task()
+        task_id = task["task_id"]
+        self.worker.stock_failures["B2"] = "GYJ unavailable"
+
+        added = self.service.add_count_entry(
+            "admin", task_id, "B2", "device-a", "甲", "8"
+        )
+        entry = added["count_entries"][0]
+        updated = self.service.update_count_entry(
+            "admin", task_id, "B2", entry["entry_id"], entry["version"],
+            "device-a", "甲", "9",
+        )
+        entry = updated["count_entries"][0]
+        deleted = self.service.delete_count_entry(
+            "admin", task_id, "B2", entry["entry_id"], entry["version"],
+            "device-a", "甲",
+        )
+
+        self.assertEqual(added["latest_book_qty"], "7")
+        self.assertEqual(updated["latest_book_qty"], "7")
+        self.assertEqual(deleted["latest_book_qty"], "7")
+        self.assertEqual(self.worker.stock_reads, [])
+
+    def test_count_entry_reload_uses_cached_book_quantity(self):
+        self.worker.catalog[1]["initial_stock"] = "7"
+        task = self.create_task()
+        self.worker.stock_failures["B2"] = "GYJ unavailable"
+
+        item = self.service.open_count_item(
+            "admin", task["task_id"], "B2", "甲"
+        )
+
+        self.assertEqual(item["latest_book_qty"], "7")
+        self.assertEqual(item["book_quantity"], "7")
+        self.assertEqual(self.worker.stock_reads, [])
+
+    def test_forced_serial_refreshes_commit_in_request_order(self):
+        task = self.create_serial_task()
+        task_id = task["task_id"]
+        first_started = threading.Event()
+        second_started = threading.Event()
+        release_first = threading.Event()
+        call_lock = threading.Lock()
+        call_count = 0
+        errors = []
+
+        old_rows = [{
+            "serial": "OLD", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        new_rows = [{
+            "serial": "NEW", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+
+        def read_serials(_barcode):
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+                index = call_count
+            if index == 1:
+                first_started.set()
+                release_first.wait(2)
+                return True, old_rows
+            second_started.set()
+            return True, new_rows
+
+        self.worker.read_inventory_serials = read_serials
+
+        def refresh(device_id):
+            try:
+                self.service.refresh_serial_item(
+                    "admin", task_id, "B2", device_id, "甲", force=True
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        first = threading.Thread(target=refresh, args=("device-a",))
+        second = threading.Thread(target=refresh, args=("device-b",))
+        first.start()
+        self.assertTrue(first_started.wait(1))
+        second.start()
+        try:
+            self.assertFalse(
+                second_started.wait(0.2),
+                "newer refresh started before older refresh committed",
+            )
+        finally:
+            release_first.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(second_started.is_set())
+        result = self.store.serial_reconciliation("admin", task_id, "B2")
+        self.assertEqual([row["serial"] for row in result["expected"]], ["NEW"])
+
     def test_reopened_serial_completion_retires_synthetic_rows_before_rescan(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = [
@@ -559,8 +730,8 @@ class InventoryServiceTests(unittest.TestCase):
                 "warehouse": "其他仓", "shipped": False,
             },
         ]
-        cached = self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        cached = self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         synced_at = cached["item"]["serial_synced_at"]
         self.service.scan_serial(
@@ -619,8 +790,8 @@ class InventoryServiceTests(unittest.TestCase):
             "serial": "B-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.service.scan_serial(
             "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
@@ -648,8 +819,8 @@ class InventoryServiceTests(unittest.TestCase):
     def test_unmatched_scan_is_saved_without_gyj_lookup(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
 
         result = self.service.scan_serial(
@@ -696,8 +867,8 @@ class InventoryServiceTests(unittest.TestCase):
     def test_finish_serial_item_uses_cached_serials_without_gyj_read(self):
         task = self.create_serial_task()
         self.worker.serials["B2"] = []
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.worker.serial_failures["B2"] = "完成前刷新失败"
 
@@ -836,7 +1007,7 @@ class InventoryServiceTests(unittest.TestCase):
         self.assertEqual(mismatch["state"], "variance")
         self.assertEqual(mismatch["diff_qty"], "-1")
 
-    def test_partial_count_writes_refresh_gyj_without_locks(self):
+    def test_partial_count_writes_use_cached_stock_without_locks(self):
         task = self.create_task()
         self.assertTrue(hasattr(self.service, "add_count_entry"))
 
@@ -857,9 +1028,9 @@ class InventoryServiceTests(unittest.TestCase):
             "device-a", "甲",
         )
 
-        self.assertEqual(self.worker.stock_reads, ["A1", "A1", "A1"])
-        self.assertEqual(updated["book_quantity"], "31")
-        self.assertEqual(deleted["book_quantity"], "32")
+        self.assertEqual(self.worker.stock_reads, [])
+        self.assertEqual(updated["book_quantity"], "2")
+        self.assertEqual(deleted["book_quantity"], "2")
         self.assertEqual(deleted["count_entries"], [])
         with self.store.connect() as connection:
             lock_count = connection.execute(
@@ -868,18 +1039,18 @@ class InventoryServiceTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(lock_count, 0)
 
-    def test_failed_partial_count_stock_read_does_not_change_entries(self):
+    def test_failed_live_stock_does_not_block_partial_count_entry(self):
         task = self.create_task()
         self.assertTrue(hasattr(self.service, "add_count_entry"))
         self.worker.stock_failures["A1"] = "session expired"
 
-        with self.assertRaises(InventoryServiceError):
-            self.service.add_count_entry(
-                "admin", task["task_id"], "A1", "device-a", "甲", "12"
-            )
+        created = self.service.add_count_entry(
+            "admin", task["task_id"], "A1", "device-a", "甲", "12"
+        )
 
-        item = self.store.get_task_snapshot("admin", task["task_id"])["items"][0]
-        self.assertEqual(item["count_entries"], [])
+        self.assertEqual(created["count_total"], "12")
+        self.assertEqual(created["latest_book_qty"], "2")
+        self.assertEqual(self.worker.stock_reads, [])
 
     def test_precise_decimal_difference_is_preserved(self):
         self.worker.catalog[0]["initial_stock"] = "0.2"
@@ -959,8 +1130,8 @@ class InventoryServiceTests(unittest.TestCase):
             "serial": "B-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         self.service.scan_serial(
             "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
@@ -985,8 +1156,8 @@ class InventoryServiceTests(unittest.TestCase):
             "serial": "SYSTEM-1", "barcode": "B2", "name": "序列商品",
             "warehouse": "沈桥仓", "shipped": False,
         }]
-        self.service.open_serial_item(
-            "admin", task["task_id"], "B2", "device-a", "甲"
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         for serial in ("OTHER-1", "SHIPPED-1", "UNKNOWN-1"):
             self.service.scan_serial(

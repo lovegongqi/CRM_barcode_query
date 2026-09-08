@@ -6342,6 +6342,8 @@ inventory_service = InventoryService(
 )
 inventory_sync_lock = threading.Lock()
 inventory_sync_threads = {}
+inventory_serial_prefetch_lock = threading.Lock()
+inventory_serial_prefetch_threads = {}
 DEFAULT_OWN_DEALER_NAME = "江西省天麓工贸有限公司"
 DEFAULT_FROZEN_WAREHOUSE_NAME = "江西天麓冻结仓库"
 OWN_DEALER_NAME = DEFAULT_OWN_DEALER_NAME
@@ -10753,6 +10755,50 @@ def _ensure_inventory_sync(owner, task_id):
         return True
 
 
+def _run_inventory_serial_prefetch(owner, task_id, barcode, device_id):
+    key = (owner, task_id, barcode)
+    try:
+        inventory_service.refresh_serial_item(
+            owner, task_id, barcode, device_id, "system", force=False
+        )
+    except Exception:
+        # Opening the reconciliation always retries and exposes failure to the user.
+        pass
+    finally:
+        current_thread = threading.current_thread()
+        with inventory_serial_prefetch_lock:
+            if inventory_serial_prefetch_threads.get(key) is current_thread:
+                inventory_serial_prefetch_threads.pop(key, None)
+
+
+def _ensure_inventory_serial_prefetch(owner, task_id, barcode, device_id):
+    key = (owner, task_id, barcode)
+    with inventory_serial_prefetch_lock:
+        running = inventory_serial_prefetch_threads.get(key)
+        if running is not None and running.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_run_inventory_serial_prefetch,
+            args=(owner, task_id, barcode, device_id),
+            daemon=True,
+            name=f"inventory-serial-prefetch-{task_id[:16]}-{barcode[:16]}",
+        )
+        inventory_serial_prefetch_threads[key] = thread
+        try:
+            thread.start()
+        except Exception:
+            inventory_serial_prefetch_threads.pop(key, None)
+            return False
+        return True
+
+
+def _schedule_inventory_serial_prefetch(owner, task_id, item, device_id):
+    if item.get("has_serial") and item.get("state") == "serial_pending":
+        _ensure_inventory_serial_prefetch(
+            owner, task_id, str(item.get("barcode") or ""), device_id
+        )
+
+
 def _inventory_version_arg():
     raw = request.args.get("version")
     if raw in (None, ""):
@@ -11040,9 +11086,13 @@ def api_inventory_count_entries(task_id, barcode):
         )
     else:
         data = _inventory_json_body()
+        device_id = _inventory_device_id(data)
         item = inventory_service.add_count_entry(
-            owner, task_id, barcode, _inventory_device_id(data), actor,
+            owner, task_id, barcode, device_id, actor,
             normalize_quantity(data.get("quantity")),
+        )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
         )
     return _inventory_mutation_response("item", item, owner, task_id)
 
@@ -11066,10 +11116,16 @@ def api_inventory_count_entry(task_id, barcode, entry_id):
             owner, task_id, barcode, entry_id, entry_version,
             device_id, actor, normalize_quantity(data.get("quantity")),
         )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
+        )
     else:
         item = inventory_service.delete_count_entry(
             owner, task_id, barcode, entry_id, entry_version,
             device_id, actor,
+        )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
         )
     return _inventory_mutation_response("item", item, owner, task_id)
 

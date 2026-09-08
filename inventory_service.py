@@ -54,6 +54,11 @@ class InventoryService:
         with self._operation_guard(("serial", owner, task_id, barcode)):
             yield
 
+    @contextmanager
+    def _serial_refresh_guard(self, owner, task_id, barcode):
+        with self._operation_guard(("serial_refresh", owner, task_id, barcode)):
+            yield
+
     @staticmethod
     def _worker_value(result):
         if not isinstance(result, tuple) or len(result) != 2:
@@ -116,7 +121,7 @@ class InventoryService:
     ):
         if actor is None:
             snapshot, item = self._partial_count_item(owner, task_id, barcode)
-            book_quantity = self._live_stock(owner, barcode)
+            book_quantity = self._cached_book_quantity(item)
             result = dict(item)
             result.update({
                 "book_quantity": book_quantity,
@@ -190,8 +195,8 @@ class InventoryService:
     def add_count_entry(
         self, owner, task_id, barcode, device_id, actor, quantity
     ):
-        self._partial_count_item(owner, task_id, barcode)
-        book_quantity = self._live_stock(owner, barcode)
+        _snapshot, item = self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._cached_book_quantity(item)
         return self.store.add_count_entry(
             owner, task_id, barcode, actor, device_id,
             quantity, book_quantity,
@@ -201,8 +206,8 @@ class InventoryService:
         self, owner, task_id, barcode, entry_id, entry_version,
         device_id, actor, quantity
     ):
-        self._partial_count_item(owner, task_id, barcode)
-        book_quantity = self._live_stock(owner, barcode)
+        _snapshot, item = self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._cached_book_quantity(item)
         return self.store.update_count_entry(
             owner, task_id, barcode, entry_id, entry_version,
             actor, device_id, quantity, book_quantity,
@@ -212,12 +217,22 @@ class InventoryService:
         self, owner, task_id, barcode, entry_id, entry_version,
         device_id, actor
     ):
-        self._partial_count_item(owner, task_id, barcode)
-        book_quantity = self._live_stock(owner, barcode)
+        _snapshot, item = self._partial_count_item(owner, task_id, barcode)
+        book_quantity = self._cached_book_quantity(item)
         return self.store.delete_count_entry(
             owner, task_id, barcode, entry_id, entry_version,
             actor, device_id, book_quantity,
         )
+
+    @staticmethod
+    def _cached_book_quantity(item):
+        for key in (
+            "latest_book_qty", "open_book_qty", "book_quantity", "initial_stock"
+        ):
+            value = item.get(key)
+            if value not in (None, ""):
+                return normalize_quantity(value)
+        raise InventoryServiceError("账面库存缓存不可用")
 
     def _mark_sync_error(self, owner, task_id, message, timestamp):
         self.store.update_completed_stock(
@@ -340,26 +355,6 @@ class InventoryService:
             raise InventoryConflict("商品不在待核对序列号状态")
         return item
 
-    def _refresh_serial_item_locked(
-        self, owner, task_id, barcode, device_id, actor, force,
-        expected_version=None,
-    ):
-        self._serial_item(owner, task_id, barcode)
-        current = self.store.serial_reconciliation(owner, task_id, barcode)
-        last_sync_at = current["item"].get("serial_synced_at")
-        if not force and last_sync_at:
-            current["skipped"] = True
-            return current
-
-        value = self._call_worker(owner, "read_inventory_serials", barcode)
-        rows = self._validated_expected_serials(value, barcode)
-        result = self.store.replace_expected_serials(
-            owner, task_id, barcode, device_id, actor, rows,
-            synced_at=self.now(),
-        )
-        result["skipped"] = False
-        return result
-
     def open_serial_item(
         self, owner, task_id, barcode, device_id, actor, *,
         expected_version=None,
@@ -373,19 +368,41 @@ class InventoryService:
                 )
             elif item["state"] != "serial_pending":
                 raise InventoryConflict("商品不在待核对序列号状态")
-            return self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, False,
-            )
+            current = self.store.serial_reconciliation(owner, task_id, barcode)
+            current["skipped"] = True
+            return current
 
     def refresh_serial_item(
         self, owner, task_id, barcode, device_id, actor, force=False, *,
         expected_version=None,
     ):
-        with self._serial_guard(owner, task_id, barcode):
-            return self._refresh_serial_item_locked(
-                owner, task_id, barcode, device_id, actor, force,
-                expected_version,
-            )
+        with self._serial_refresh_guard(owner, task_id, barcode):
+            with self._serial_guard(owner, task_id, barcode):
+                self._serial_item(owner, task_id, barcode)
+                current = self.store.serial_reconciliation(
+                    owner, task_id, barcode
+                )
+                if not force and current["item"].get("serial_synced_at"):
+                    current["skipped"] = True
+                    return current
+
+            value = self._call_worker(owner, "read_inventory_serials", barcode)
+            rows = self._validated_expected_serials(value, barcode)
+
+            with self._serial_guard(owner, task_id, barcode):
+                self._serial_item(owner, task_id, barcode)
+                current = self.store.serial_reconciliation(
+                    owner, task_id, barcode
+                )
+                if not force and current["item"].get("serial_synced_at"):
+                    current["skipped"] = True
+                    return current
+                result = self.store.replace_expected_serials(
+                    owner, task_id, barcode, device_id, actor, rows,
+                    synced_at=self.now(),
+                )
+                result["skipped"] = False
+                return result
 
     def scan_serial(
         self, owner, task_id, barcode, device_id, actor, serial, *,

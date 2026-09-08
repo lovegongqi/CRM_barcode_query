@@ -152,12 +152,20 @@ class InventoryRouteTest(unittest.TestCase):
         self.service_patch.start()
         if hasattr(app_module, "inventory_sync_threads"):
             app_module.inventory_sync_threads.clear()
+        if hasattr(app_module, "inventory_serial_prefetch_threads"):
+            app_module.inventory_serial_prefetch_threads.clear()
 
     def tearDown(self):
         if hasattr(app_module, "inventory_sync_threads"):
             for thread in list(app_module.inventory_sync_threads.values()):
                 thread.join(timeout=1)
             app_module.inventory_sync_threads.clear()
+        if hasattr(app_module, "inventory_serial_prefetch_threads"):
+            for thread in list(
+                app_module.inventory_serial_prefetch_threads.values()
+            ):
+                thread.join(timeout=1)
+            app_module.inventory_serial_prefetch_threads.clear()
         self.service_patch.stop()
         self.store_patch.stop()
         self.accounts_patch.stop()
@@ -493,6 +501,57 @@ class InventoryRouteTest(unittest.TestCase):
             response = client.post(path, json={})
             self.assertEqual(response.status_code, 409)
             self.assertTrue(response.get_json()["refresh_required"])
+
+    def test_serialized_count_save_schedules_background_serial_prefetch(self):
+        self.service.add_count_entry.side_effect = [
+            {
+                "barcode": "B2", "has_serial": True,
+                "state": "serial_pending", "count_total": "1", "task_version": 4,
+            },
+            {
+                "barcode": "A1", "has_serial": False,
+                "state": "variance", "count_total": "1", "task_version": 5,
+            },
+        ]
+        client = self.login_account("counter")
+        with mock.patch.object(
+            app_module, "_ensure_inventory_serial_prefetch", create=True
+        ) as ensure_prefetch:
+            serial_response = client.post(
+                "/api/inventory/tasks/task-1/items/B2/count-entries",
+                json={"device_id": "device-a", "quantity": "1"},
+            )
+            ordinary_response = client.post(
+                "/api/inventory/tasks/task-1/items/A1/count-entries",
+                json={"device_id": "device-a", "quantity": "1"},
+            )
+
+        self.assertEqual(serial_response.status_code, 200)
+        self.assertEqual(ordinary_response.status_code, 200)
+        ensure_prefetch.assert_called_once_with(
+            "admin", "task-1", "B2", "device-a"
+        )
+
+    def test_serialized_count_delete_schedules_background_serial_prefetch(self):
+        self.service.delete_count_entry.return_value = {
+            "barcode": "B2", "has_serial": True,
+            "state": "serial_pending", "count_total": "1", "task_version": 6,
+        }
+        client = self.login_account("counter")
+        with mock.patch.object(
+            app_module, "_ensure_inventory_serial_prefetch", create=True
+        ) as ensure_prefetch:
+            response = client.delete(
+                "/api/inventory/tasks/task-1/items/B2/count-entries/7",
+                json={
+                    "device_id": "device-a", "entry_version": 2,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        ensure_prefetch.assert_called_once_with(
+            "admin", "task-1", "B2", "device-a"
+        )
 
     def test_retired_quantity_lock_routes_request_page_refresh(self):
         client = self.login_account("counter")
@@ -1236,6 +1295,52 @@ class InventoryRouteTest(unittest.TestCase):
         self.service.sync_completed_items.side_effect = lambda *_args: done.set()
         self.assertTrue(app_module._ensure_inventory_sync("counter-id", "task-1"))
         self.assertTrue(done.wait(1))
+
+    def test_serial_prefetch_deduplicates_running_daemons_and_cleans_registry(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def refresh(*_args, **_kwargs):
+            started.set()
+            release.wait(2)
+
+        self.service.refresh_serial_item.side_effect = refresh
+        self.assertTrue(app_module._ensure_inventory_serial_prefetch(
+            "counter-id", "task-1", "B2", "device-a"
+        ))
+        self.assertTrue(started.wait(1))
+        key = ("counter-id", "task-1", "B2")
+        thread = app_module.inventory_serial_prefetch_threads[key]
+        self.assertTrue(thread.daemon)
+        self.assertFalse(app_module._ensure_inventory_serial_prefetch(
+            "counter-id", "task-1", "B2", "device-b"
+        ))
+
+        release.set()
+        thread.join(1)
+        self.assertNotIn(key, app_module.inventory_serial_prefetch_threads)
+        self.service.refresh_serial_item.assert_called_once_with(
+            "counter-id", "task-1", "B2", "device-a", "system", force=False
+        )
+
+    def test_serial_prefetch_failure_is_nonblocking_and_cleans_registry(self):
+        done = threading.Event()
+
+        def fail(*_args, **_kwargs):
+            done.set()
+            raise InventoryServiceError("GYJ unavailable")
+
+        self.service.refresh_serial_item.side_effect = fail
+        self.assertTrue(app_module._ensure_inventory_serial_prefetch(
+            "counter-id", "task-1", "B2", "device-a"
+        ))
+        self.assertTrue(done.wait(1))
+        for thread in list(app_module.inventory_serial_prefetch_threads.values()):
+            thread.join(1)
+        self.assertNotIn(
+            ("counter-id", "task-1", "B2"),
+            app_module.inventory_serial_prefetch_threads,
+        )
 
     def test_sync_thread_start_failure_cleans_registry_without_blocking_caller(self):
         self.store.get_task_snapshot.return_value = {

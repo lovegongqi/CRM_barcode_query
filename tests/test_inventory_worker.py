@@ -160,8 +160,9 @@ class InventoryWorkerTests(unittest.TestCase):
             with mock.patch.object(
                 app_module, "GYJPlaywrightPage", return_value=page
             ):
-                service.open_serial_item(
-                    "admin", task["task_id"], "B2", "device-a", "甲"
+                service.refresh_serial_item(
+                    "admin", task["task_id"], "B2", "device-a", "甲",
+                    force=True,
                 )
                 result = service.scan_serial(
                     "admin", task["task_id"], "B2", "device-a", "甲",
