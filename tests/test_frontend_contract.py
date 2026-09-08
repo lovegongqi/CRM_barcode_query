@@ -2,6 +2,8 @@ import pathlib
 import re
 import unittest
 
+from playwright.sync_api import sync_playwright
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "templates"
@@ -754,10 +756,33 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotRegex(source, r"https?://[^\"']*(?:zxing|unpkg|jsdelivr)")
         for element_id in (
             "inventoryCameraStart", "inventoryCameraStop", "inventoryCameraPanel",
-            "inventoryCameraVideo", "inventoryCameraMessage",
+            "inventoryCameraVideo", "inventoryCameraMessage", "inventoryCameraDetails",
+            "inventoryCameraZoomControls", "inventoryCameraZoom1", "inventoryCameraZoom2",
+            "inventoryCameraZoom3", "inventoryCameraZoom5",
         ):
             with self.subTest(element_id=element_id):
                 self.assertIn(f'id="{element_id}"', source)
+
+    def test_inventory_camera_zoom_buttons_are_mobile_touch_sized(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{self.source('../static/inventory.css')}</style>
+                    <div class="inventory-camera-panel">
+                      <div class="inventory-camera-zoom-controls">
+                        <button type="button">5×</button>
+                      </div>
+                    </div>
+                    """
+                )
+                box = page.locator(".inventory-camera-zoom-controls button").bounding_box()
+                self.assertGreaterEqual(box["width"], 44)
+                self.assertGreaterEqual(box["height"], 44)
+            finally:
+                browser.close()
 
     def test_inventory_script_uses_exact_live_endpoints_and_timing(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")

@@ -518,6 +518,47 @@ article.inventory-item { cursor: default; }
     box-shadow: 0 0 10px rgba(251, 113, 133, .9);
 }
 
+.inventory-camera-details {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    left: 10px;
+    color: #e0f2fe;
+    font-size: 11px;
+    text-align: center;
+    text-shadow: 0 1px 4px #020617;
+    pointer-events: none;
+}
+
+.inventory-camera-zoom-controls {
+    position: absolute;
+    right: 10px;
+    bottom: 10px;
+    left: 10px;
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+}
+
+.inventory-camera-zoom-controls[hidden] { display: none; }
+
+.inventory-camera-zoom-controls button {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 10px;
+    border: 1px solid rgba(125, 211, 252, .55);
+    border-radius: 999px;
+    color: #e0f2fe;
+    background: rgba(2, 8, 23, .72);
+    font: inherit;
+    font-weight: 800;
+}
+
+.inventory-camera-zoom-controls button.is-active {
+    color: #061525;
+    background: #67e8f9;
+}
+
 .inventory-camera-message {
     min-height: 20px;
     margin: 8px 0 0;

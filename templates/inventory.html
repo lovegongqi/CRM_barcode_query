@@ -185,6 +185,13 @@
         <div id="inventoryCameraPanel" class="inventory-camera-panel" hidden>
             <video id="inventoryCameraVideo" playsinline muted aria-label="序列号扫码相机预览"></video>
             <div class="inventory-camera-guide" aria-hidden="true"><span></span></div>
+            <div id="inventoryCameraDetails" class="inventory-camera-details"></div>
+            <div id="inventoryCameraZoomControls" class="inventory-camera-zoom-controls" role="group" aria-label="相机倍率" hidden>
+                <button id="inventoryCameraZoom1" type="button">1×</button>
+                <button id="inventoryCameraZoom2" type="button">2×</button>
+                <button id="inventoryCameraZoom3" type="button">3×</button>
+                <button id="inventoryCameraZoom5" type="button">5×</button>
+            </div>
         </div>
         <p id="inventoryCameraMessage" class="inventory-camera-message" role="status" aria-live="polite"></p>
         <details class="inventory-carton-entry">

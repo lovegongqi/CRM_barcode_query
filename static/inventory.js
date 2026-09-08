@@ -45,6 +45,8 @@ let inventoryCameraActiveGeneration = 0;
 let inventoryCameraMode = 'single';
 let inventoryCameraResultLocked = false;
 let inventoryCameraAudioContext = null;
+let inventoryCameraTrack = null;
+let inventoryCameraCapabilities = null;
 let cartonPreview = [];
 let cartonPreviewQuantity = 0;
 let cartonSubmissionPending = false;
@@ -1081,17 +1083,22 @@ function notifyInventoryCameraDecoded() {
     }
 }
 
-async function optimizeInventoryCameraTrack(video) {
+async function optimizeInventoryCameraTrack(video, expectedGeneration = 0) {
     const stream = video && video.srcObject;
     if (!stream || typeof stream.getVideoTracks !== 'function') return null;
     const track = stream.getVideoTracks()[0];
-    if (!track || typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return null;
+    if (!track) return null;
+    inventoryCameraTrack = track;
+    updateInventoryCameraDetails(track);
+    if (typeof track.getCapabilities !== 'function' || typeof track.applyConstraints !== 'function') return null;
     let capabilities;
     try {
         capabilities = track.getCapabilities() || {};
     } catch (_error) {
         return null;
     }
+    inventoryCameraCapabilities = capabilities;
+    renderInventoryCameraZoomControls(capabilities);
     if (Array.isArray(capabilities.focusMode) && capabilities.focusMode.includes('continuous')) {
         try {
             await track.applyConstraints({advanced: [{focusMode: 'continuous'}]});
@@ -1099,22 +1106,92 @@ async function optimizeInventoryCameraTrack(video) {
             // Focus support can be reported even when this camera rejects it.
         }
     }
-    const zoomMin = Number(capabilities.zoom && capabilities.zoom.min);
-    const zoomMax = Number(capabilities.zoom && capabilities.zoom.max);
+    if (
+        expectedGeneration
+        && (expectedGeneration !== inventoryCameraActiveGeneration || track !== inventoryCameraTrack)
+    ) return null;
+    const actualZoom = await applyInventoryCameraZoom(1, false);
+    if (
+        expectedGeneration
+        && (expectedGeneration !== inventoryCameraActiveGeneration || track !== inventoryCameraTrack)
+    ) return null;
+    return actualZoom;
+}
+
+function inventoryCameraZoomValue(capabilities, targetZoom) {
+    const zoomMin = Number(capabilities && capabilities.zoom && capabilities.zoom.min);
+    const zoomMax = Number(capabilities && capabilities.zoom && capabilities.zoom.max);
     if (!Number.isFinite(zoomMin) || !Number.isFinite(zoomMax) || zoomMax < zoomMin) return null;
+    const target = Number(targetZoom);
+    if (!Number.isFinite(target) || target < zoomMin || target > zoomMax) return null;
+    const zoomStep = Number(capabilities.zoom && capabilities.zoom.step);
+    if (!Number.isFinite(zoomStep) || zoomStep <= 0) return target;
+    const stepped = zoomMin + Math.round((target - zoomMin) / zoomStep) * zoomStep;
+    const normalized = Math.min(zoomMax, Math.max(zoomMin, Number(stepped.toFixed(6))));
+    return Math.abs(normalized - target) < 0.000001 ? normalized : null;
+}
+
+function inventoryCameraSettings(track) {
+    if (!track || typeof track.getSettings !== 'function') return {};
     try {
-        let desiredZoom = Math.min(zoomMax, Math.max(zoomMin, 2));
-        const zoomStep = Number(capabilities.zoom && capabilities.zoom.step);
-        if (Number.isFinite(zoomStep) && zoomStep > 0) {
-            desiredZoom = zoomMin + Math.round((desiredZoom - zoomMin) / zoomStep) * zoomStep;
-            desiredZoom = Math.min(zoomMax, Math.max(zoomMin, Number(desiredZoom.toFixed(6))));
-        }
-        await track.applyConstraints({advanced: [{zoom: desiredZoom}]});
-        if (typeof track.getSettings !== 'function') return null;
-        const actualZoom = Number((track.getSettings() || {}).zoom);
-        return Number.isFinite(actualZoom) ? actualZoom : null;
+        return track.getSettings() || {};
     } catch (_error) {
-        // Zoom support can be reported even when this camera rejects it.
+        return {};
+    }
+}
+
+function updateInventoryCameraDetails(track, confirmedZoom = null) {
+    const target = inventoryOptionalElement('inventoryCameraDetails');
+    if (!target) return;
+    const settings = inventoryCameraSettings(track);
+    const cameraName = String((track && track.label) || '').trim()
+        || (settings.facingMode === 'environment' ? '后置相机' : '相机');
+    const details = [cameraName];
+    const width = Number(settings.width);
+    const height = Number(settings.height);
+    if (Number.isFinite(width) && Number.isFinite(height)) details.push(`${width}×${height}`);
+    const zoom = Number.isFinite(confirmedZoom) ? confirmedZoom : Number(settings.zoom);
+    if (Number.isFinite(zoom)) details.push(`${Math.round(zoom * 10) / 10}×`);
+    target.textContent = details.join(' · ');
+}
+
+function renderInventoryCameraZoomControls(capabilities, activeZoom = null) {
+    const controls = inventoryOptionalElement('inventoryCameraZoomControls');
+    if (!controls) return;
+    let visibleCount = 0;
+    [1, 2, 3, 5].forEach((level) => {
+        const button = inventoryOptionalElement(`inventoryCameraZoom${level}`);
+        if (!button) return;
+        const supported = inventoryCameraZoomValue(capabilities, level) !== null;
+        button.hidden = !supported;
+        button.disabled = !supported;
+        const active = supported && Number.isFinite(activeZoom) && Math.abs(activeZoom - level) < 0.15;
+        button.className = active ? 'is-active' : '';
+        if (typeof button.setAttribute === 'function') button.setAttribute('aria-pressed', active ? 'true' : 'false');
+        if (supported) visibleCount += 1;
+    });
+    controls.hidden = visibleCount === 0;
+}
+
+async function applyInventoryCameraZoom(targetZoom, announce = true) {
+    const track = inventoryCameraTrack;
+    const capabilities = inventoryCameraCapabilities;
+    const generation = inventoryCameraActiveGeneration;
+    const desiredZoom = inventoryCameraZoomValue(capabilities, targetZoom);
+    if (!track || desiredZoom === null || typeof track.applyConstraints !== 'function') return null;
+    try {
+        await track.applyConstraints({advanced: [{zoom: desiredZoom}]});
+        if (!generation || generation !== inventoryCameraActiveGeneration || track !== inventoryCameraTrack) return null;
+        const actualZoom = Number(inventoryCameraSettings(track).zoom);
+        if (!Number.isFinite(actualZoom)) return null;
+        renderInventoryCameraZoomControls(capabilities, actualZoom);
+        updateInventoryCameraDetails(track, actualZoom);
+        if (announce) setInventoryCameraMessage(`已切换到 ${Math.round(actualZoom * 10) / 10}×。`, 'success');
+        return actualZoom;
+    } catch (_error) {
+        if (announce && generation && generation === inventoryCameraActiveGeneration && track === inventoryCameraTrack) {
+            setInventoryCameraMessage('当前相机不支持该倍率，已保持原倍率。', 'error');
+        }
         return null;
     }
 }
@@ -1124,6 +1201,8 @@ function stopInventoryCamera(showStatus = true) {
     inventoryCameraActiveGeneration = 0;
     const controls = inventoryCameraControls;
     inventoryCameraControls = null;
+    inventoryCameraTrack = null;
+    inventoryCameraCapabilities = null;
     if (controls && typeof controls.stop === 'function') {
         try {
             controls.stop();
@@ -1138,6 +1217,9 @@ function stopInventoryCamera(showStatus = true) {
     }
     const panel = inventoryElement('inventoryCameraPanel');
     if (panel) panel.hidden = true;
+    const details = inventoryOptionalElement('inventoryCameraDetails');
+    if (details) details.textContent = '';
+    renderInventoryCameraZoomControls(null);
     const start = inventoryElement('inventoryCameraStart');
     const cartonStart = inventoryOptionalElement('inventoryCartonCameraStart');
     const stop = inventoryElement('inventoryCameraStop');
@@ -1227,8 +1309,9 @@ async function startInventoryCamera(mode = 'single') {
                 return;
             }
             inventoryCameraControls = controls;
-            const cameraZoom = await optimizeInventoryCameraTrack(video);
-            const zoomLabel = Number.isFinite(cameraZoom) && cameraZoom > 1
+            const cameraZoom = await optimizeInventoryCameraTrack(video, generation);
+            if (generation !== inventoryCameraGeneration || generation !== inventoryCameraActiveGeneration) return;
+            const zoomLabel = Number.isFinite(cameraZoom)
                 ? `（${Math.round(cameraZoom * 10) / 10}×）` : '';
             setInventoryCameraMessage(`相机已就绪${zoomLabel}，请将一维码横放并对准框内。`, 'success');
         } catch (error) {
@@ -2911,6 +2994,10 @@ function initializeInventoryPage() {
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
     inventoryElement('inventoryCameraStart').addEventListener('click', startInventoryCamera);
     inventoryElement('inventoryCameraStop').addEventListener('click', stopInventoryCamera);
+    [1, 2, 3, 5].forEach((level) => {
+        const button = inventoryOptionalElement(`inventoryCameraZoom${level}`);
+        if (button) button.addEventListener('click', () => applyInventoryCameraZoom(level));
+    });
     const cartonBindings = [
         ['inventoryCartonPresetSave', 'click', saveCartonPreset],
         ['inventoryCartonCameraStart', 'click', () => startInventoryCamera('carton-start')],

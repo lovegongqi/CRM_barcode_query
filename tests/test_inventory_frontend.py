@@ -2396,6 +2396,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             let audioStartCount = 0;
             let decoderCallback = null;
             let stopCount = 0;
+            let currentZoom = 1;
             class FakeAudioContext {
                 constructor() {
                     this.state = 'suspended'; this.currentTime = 0; this.destination = {};
@@ -2424,13 +2425,17 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                         getCapabilities() {
                             return {
                                 focusMode: ['manual', 'continuous'],
-                                zoom: {min: 1, max: 5, step: 0.3},
+                                zoom: {min: 1, max: 5, step: 0.1},
                             };
                         },
-                        getSettings() { return {zoom: 1.9}; },
+                        getSettings() {
+                            return {zoom: currentZoom, width: 1920, height: 1080, facingMode: 'environment'};
+                        },
+                        label: 'Back Camera',
                         async applyConstraints(value) {
                             appliedConstraints.push(value);
                             if (value.advanced[0].focusMode) throw new Error('focus rejected');
+                            if (value.advanced[0].zoom) currentZoom = value.advanced[0].zoom;
                         },
                     };
                     video.srcObject = {
@@ -2491,12 +2496,19 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(audioResumeCount, 1);
                 assert.deepEqual(appliedConstraints, [
                     {advanced: [{focusMode: 'continuous'}]},
-                    {advanced: [{zoom: 1.9}]},
+                    {advanced: [{zoom: 1}]},
                 ]);
                 assert.equal(
                     element('inventoryCameraMessage').textContent,
-                    '相机已就绪（1.9×），请将一维码横放并对准框内。'
+                    '相机已就绪（1×），请将一维码横放并对准框内。'
                 );
+                assert.equal(element('inventoryCameraDetails').textContent, 'Back Camera · 1920×1080 · 1×');
+                assert.equal(element('inventoryCameraZoomControls').hidden, false);
+                assert.equal(element('inventoryCameraZoom5').hidden, false);
+                await element('inventoryCameraZoom5').listeners.click();
+                assert.deepEqual(appliedConstraints.at(-1), {advanced: [{zoom: 5}]});
+                assert.equal(element('inventoryCameraDetails').textContent, 'Back Camera · 1920×1080 · 5×');
+                assert.equal(element('inventoryCameraMessage').textContent, '已切换到 5×。');
                 decoderCallback({getText() { return ' SN-1 '; }}, null);
                 decoderCallback({text: 'SN-2'}, null);
                 await vm.runInContext('serialOperationQueue', context);
@@ -2519,6 +2531,258 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(stoppedTracks.filter(track => track === secondTrack).length, 1);
                 assert.equal(element('inventoryCameraStart').disabled, false);
                 assert.equal(element('inventoryCameraStop').disabled, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_hides_zoom_levels_above_device_maximum(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = false; this.textContent = '';
+                    this.className = ''; this.srcObject = null; this.listeners = {};
+                    this.classList = {add() {}, remove() {}, toggle() {}};
+                }
+                addEventListener(type, callback) { this.listeners[type] = callback; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            class FakeReader {
+                async decodeFromConstraints(_constraints, video) {
+                    const track = {
+                        label: 'Rear Camera',
+                        stop() {},
+                        getCapabilities() { return {zoom: {min: 1, max: 3, step: 1}}; },
+                        getSettings() { return {zoom: 1, width: 1280, height: 720}; },
+                        async applyConstraints() {},
+                    };
+                    video.srcObject = {
+                        getTracks() { return [track]; },
+                        getVideoTracks() { return [track]; },
+                    };
+                    return {stop() {}};
+                }
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                ZXingBrowser: {BrowserMultiFormatOneDReader: FakeReader},
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            context.window.isSecureContext = true;
+            context.window.location = {hostname: 'inventory.example.test'};
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryTask = {task_id: 'task-1'};
+                currentSerialBarcode = 'A1';
+                serialWorkspaceOpen = true;
+                serialWorkspaceEditable = true;
+            `, context);
+            (async () => {
+                await vm.runInContext('startInventoryCamera()', context);
+                assert.equal(element('inventoryCameraZoom1').hidden, false);
+                assert.equal(element('inventoryCameraZoom2').hidden, false);
+                assert.equal(element('inventoryCameraZoom3').hidden, false);
+                assert.equal(element('inventoryCameraZoom5').hidden, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_hides_labeled_zoom_levels_not_available_on_device_step(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = false; this.textContent = '';
+                    this.className = ''; this.srcObject = null;
+                }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const track = {
+                label: 'Rear Camera',
+                getCapabilities() { return {zoom: {min: 1, max: 5, step: 0.3}}; },
+                getSettings() { return {zoom: 1}; },
+                async applyConstraints() {},
+            };
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array, track,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryCameraTrack = track;
+                inventoryCameraCapabilities = track.getCapabilities();
+                renderInventoryCameraZoomControls(inventoryCameraCapabilities, 1);
+            `, context);
+            assert.equal(element('inventoryCameraZoom1').hidden, false);
+            assert.equal(element('inventoryCameraZoom2').hidden, true);
+            assert.equal(element('inventoryCameraZoom3').hidden, true);
+            assert.equal(element('inventoryCameraZoom5').hidden, true);
+            """
+        )
+
+    def test_stale_zoom_completion_cannot_overwrite_stopped_camera_ui(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            class FakeNode {
+                constructor() {
+                    this.disabled = false; this.hidden = false; this.textContent = '';
+                    this.className = ''; this.srcObject = null; this.listeners = {};
+                }
+                addEventListener(type, callback) { this.listeners[type] = callback; }
+            }
+            const elements = new Map();
+            function element(id) {
+                if (!elements.has(id)) elements.set(id, new FakeNode());
+                return elements.get(id);
+            }
+            const delayedZoom = deferred();
+            let currentZoom = 1;
+            const track = {
+                label: 'Rear Camera',
+                stop() {},
+                getCapabilities() { return {zoom: {min: 1, max: 5, step: 1}}; },
+                getSettings() { return {zoom: currentZoom, width: 1920, height: 1080}; },
+                async applyConstraints() {
+                    await delayedZoom.promise;
+                    currentZoom = 5;
+                },
+            };
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array, track, delayedZoom,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryCameraGeneration = 1;
+                inventoryCameraActiveGeneration = 1;
+                inventoryCameraTrack = track;
+                inventoryCameraCapabilities = track.getCapabilities();
+                renderInventoryCameraZoomControls(inventoryCameraCapabilities, 1);
+            `, context);
+            (async () => {
+                const zoomPromise = vm.runInContext('applyInventoryCameraZoom(5)', context);
+                vm.runInContext('stopInventoryCamera()', context);
+                delayedZoom.resolve();
+                await zoomPromise;
+                assert.equal(element('inventoryCameraMessage').textContent, '相机已停止。');
+                assert.equal(element('inventoryCameraDetails').textContent, '');
+                assert.equal(element('inventoryCameraZoomControls').hidden, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_camera_details_do_not_require_zoom_control_apis(self):
+        self.run_node(
+            r"""
+            const details = {textContent: ''};
+            const track = {
+                label: 'Back Wide Camera',
+                getSettings() { return {width: 1280, height: 720}; },
+            };
+            const video = {srcObject: {getVideoTracks() { return [track]; }}};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array, video,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return id === 'inventoryCameraDetails' ? details : null; },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                const zoom = await vm.runInContext('optimizeInventoryCameraTrack(video)', context);
+                assert.equal(zoom, null);
+                assert.equal(details.textContent, 'Back Wide Camera · 1280×720');
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """
+        )
+
+    def test_stopped_camera_optimization_cannot_restore_stale_details(self):
+        self.run_node(
+            r"""
+            function deferred() {
+                let resolve;
+                const promise = new Promise(done => { resolve = done; });
+                return {promise, resolve};
+            }
+            const focusReady = deferred();
+            const details = {textContent: ''};
+            const controls = {hidden: true};
+            const video = {srcObject: null};
+            const track = {
+                label: 'Old Rear Camera',
+                stop() {},
+                getCapabilities() {
+                    return {focusMode: ['continuous'], zoom: {min: 1, max: 5, step: 1}};
+                },
+                getSettings() { return {zoom: 1, width: 1920, height: 1080}; },
+                async applyConstraints(value) {
+                    if (value.advanced[0].focusMode === 'continuous') await focusReady.promise;
+                },
+            };
+            video.srcObject = {
+                getTracks() { return [track]; },
+                getVideoTracks() { return [track]; },
+            };
+            const elements = new Map([
+                ['inventoryCameraVideo', video],
+                ['inventoryCameraDetails', details],
+                ['inventoryCameraZoomControls', controls],
+            ]);
+            function element(id) {
+                if (!elements.has(id)) {
+                    elements.set(id, {
+                        disabled: false, hidden: false, textContent: '', className: '',
+                        setAttribute() {},
+                    });
+                }
+                return elements.get(id);
+            }
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                video, track, focusReady,
+                document: {hidden: false, addEventListener() {}, getElementById: element},
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            context.window = context;
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                inventoryCameraGeneration = 1;
+                inventoryCameraActiveGeneration = 1;
+            `, context);
+            (async () => {
+                const optimization = vm.runInContext('optimizeInventoryCameraTrack(video, 1)', context);
+                await Promise.resolve();
+                vm.runInContext('stopInventoryCamera()', context);
+                focusReady.resolve();
+                await optimization;
+                assert.equal(details.textContent, '');
+                assert.equal(controls.hidden, true);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
