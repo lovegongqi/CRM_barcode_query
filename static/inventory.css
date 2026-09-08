@@ -923,6 +923,81 @@ article.inventory-item { cursor: default; }
     content: '收起';
 }
 
+.inventory-discrepancy-group-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.inventory-discrepancy-group-summary .inventory-history-title {
+    flex: 1;
+    min-width: 0;
+}
+
+.inventory-discrepancy-model {
+    display: block;
+    margin-top: 3px;
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-discrepancy-count {
+    flex: 0 0 auto;
+    padding: 4px 8px;
+    color: var(--aurora-cyan);
+    border: 1px solid rgba(71, 221, 255, .38);
+    border-radius: 999px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.inventory-discrepancy-serial-group {
+    display: grid;
+    gap: 8px;
+    padding: 0 12px 12px;
+}
+
+.inventory-discrepancy-entry {
+    min-width: 0;
+    border: 1px solid var(--aurora-line);
+    border-radius: 11px;
+    background: rgba(8, 25, 42, .68);
+}
+
+.inventory-discrepancy-entry-summary {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.inventory-discrepancy-entry-summary::-webkit-details-marker { display: none; }
+
+.inventory-discrepancy-entry-summary .inventory-discrepancy-serial {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.inventory-discrepancy-kind {
+    flex: 0 0 auto;
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-discrepancy-entry-summary::after {
+    content: '展开';
+    flex: 0 0 auto;
+    color: var(--aurora-muted);
+    font-size: 11px;
+}
+
+.inventory-discrepancy-entry[open] > .inventory-discrepancy-entry-summary::after {
+    content: '收起';
+}
+
 .inventory-discrepancy-meta,
 .inventory-discrepancy-card > .inventory-discrepancy-head,
 .inventory-discrepancy-card > .inventory-note-history,
@@ -936,6 +1011,18 @@ article.inventory-item { cursor: default; }
     gap: 4px;
     color: var(--aurora-muted);
     font-size: 12px;
+}
+
+.inventory-discrepancy-entry > .inventory-discrepancy-meta,
+.inventory-discrepancy-entry > .inventory-discrepancy-head,
+.inventory-discrepancy-entry > .inventory-note-history,
+.inventory-discrepancy-entry > .inventory-note-form {
+    margin-right: 10px;
+    margin-left: 10px;
+}
+
+.inventory-discrepancy-entry > .inventory-note-form {
+    margin-bottom: 10px;
 }
 
 .inventory-history-detail-card {

@@ -2535,6 +2535,104 @@ function discrepancyNoteInputId(id, serial) {
     return `inventoryDiscrepancyNote-${id}-${serial ? encodeURIComponent(serial) : 'product'}`;
 }
 
+function appendDiscrepancyDetails(container, row, state) {
+    const meta = inventoryNode('div', 'inventory-discrepancy-meta');
+    meta.append(
+        inventoryNode('span', '', `${discrepancyKindLabel(row.kind)} · 盘点任务单号 ${inventoryText(row.task_number, row.task_id)}`),
+        inventoryNode('span', '', row.serial
+            ? historySerialArchiveText(row)
+            : `账面 ${inventoryText(row.book_quantity)} · 实盘 ${inventoryText(row.counted_quantity)} · 差异 ${inventoryText(row.difference)}`),
+    );
+    const head = inventoryNode('div', 'inventory-discrepancy-head');
+    if (CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin) {
+        const action = inventoryNode('button', 'btn btn-secondary', state === 'archived' ? '恢复' : '归档');
+        action.type = 'button';
+        action.addEventListener('click', () => state === 'archived'
+            ? restoreDiscrepancy(row.id, row.task_version)
+            : archiveDiscrepancy(row.id, row.task_version));
+        head.append(action);
+    }
+
+    const history = inventoryNode('div', 'inventory-note-history');
+    const notes = Array.isArray(row.notes) ? row.notes : [];
+    history.append(inventoryNode('h3', '', row.serial ? '序列号备注历史' : '商品备注历史'));
+    if (!notes.length) history.append(inventoryNode('p', 'inventory-empty', '暂无备注。'));
+    notes.forEach((note) => {
+        const entry = inventoryNode('div', 'inventory-note-entry');
+        entry.append(
+            inventoryNode('p', '', note.note),
+            inventoryNode('span', '', `${inventoryText(note.actor, '未知账号')} · ${inventoryText(note.created_at)}`),
+        );
+        history.append(entry);
+    });
+
+    const form = inventoryNode('div', 'inventory-note-form');
+    const input = inventoryNode('input', '');
+    input.id = discrepancyNoteInputId(row.id, row.serial);
+    input.type = 'text';
+    input.autocomplete = 'off';
+    input.placeholder = row.serial ? '追加序列号备注' : '追加商品备注';
+    input.setAttribute('aria-label', input.placeholder);
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') saveDiscrepancyNote(row.id, row.serial, row.task_version);
+    });
+    const save = inventoryNode('button', 'btn btn-primary', '追加备注');
+    save.type = 'button';
+    save.addEventListener('click', () => saveDiscrepancyNote(row.id, row.serial, row.task_version));
+    form.append(input, save);
+    container.append(meta, head, history, form);
+}
+
+function renderQuantityDiscrepancy(row, state) {
+    const card = inventoryNode('details', 'inventory-discrepancy-card');
+    card.open = false;
+    const summary = inventoryNode('summary', 'inventory-discrepancy-summary');
+    const identity = inventoryNode('div', 'inventory-history-title');
+    identity.append(inventoryNode(
+        'strong', '',
+        `${inventoryText(row.barcode)} · ${inventoryText(row.name, '未命名商品')}`,
+    ));
+    summary.append(identity);
+    card.append(summary);
+    appendDiscrepancyDetails(card, row, state);
+    return card;
+}
+
+function renderSerialDiscrepancyGroup(rows, state) {
+    const first = rows[0];
+    const card = inventoryNode('details', 'inventory-discrepancy-card inventory-discrepancy-product-group');
+    card.open = false;
+    const summary = inventoryNode('summary', 'inventory-discrepancy-summary inventory-discrepancy-group-summary');
+    const identity = inventoryNode('div', 'inventory-history-title');
+    identity.append(inventoryNode(
+        'strong', '',
+        `${inventoryText(first.barcode)} · ${inventoryText(first.name, '未命名商品')}`,
+    ));
+    if (first.model) {
+        identity.append(inventoryNode('span', 'inventory-discrepancy-model', `型号 ${first.model}`));
+    }
+    summary.append(
+        identity,
+        inventoryNode('span', 'inventory-discrepancy-count', `序列号数量 ${rows.length}`),
+    );
+
+    const serials = inventoryNode('div', 'inventory-discrepancy-serial-group');
+    rows.forEach((row) => {
+        const entry = inventoryNode('details', 'inventory-discrepancy-entry');
+        entry.open = false;
+        const entrySummary = inventoryNode('summary', 'inventory-discrepancy-entry-summary');
+        entrySummary.append(
+            inventoryNode('code', 'inventory-discrepancy-serial', row.serial),
+            inventoryNode('span', 'inventory-discrepancy-kind', discrepancyKindLabel(row.kind)),
+        );
+        entry.append(entrySummary);
+        appendDiscrepancyDetails(entry, row, state);
+        serials.append(entry);
+    });
+    card.append(summary, serials);
+    return card;
+}
+
 function renderDiscrepancyRows(rows, state) {
     const root = inventoryElement(state === 'archived' ? 'inventoryDifferencesArchived' : 'inventoryDifferencesOpen');
     root.replaceChildren();
@@ -2542,65 +2640,26 @@ function renderDiscrepancyRows(rows, state) {
         root.append(inventoryNode('div', 'inventory-empty', state === 'archived' ? '暂无已归档差异。' : '暂无待处理差异。'));
         return;
     }
+    const groups = new Map();
+    const entries = [];
     rows.forEach((row) => {
-        const card = inventoryNode('details', 'inventory-discrepancy-card');
-        card.open = false;
-        const summary = inventoryNode('summary', 'inventory-discrepancy-summary');
-        const identity = inventoryNode('div', 'inventory-history-title');
-        identity.append(inventoryNode(
-            'strong', '',
-            `${inventoryText(row.barcode)} · ${inventoryText(row.name, '未命名商品')}`,
-        ));
-        if (row.serial !== null && row.serial !== undefined && row.serial !== '') {
-            identity.append(inventoryNode('code', 'inventory-discrepancy-serial', row.serial));
+        if (row.serial === null || row.serial === undefined || row.serial === '') {
+            entries.push({row});
+            return;
         }
-        summary.append(identity);
-        const meta = inventoryNode('div', 'inventory-discrepancy-meta');
-        meta.append(
-            inventoryNode('span', '', `${discrepancyKindLabel(row.kind)} · 盘点任务单号 ${inventoryText(row.task_number, row.task_id)}`),
-            inventoryNode('span', '', row.serial
-                ? historySerialArchiveText(row)
-                : `账面 ${inventoryText(row.book_quantity)} · 实盘 ${inventoryText(row.counted_quantity)} · 差异 ${inventoryText(row.difference)}`),
-        );
-        const head = inventoryNode('div', 'inventory-discrepancy-head');
-        if (CURRENT_ACCOUNT && CURRENT_ACCOUNT.is_admin) {
-            const action = inventoryNode('button', 'btn btn-secondary', state === 'archived' ? '恢复' : '归档');
-            action.type = 'button';
-            action.addEventListener('click', () => state === 'archived'
-                ? restoreDiscrepancy(row.id, row.task_version)
-                : archiveDiscrepancy(row.id, row.task_version));
-            head.append(action);
+        const key = `${inventoryText(row.task_id)}\u0000${inventoryText(row.barcode)}`;
+        let groupedRows = groups.get(key);
+        if (!groupedRows) {
+            groupedRows = [];
+            groups.set(key, groupedRows);
+            entries.push({rows: groupedRows});
         }
-
-        const history = inventoryNode('div', 'inventory-note-history');
-        const notes = Array.isArray(row.notes) ? row.notes : [];
-        history.append(inventoryNode('h3', '', row.serial ? '序列号备注历史' : '商品备注历史'));
-        if (!notes.length) history.append(inventoryNode('p', 'inventory-empty', '暂无备注。'));
-        notes.forEach((note) => {
-            const entry = inventoryNode('div', 'inventory-note-entry');
-            entry.append(
-                inventoryNode('p', '', note.note),
-                inventoryNode('span', '', `${inventoryText(note.actor, '未知账号')} · ${inventoryText(note.created_at)}`),
-            );
-            history.append(entry);
-        });
-
-        const form = inventoryNode('div', 'inventory-note-form');
-        const input = inventoryNode('input', '');
-        input.id = discrepancyNoteInputId(row.id, row.serial);
-        input.type = 'text';
-        input.autocomplete = 'off';
-        input.placeholder = row.serial ? '追加序列号备注' : '追加商品备注';
-        input.setAttribute('aria-label', input.placeholder);
-        input.addEventListener('keydown', (event) => {
-            if (event.key === 'Enter') saveDiscrepancyNote(row.id, row.serial, row.task_version);
-        });
-        const save = inventoryNode('button', 'btn btn-primary', '追加备注');
-        save.type = 'button';
-        save.addEventListener('click', () => saveDiscrepancyNote(row.id, row.serial, row.task_version));
-        form.append(input, save);
-        card.append(summary, meta, head, history, form);
-        root.append(card);
+        groupedRows.push(row);
+    });
+    entries.forEach((entry) => {
+        root.append(entry.rows
+            ? renderSerialDiscrepancyGroup(entry.rows, state)
+            : renderQuantityDiscrepancy(entry.row, state));
     });
 }
 

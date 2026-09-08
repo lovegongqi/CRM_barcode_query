@@ -3800,6 +3800,73 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_serial_discrepancies_group_by_task_and_product_with_count(self):
+        self.run_node(
+            r"""
+            function makeNode(tag) {
+                return {
+                    tag, textContent: '', className: '', value: '', disabled: false,
+                    children: [], dataset: {},
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    addEventListener() {}, setAttribute() {},
+                };
+            }
+            const roots = new Map();
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                CURRENT_ACCOUNT: {is_admin: true},
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (!roots.has(id)) roots.set(id, makeNode('div'));
+                        return roots.get(id);
+                    },
+                },
+                window: {location: {assign() {}}},
+                fetch: async () => ({ok: true, status: 200, json: async () => ({success: true})}),
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            function row(id, taskId, barcode, serial, kind = 'system_only_serial') {
+                return {
+                    id, task_id: taskId, task_number: `PD-${taskId}`,
+                    task_version: 4, barcode, name: 'CTO滤芯', model: 'CTO-800',
+                    serial, kind, state: 'open', notes: [],
+                };
+            }
+            const rows = [
+                row(1, 'task-1', '926019505', 'SN-001'),
+                row(2, 'task-1', '926019505', 'SN-002', 'physical_only_serial'),
+                row(3, 'task-2', '926019505', 'SN-003'),
+                {...row(4, 'task-1', 'QTY-1', null, 'product_quantity'),
+                    book_quantity: 5, counted_quantity: 4, difference: -1},
+            ];
+            vm.runInContext('renderDiscrepancyRows(globalThis.testRows, "open")',
+                Object.assign(context, {testRows: rows}));
+
+            function allText(node) {
+                return [node.textContent, ...node.children.flatMap(child => allText(child))];
+            }
+            const cards = roots.get('inventoryDifferencesOpen').children;
+            assert.equal(cards.length, 3);
+            assert.match(cards[0].className, /inventory-discrepancy-product-group/);
+            assert.deepEqual(allText(cards[0].children[0]).filter(Boolean), [
+                '926019505 · CTO滤芯', '型号 CTO-800', '序列号数量 2',
+            ]);
+            const serialEntries = cards[0].children[1].children;
+            assert.equal(serialEntries.length, 2);
+            assert.match(serialEntries[0].className, /inventory-discrepancy-entry/);
+            assert.match(allText(serialEntries[0]).join(' '), /SN-001/);
+            assert.match(allText(serialEntries[1]).join(' '), /SN-002/);
+            assert.match(allText(serialEntries[0]).join(' '), /归档/);
+            assert.match(allText(cards[1].children[0]).join(' '), /序列号数量 1/);
+            assert.doesNotMatch(cards[2].className, /inventory-discrepancy-product-group/);
+            assert.match(allText(cards[2]).join(' '), /账面 5 · 实盘 4 · 差异 -1/);
+            """
+        )
+
     def test_discrepancy_admin_gating_note_payload_and_encoded_export(self):
         self.run_node(
             r"""
@@ -3850,8 +3917,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             assert.equal(compactCard.open, false);
             assert.equal(compactCard.children[0].tag, 'summary');
             assert.deepEqual(allText(compactCard.children[0]).filter(Boolean), [
-                'A/B · 滤芯', 'SN/1',
+                'A/B · 滤芯', '序列号数量 1',
             ]);
+            assert.match(allText(compactCard.children[1].children[0]).join(' '), /SN\/1/);
             assert.equal(allText(roots.get('inventoryDifferencesOpen')).includes('归档'), false);
             context.CURRENT_ACCOUNT.is_admin = true;
             vm.runInContext('renderDiscrepancyRows([globalThis.testRow], "open")', context);
