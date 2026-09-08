@@ -10,7 +10,7 @@ STYLE = ROOT / "static" / "aurora.css"
 APP_LAYOUT_STYLE = ROOT / "static" / "app_layout.css"
 
 
-class AuroraWarehouseNavigationTests(unittest.TestCase):
+class AuroraNavigationTests(unittest.TestCase):
     def render_navigation(self, page, links):
         page.set_default_timeout(1000)
         anchors = "".join(
@@ -30,7 +30,7 @@ class AuroraWarehouseNavigationTests(unittest.TestCase):
         page.add_script_tag(content=SCRIPT.read_text(encoding="utf-8"))
         page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded'))")
 
-    def test_mobile_warehouse_button_expands_available_links_upward(self):
+    def test_mobile_navigation_shows_seven_evenly_distributed_links(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             try:
@@ -45,36 +45,32 @@ class AuroraWarehouseNavigationTests(unittest.TestCase):
                     ("/accounts", "设置", ""),
                 ])
 
-                toggle = page.get_by_role("button", name="仓库")
-                self.assertTrue(toggle.is_visible())
-                self.assertIn("active", toggle.get_attribute("class"))
-                self.assertEqual(toggle.get_attribute("aria-expanded"), "false")
-                menu_links = page.locator(".aurora-warehouse-menu a")
-                self.assertEqual(menu_links.count(), 3)
-                self.assertFalse(menu_links.first.is_visible())
-
-                toggle.click()
-                self.assertEqual(toggle.get_attribute("aria-expanded"), "true")
+                links = page.locator(".page-nav > a")
+                self.assertEqual(links.count(), 7)
                 self.assertEqual(
-                    menu_links.evaluate_all(
+                    links.evaluate_all(
                         "nodes => nodes.map(node => new URL(node.href).pathname)"
                     ),
-                    ["/transfer", "/inbound", "/inventory"],
+                    [
+                        "/crm", "/results", "/transfer", "/inbound",
+                        "/inventory", "/product-library", "/accounts",
+                    ],
                 )
-                self.assertTrue(menu_links.first.is_visible())
-                menu_box = page.locator(".aurora-warehouse-menu").bounding_box()
+                self.assertEqual(page.get_by_role("button", name="仓库").count(), 0)
+                self.assertTrue(all(links.nth(index).is_visible() for index in range(7)))
+                widths = links.evaluate_all(
+                    "nodes => nodes.map(node => node.getBoundingClientRect().width)"
+                )
+                self.assertLess(max(widths) - min(widths), 1)
                 nav_box = page.locator(".page-nav").bounding_box()
-                self.assertLess(menu_box["y"], nav_box["y"])
-
-                page.locator("#outside").click()
-                self.assertEqual(toggle.get_attribute("aria-expanded"), "false")
-                toggle.click()
-                page.keyboard.press("Escape")
-                self.assertEqual(toggle.get_attribute("aria-expanded"), "false")
+                first_box = links.first.bounding_box()
+                last_box = links.last.bounding_box()
+                self.assertGreaterEqual(first_box["x"], nav_box["x"])
+                self.assertLessEqual(last_box["x"] + last_box["width"], nav_box["x"] + nav_box["width"])
             finally:
                 browser.close()
 
-    def test_mobile_warehouse_menu_preserves_permission_filtered_subset(self):
+    def test_mobile_navigation_keeps_permission_filtered_links_direct(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             try:
@@ -84,14 +80,17 @@ class AuroraWarehouseNavigationTests(unittest.TestCase):
                     ("/inventory", "盘点", "active"),
                 ])
 
-                page.get_by_role("button", name="仓库").click()
+                links = page.locator(".page-nav > a")
                 self.assertEqual(
-                    page.locator(".aurora-warehouse-menu a").evaluate_all(
+                    links.evaluate_all(
                         "nodes => nodes.map(node => new URL(node.href).pathname)"
                     ),
                     ["/inbound", "/inventory"],
                 )
+                self.assertTrue(links.first.is_visible())
+                self.assertTrue(links.last.is_visible())
                 self.assertEqual(page.locator('a[href="/transfer"]').count(), 0)
+                self.assertEqual(page.get_by_role("button", name="仓库").count(), 0)
             finally:
                 browser.close()
 
@@ -108,7 +107,7 @@ class AuroraWarehouseNavigationTests(unittest.TestCase):
                     ("/accounts", "设置", ""),
                 ])
 
-                self.assertFalse(page.get_by_role("button", name="仓库").is_visible())
+                self.assertEqual(page.get_by_role("button", name="仓库").count(), 0)
                 for path in ("/transfer", "/inbound", "/inventory"):
                     self.assertTrue(page.locator(f'a[href="{path}"]').is_visible())
             finally:

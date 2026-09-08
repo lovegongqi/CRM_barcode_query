@@ -147,9 +147,6 @@ body[data-aurora-page] .page-nav a.active::before {
 
 .aurora-nav-glyph { display:inline-block; width:1em; font-size: 17px; font-weight: 750; line-height: 1; text-align:center; transform: translateY(-1px); }
 .aurora-nav-label { display: block; overflow: hidden; font-size: 11px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
-.aurora-warehouse-nav,
-.aurora-warehouse-menu { display: contents; }
-.aurora-warehouse-toggle { display: none !important; }
 
 body[data-aurora-page] .header,
 body[data-aurora-page] .app-header {
@@ -979,70 +976,10 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
         gap: 4px !important;
         border-radius: 14px;
     }
-    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .page-nav > a,
-    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .page-nav > .aurora-warehouse-nav {
+    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .page-nav > a {
         min-width: 0 !important;
         flex: 1 1 0 !important;
         width: auto !important;
-    }
-
-    body[data-aurora-page] .page-nav > .aurora-warehouse-nav {
-        position: relative;
-        display: block;
-    }
-
-    body[data-aurora-page] .aurora-warehouse-toggle {
-        width: 100%;
-        min-width: 0;
-        height: 50px;
-        min-height: 50px;
-        padding: 0 4px;
-        display: flex !important;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        gap: 4px;
-        color: #7690a5;
-        background: transparent;
-        border: 1px solid transparent;
-        border-radius: 12px !important;
-    }
-
-    body[data-aurora-page] .aurora-warehouse-toggle.active,
-    body[data-aurora-page] .aurora-warehouse-toggle:focus-visible {
-        color: #e9fcff;
-        border-color: rgba(87, 227, 255, .27);
-        background: linear-gradient(145deg, rgba(72, 212, 246, .22), rgba(75, 112, 236, .16));
-        outline: none;
-    }
-
-    body[data-aurora-page] .aurora-warehouse-menu {
-        position: absolute;
-        z-index: 2;
-        left: 50%;
-        bottom: calc(100% + 12px);
-        width: max-content;
-        max-width: calc(100vw - 16px);
-        padding: 6px;
-        display: none;
-        grid-auto-flow: column;
-        grid-auto-columns: minmax(76px, 96px);
-        gap: 5px;
-        transform: translateX(-50%);
-        border: 1px solid var(--aurora-line);
-        border-radius: 14px;
-        background: rgba(7, 17, 30, .97);
-        box-shadow: var(--aurora-shadow);
-    }
-
-    body[data-aurora-page] .aurora-warehouse-nav.is-open .aurora-warehouse-menu {
-        display: grid;
-    }
-
-    body[data-aurora-page] .aurora-warehouse-menu a {
-        height: 48px;
-        min-height: 48px !important;
-        padding: 0 6px !important;
     }
 
     body[data-aurora-page] .page-nav a {
