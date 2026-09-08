@@ -237,14 +237,14 @@ class InventoryRouteTest(unittest.TestCase):
         saved = next(row for row in app_module.load_accounts() if row["username"] == "new-counter")
         self.assertEqual(saved["permissions"], ["inventory"])
 
-    def test_inventory_service_uses_canonical_gyj_worker_provider_for_account_alias(self):
-        sentinel = object()
+    def test_inventory_service_uses_shared_gyj_business_provider_for_account_alias(self):
         pool = mock.Mock()
-        pool.get.return_value = sentinel
         with mock.patch.object(app_module, "gyj_worker", pool):
             result = self.production_inventory_service.worker_provider("warehouse-account-id")
-        self.assertIs(result, sentinel)
-        pool.get.assert_called_once_with("warehouse-user")
+        self.assertIsInstance(result, app_module.GYJBusinessWorker)
+        self.assertIs(result.pool, pool)
+        self.assertEqual(result.actor, "warehouse-user")
+        pool.get.assert_not_called()
 
     def test_create_uses_shared_owner_and_session_actor_not_request_overrides(self):
         client = self.login_account("warehouse-user", "warehouse-pass")

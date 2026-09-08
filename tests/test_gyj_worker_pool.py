@@ -17,9 +17,14 @@ class FakeGYJWorker:
         self.waiting_captcha = False
         self.browser_running = logged_in
         self.shutdown_calls = 0
+        self.stock_calls = []
 
     def shutdown(self):
         self.shutdown_calls += 1
+
+    def read_inventory_stock(self, barcode):
+        self.stock_calls.append(barcode)
+        return True, "12"
 
 
 class GYJWorkerPoolTest(unittest.TestCase):
@@ -128,6 +133,28 @@ class GYJWorkerPoolTest(unittest.TestCase):
         lease.release()
         lease.release()
         self.assertFalse(pool.slot_status(lease.slot_id)["busy"])
+
+    def test_business_proxy_leases_worker_for_each_inventory_call(self):
+        pool, workers = self.make_pool()
+        proxy = app_module.GYJBusinessWorker(pool, "counter")
+
+        result = proxy.read_inventory_stock("100001")
+
+        self.assertEqual(result, (True, "12"))
+        self.assertEqual(workers["gyj-1"].stock_calls, ["100001"])
+        self.assertFalse(pool.slot_status("gyj-1")["busy"])
+
+    def test_business_proxy_releases_worker_when_method_raises(self):
+        pool, workers = self.make_pool()
+        proxy = app_module.GYJBusinessWorker(pool, "counter")
+        workers["gyj-1"].read_inventory_stock = mock.Mock(
+            side_effect=RuntimeError("read failed")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "read failed"):
+            proxy.read_inventory_stock("100001")
+
+        self.assertFalse(pool.slot_status("gyj-1")["busy"])
 
 
 if __name__ == "__main__":

@@ -53,8 +53,12 @@ class FakeInboundWorker:
 
 
 class FakeGYJWorker:
+    slot_ids = app_module.GYJ_SLOT_IDS
+
     def __init__(self, logged_in=True):
         self.logged_in = logged_in
+        self.browser_running = logged_in
+        self.waiting_captcha = False
         self.saved = []
         self.login_calls = []
         self.captcha_calls = []
@@ -63,6 +67,43 @@ class FakeGYJWorker:
     def get(self, owner):
         self.owner = owner
         return self
+
+    def validate_slot_id(self, slot_id="gyj-1"):
+        slot_id = str(slot_id or "gyj-1")
+        if slot_id not in self.slot_ids:
+            raise ValueError("无效的 GYJ 通道")
+        return slot_id
+
+    def slot_status(self, slot_id):
+        slot_id = self.validate_slot_id(slot_id)
+        return {
+            "id": slot_id,
+            "label": f"GYJ 通道 {slot_id.rsplit('-', 1)[-1]}",
+            "browser_running": self.browser_running,
+            "logged_in": self.logged_in,
+            "waiting_captcha": self.waiting_captcha,
+            "busy": False,
+        }
+
+    def slots_payload(self):
+        return [self.slot_status(slot_id) for slot_id in self.slot_ids]
+
+    def reserve(self, timeout=60):
+        if not self.logged_in:
+            raise RuntimeError("请先登录 GYJ")
+        worker = self
+
+        class Lease:
+            slot_id = "gyj-1"
+            released = False
+
+            def __init__(self):
+                self.worker = worker
+
+            def release(self):
+                self.released = True
+
+        return Lease()
 
     def login_step1(self, username, password):
         self.login_calls.append((username, password))
@@ -353,6 +394,35 @@ class InboundRouteTest(unittest.TestCase):
                 return payload
             time.sleep(0.01)
         self.fail("GYJ inbound job did not finish")
+
+    def test_background_gyj_job_holds_and_releases_shared_channel_lease(self):
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=True)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        lines = [{
+            "product_code": "916000024",
+            "description": "中央净水机",
+            "quantity": 1,
+            "serials": ["SN00000001"],
+            "record_type": "serial",
+        }]
+        job = app_module._empty_inbound_gyj_job(
+            "admin", PACKING_SLIP_NO, "history:test", lines, "销售订单"
+        )
+        with app_module.inbound_gyj_job_lock:
+            app_module.inbound_gyj_jobs[job["job_id"]] = job
+
+        app_module._run_inbound_gyj_job(job["job_id"], lease.worker, lines, lease)
+
+        self.assertFalse(pool.slot_status(lease.slot_id)["busy"])
+        self.assertTrue(app_module.inbound_gyj_jobs[job["job_id"]]["success"])
 
     def test_inbound_requires_its_own_permission(self):
         anonymous = app_module.app.test_client()
@@ -732,7 +802,7 @@ class InboundRouteTest(unittest.TestCase):
         self.assertIn("登录", response.get_json()["error"])
         self.assertEqual(worker.saved, [])
 
-    def test_gyj_credentials_never_return_password_and_are_owner_isolated(self):
+    def test_gyj_credentials_never_return_password_and_are_shared(self):
         admin = self._login("admin", "88293529")
         saved = admin.post("/api/inbound/gyj/credentials", json={
             "remember": True, "username": "gyj-admin", "password": "secret",
@@ -745,8 +815,9 @@ class InboundRouteTest(unittest.TestCase):
 
         other = self._login("inbound-other", "inbound-pass")
         other_payload = other.get("/api/inbound/gyj/credentials").get_json()
-        self.assertFalse(other_payload["remember"])
-        self.assertEqual(other_payload["username"], "")
+        self.assertTrue(other_payload["remember"])
+        self.assertEqual(other_payload["username"], "gyj-admin")
+        self.assertNotIn("password", other_payload)
 
     def test_gyj_background_login_forwards_credentials_only_to_owner_worker(self):
         client = self._login("admin", "88293529")
@@ -758,8 +829,105 @@ class InboundRouteTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["success"])
-        self.assertEqual(worker.owner, "admin")
+        self.assertEqual(worker.owner, "gyj-1")
         self.assertEqual(worker.login_calls, [("gyj-user", "secret")])
+
+    def test_gyj_slots_reports_five_shared_channel_states(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=slot_id in {"gyj-1", "gyj-3"})
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        with mock.patch.object(app_module, "gyj_worker", pool):
+            response = client.get("/api/gyj/slots")
+        lease.release()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["total"], 5)
+        self.assertEqual(payload["logged_in_count"], 2)
+        self.assertEqual(payload["available_count"], 1)
+        self.assertEqual([row["id"] for row in payload["slots"]], list(app_module.GYJ_SLOT_IDS))
+        self.assertTrue(payload["slots"][0]["busy"])
+
+    def test_gyj_login_targets_selected_channel_and_rejects_invalid_slot(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=False)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        with mock.patch.object(app_module, "gyj_worker", pool), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            selected = client.post("/api/gyj/login", json={
+                "slot_id": "gyj-3",
+                "username": "gyj-user",
+                "password": "secret",
+                "remember": True,
+            })
+            invalid = client.post("/api/gyj/login", json={
+                "slot_id": "warehouse-user",
+                "username": "gyj-user",
+                "password": "secret",
+            })
+
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(workers["gyj-3"].login_calls, [("gyj-user", "secret")])
+        self.assertNotIn("gyj-1", workers)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("无效", invalid.get_json()["error"])
+
+    def test_gyj_captcha_targets_selected_channel_and_busy_login_is_rejected(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=True)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        with mock.patch.object(app_module, "gyj_worker", pool):
+            busy = client.post("/api/gyj/login/captcha", json={
+                "slot_id": lease.slot_id, "captcha": "A1B2"
+            })
+            selected = client.post("/api/gyj/login/captcha", json={
+                "slot_id": "gyj-4", "captcha": "C3D4"
+            })
+        lease.release()
+
+        self.assertEqual(busy.status_code, 409)
+        self.assertIn("使用中", busy.get_json()["error"])
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(workers["gyj-4"].captcha_calls, ["C3D4"])
+
+    def test_non_admin_can_view_shared_availability_but_cannot_manage_login(self):
+        client = self._login("transfer-only", "transfer-pass")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            slots = client.get("/api/gyj/slots")
+            login = client.post("/api/gyj/login", json={
+                "username": "gyj-user", "password": "secret"
+            })
+            credentials = client.get("/api/gyj/credentials")
+
+        self.assertEqual(slots.status_code, 200)
+        self.assertEqual(login.status_code, 403)
+        self.assertEqual(credentials.status_code, 403)
+        self.assertEqual(worker.login_calls, [])
 
     def test_gyj_captcha_preview_is_returned_only_for_current_owner_worker(self):
         client = self._login("admin", "88293529")
@@ -769,7 +937,7 @@ class InboundRouteTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
-        self.assertEqual(worker.owner, "admin")
+        self.assertEqual(worker.owner, "gyj-1")
 
     def test_gyj_captcha_refresh_generates_new_image_for_current_owner_worker(self):
         client = self._login("admin", "88293529")
@@ -780,7 +948,7 @@ class InboundRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,bmV3LWNhcHRjaGE=")
         self.assertEqual(worker.captcha_refresh_calls, 1)
-        self.assertEqual(worker.owner, "admin")
+        self.assertEqual(worker.owner, "gyj-1")
 
     def _assert_gyj_alias_equivalent(self, shared, inbound):
         self.assertEqual(shared.status_code, inbound.status_code)
@@ -882,7 +1050,6 @@ class InboundRouteTest(unittest.TestCase):
                 "quantity_mismatch": False,
             }],
         }, "2026-09-01 09:40:00")
-        pool = app_module.GYJWorkerPool()
         created_workers = []
 
         def create_worker(owner, session_dir):
@@ -894,9 +1061,10 @@ class InboundRouteTest(unittest.TestCase):
             created_workers.append(worker)
             return worker
 
+        worker_factory = mock.Mock(side_effect=create_worker)
+        pool = app_module.GYJWorkerPool(worker_factory=worker_factory)
+
         with mock.patch.object(app_module, "gyj_worker", pool), mock.patch.object(
-            app_module, "GYJWorker", side_effect=create_worker
-        ) as worker_class, mock.patch.object(
             app_module, "save_remembered_gyj_credentials", return_value=True
         ):
             login = client.post("/api/gyj/login", json={
@@ -915,18 +1083,19 @@ class InboundRouteTest(unittest.TestCase):
             self.assertEqual(preview.status_code, 200)
             self.assertEqual(started.status_code, 200)
             self._wait_for_gyj_job(client, started.get_json()["job_id"])
-            self.assertEqual(worker_class.call_count, 1)
-            self.assertEqual(list(pool.workers), ["warehouse-user"])
+            self.assertEqual(worker_factory.call_count, 5)
+            self.assertEqual(list(pool.workers), list(app_module.GYJ_SLOT_IDS))
             self.assertEqual(created_workers[0].login_calls, [("gyj-user", "secret")])
             self.assertEqual(created_workers[0].captcha_calls, ["1234"])
             self.assertEqual(created_workers[0].check_login_status.call_count, 2)
             created_workers[0].captcha_preview.assert_called_once_with()
             self.assertEqual(len(created_workers[0].saved), 1)
-            self.assertIs(
-                app_module.gyj_worker_for_owner("warehouse-account-id"),
-                created_workers[0],
+            business_worker = app_module.gyj_business_worker_for_owner(
+                "warehouse-account-id"
             )
-            self.assertEqual(worker_class.call_count, 1)
+            self.assertIs(business_worker.pool, pool)
+            self.assertEqual(business_worker.actor, "warehouse-user")
+            self.assertEqual(worker_factory.call_count, 5)
 
         job_id = started.get_json()["job_id"]
         self.assertEqual(app_module.inbound_gyj_jobs[job_id]["owner"], "warehouse-account-id")

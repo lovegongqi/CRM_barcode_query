@@ -4229,6 +4229,33 @@ class GYJWorkerLease:
             self._released = True
         self.pool._release(self.slot_id)
 
+
+class GYJBusinessWorker:
+    """Lease one shared GYJ channel for each inventory operation."""
+
+    def __init__(self, pool, actor=""):
+        self.pool = pool
+        self.actor = str(actor or "")
+
+    def _call(self, method_name, *args, **kwargs):
+        with self.pool.reserve(timeout=60) as worker:
+            return getattr(worker, method_name)(*args, **kwargs)
+
+    def load_inventory_catalog(self):
+        return self._call("load_inventory_catalog")
+
+    def read_inventory_stock(self, barcode):
+        return self._call("read_inventory_stock", barcode)
+
+    def read_inventory_stock_totals(self):
+        return self._call("read_inventory_stock_totals")
+
+    def read_inventory_serials(self, barcode):
+        return self._call("read_inventory_serials", barcode)
+
+    def lookup_inventory_serial(self, serial):
+        return self._call("lookup_inventory_serial", serial)
+
 def _positive_int_env(name, default):
     try:
         value = int(os.environ.get(name, default))
@@ -5703,7 +5730,7 @@ def _run_inbound_job(job_id, worker):
                 latest_inbound_job_by_slot.pop(slot_id, None)
 
 
-def _run_inbound_gyj_job(job_id, worker, lines):
+def _run_inbound_gyj_job(job_id, worker, lines, lease=None):
     def set_stage(stage):
         with inbound_gyj_job_lock:
             job = inbound_gyj_jobs.get(job_id)
@@ -5751,6 +5778,8 @@ def _run_inbound_gyj_job(job_id, worker, lines):
     with inbound_gyj_job_lock:
         job = inbound_gyj_jobs.get(job_id)
         if not job:
+            if lease is not None:
+                lease.release()
             return
         job['stage'] = 'creating'
         packing_slip_no = job['packing_slip_no']
@@ -5802,6 +5831,9 @@ def _run_inbound_gyj_job(job_id, worker, lines):
                     'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
         log(message, 'error')
+    finally:
+        if lease is not None:
+            lease.release()
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -6447,7 +6479,7 @@ GYJ_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "gyj_credentials.json")
 gyj_credentials_lock = threading.Lock()
 inventory_store = InventoryStore(INVENTORY_DB_FILE)
 inventory_service = InventoryService(
-    inventory_store, lambda owner: gyj_worker_for_owner(owner)
+    inventory_store, lambda owner: gyj_business_worker_for_owner(owner)
 )
 inventory_sync_lock = threading.Lock()
 inventory_sync_threads = {}
@@ -9066,10 +9098,7 @@ def save_remembered_crm_credentials(remember, username="", password=""):
 
 
 def gyj_credentials_owner_key():
-    row = current_account()
-    if row and row.get("username"):
-        return str(row.get("username"))
-    return ""
+    return "admin"
 
 
 def gyj_worker_owner_key(owner=""):
@@ -9083,7 +9112,15 @@ def gyj_worker_owner_key(owner=""):
 
 
 def gyj_worker_for_owner(owner=""):
-    return gyj_worker.get(gyj_worker_owner_key(owner))
+    return gyj_login_worker()
+
+
+def gyj_login_worker(slot_id="gyj-1"):
+    return gyj_worker.get(slot_id)
+
+
+def gyj_business_worker_for_owner(owner=""):
+    return GYJBusinessWorker(gyj_worker, gyj_worker_owner_key(owner))
 
 
 def load_gyj_credentials_store():
@@ -10409,6 +10446,8 @@ def api_inbound_export():
 @app.route("/api/gyj/credentials", methods=["GET", "POST"])
 @app.route("/api/inbound/gyj/credentials", methods=["GET", "POST"])
 def api_gyj_credentials():
+    if not is_admin_account():
+        return jsonify({"success": False, "error": "仅管理员可管理 GYJ 通道"}), 403
     if request.method == "GET":
         return jsonify({"success": True, **get_remembered_gyj_credentials()})
     data = request.get_json(silent=True) or {}
@@ -10422,21 +10461,67 @@ def api_gyj_credentials():
     return jsonify({"success": True, "remember": remember})
 
 
+def _requested_gyj_slot_id(data=None):
+    raw_slot_id = ""
+    if isinstance(data, dict):
+        raw_slot_id = str(data.get("slot_id") or "").strip()
+    if not raw_slot_id:
+        raw_slot_id = str(request.args.get("slot_id") or "").strip()
+    return gyj_worker.validate_slot_id(raw_slot_id or "gyj-1")
+
+
+def _gyj_login_worker_from_request(data=None, require_idle=False):
+    slot_id = _requested_gyj_slot_id(data)
+    if require_idle and gyj_worker.slot_status(slot_id)["busy"]:
+        raise RuntimeError("该 GYJ 通道正在使用中，请稍后再试")
+    return slot_id, gyj_login_worker(slot_id)
+
+
+def _gyj_slots_response():
+    slots = gyj_worker.slots_payload()
+    logged_in_count = sum(1 for row in slots if row["logged_in"])
+    available_count = sum(
+        1 for row in slots if row["logged_in"] and not row["busy"]
+    )
+    return {
+        "success": True,
+        "total": len(slots),
+        "logged_in": logged_in_count > 0,
+        "logged_in_count": logged_in_count,
+        "available_count": available_count,
+        "slots": slots,
+    }
+
+
+@app.route("/api/gyj/slots", methods=["GET"])
+@app.route("/api/inbound/gyj/slots", methods=["GET"])
+def api_gyj_slots():
+    return jsonify(_gyj_slots_response())
+
+
 @app.route("/api/gyj/login", methods=["POST"])
 @app.route("/api/inbound/gyj/login", methods=["POST"])
 def api_gyj_login():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
     data = request.get_json(silent=True) or {}
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     remember = bool(data.get("remember"))
     if not username or not password:
         return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
     if not save_remembered_gyj_credentials(remember, username, password):
         return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
-    worker = gyj_worker_for_owner()
     ok, message = worker.login_step1(username, password)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
+        'slot_id': slot_id,
         'logged_in': bool(worker.logged_in if hasattr(worker, 'logged_in') else ok),
         'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False) or message == 'GYJ 等待验证码'),
     }), (200 if ok else 409)
@@ -10445,12 +10530,20 @@ def api_gyj_login():
 @app.route("/api/gyj/login/captcha", methods=["POST"])
 @app.route("/api/inbound/gyj/login/captcha", methods=["POST"])
 def api_gyj_login_captcha():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
     data = request.get_json(silent=True) or {}
     captcha = str(data.get("captcha") or "").strip()
-    worker = gyj_worker_for_owner()
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
     ok, message = worker.login_step2(captcha)
     return jsonify({
         'success': bool(ok), 'message': str(message or ''),
+        'slot_id': slot_id,
         'logged_in': bool(getattr(worker, 'logged_in', ok)),
         'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
     }), (200 if ok else 409)
@@ -10459,29 +10552,56 @@ def api_gyj_login_captcha():
 @app.route("/api/gyj/captcha-preview", methods=["GET"])
 @app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
 def api_gyj_captcha_preview():
-    worker = gyj_worker_for_owner()
-    return jsonify({'success': True, 'captcha_image': worker.captcha_preview() or ''})
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    return jsonify({
+        'success': True, 'slot_id': slot_id,
+        'captcha_image': worker.captcha_preview() or '',
+    })
 
 
 @app.route("/api/gyj/captcha/refresh", methods=["POST"])
 @app.route("/api/inbound/gyj/captcha/refresh", methods=["POST"])
 def api_gyj_captcha_refresh():
-    worker = gyj_worker_for_owner()
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
     image = worker.refresh_captcha() or ''
     if not image:
         return jsonify({'success': False, 'error': '验证码刷新失败，请重新登录 GYJ'}), 409
-    return jsonify({'success': True, 'captcha_image': image})
+    return jsonify({'success': True, 'slot_id': slot_id, 'captcha_image': image})
 
 
 @app.route("/api/gyj/login-status", methods=["GET"])
 @app.route("/api/inbound/gyj/login-status", methods=["GET"])
 def api_gyj_login_status():
-    worker = gyj_worker_for_owner()
-    ok, message = worker.check_login_status()
-    return jsonify({
-        'success': bool(ok), 'logged_in': bool(ok), 'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
-        'message': str(message or ''),
+    try:
+        slot_id, worker = _gyj_login_worker_from_request()
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    message = ""
+    if not gyj_worker.slot_status(slot_id)["busy"]:
+        _ok, message = worker.check_login_status()
+    payload = _gyj_slots_response()
+    selected = next(row for row in payload["slots"] if row["id"] == slot_id)
+    payload.update({
+        "slot_id": slot_id,
+        "waiting_captcha": selected["waiting_captcha"],
+        "message": str(message or ("GYJ 已登录" if selected["logged_in"] else "请先登录 GYJ")),
     })
+    return jsonify(payload)
 
 
 def _select_gyj_purchase_result(source_result, selected_items):
@@ -10600,15 +10720,31 @@ def api_inbound_gyj_start():
     except GYJInboundError as error:
         return jsonify({'success': False, 'error': str(error)}), 409
 
-    worker = gyj_worker_for_owner(owner)
+    with inbound_gyj_job_lock:
+        running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
+        running_job = inbound_gyj_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有 GYJ 采购入库任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+
+    try:
+        lease = gyj_worker.reserve(timeout=60)
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    worker = lease.worker
     logged_in, message = worker.check_login_status()
     if not logged_in:
+        lease.release()
         return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
 
     with inbound_gyj_job_lock:
         running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
         running_job = inbound_gyj_jobs.get(running_job_id)
         if running_job and running_job.get('running'):
+            lease.release()
             return jsonify({
                 'success': False,
                 'error': '当前账号已有 GYJ 采购入库任务正在运行',
@@ -10629,12 +10765,13 @@ def api_inbound_gyj_start():
 
     thread = threading.Thread(
         target=_run_inbound_gyj_job,
-        args=(job['job_id'], worker, lines),
+        args=(job['job_id'], worker, lines, lease),
         daemon=True,
     )
     try:
         thread.start()
     except Exception as error:
+        lease.release()
         message = _brief_batch_error(error, 800) or 'GYJ 采购入库任务启动失败'
         with inbound_gyj_job_lock:
             job.update({
