@@ -527,7 +527,19 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             vm.runInContext('renderInventoryItems(inventoryTask.items)', context);
             assert(root.children[0].className.includes('is-expanded'));
             const serialProduct = root.children[1].children[0].children[0];
-            assert(serialProduct.children.some(node => node.textContent === '序列号已缓存 1277'));
+            const cachedBadge = serialProduct.children.find(
+                node => node.textContent === '序列号已缓存 1277'
+            );
+            assert(cachedBadge);
+            assert(!cachedBadge.className.includes('inventory-item-full-only'));
+
+            vm.runInContext(`
+                inventoryTask.items[1].serial_synced_at = null;
+                inventoryTask.items[1].serial_syncing = true;
+                renderInventoryItems(inventoryTask.items);
+            `, context);
+            const loadingProduct = root.children[1].children[0].children[0];
+            assert(loadingProduct.children.some(node => node.textContent === '序列号读取中'));
 
             filter.value = 'variance';
             vm.runInContext('renderInventoryItems(inventoryTask.items)', context);

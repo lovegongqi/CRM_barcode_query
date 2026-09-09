@@ -11139,7 +11139,7 @@ def _run_inventory_serial_prefetch(owner, task_id, barcode, device_id):
             owner, task_id, barcode, device_id, "system", force=False
         )
     except Exception:
-        # Opening the reconciliation always retries and exposes failure to the user.
+        # Manual refresh retries and exposes failure without blocking counting.
         pass
     finally:
         current_thread = threading.current_thread()
@@ -11169,11 +11169,30 @@ def _ensure_inventory_serial_prefetch(owner, task_id, barcode, device_id):
         return True
 
 
+def _inventory_attach_serial_prefetch_status(owner, task_id, items):
+    with inventory_serial_prefetch_lock:
+        running_barcodes = {
+            barcode
+            for (item_owner, item_task_id, barcode), thread
+            in inventory_serial_prefetch_threads.items()
+            if item_owner == owner
+            and item_task_id == task_id
+            and thread.is_alive()
+        }
+    for item in items:
+        item["serial_syncing"] = bool(
+            item.get("has_serial")
+            and str(item.get("barcode") or "") in running_barcodes
+        )
+    return items
+
+
 def _schedule_inventory_serial_prefetch(owner, task_id, item, device_id):
     if item.get("has_serial") and item.get("state") == "serial_pending":
         _ensure_inventory_serial_prefetch(
             owner, task_id, str(item.get("barcode") or ""), device_id
         )
+    _inventory_attach_serial_prefetch_status(owner, task_id, [item])
 
 
 def _inventory_version_arg():
@@ -11304,6 +11323,7 @@ def api_inventory_active_task():
             include_zero=bool(query),
         )
         _inventory_attach_lock_owners(task_id, snapshot["items"])
+        _inventory_attach_serial_prefetch_status(owner, task_id, snapshot["items"])
     _ensure_inventory_sync(owner, task_id)
     return jsonify({"success": True, "task": _inventory_public_task(snapshot)})
 
@@ -11353,6 +11373,9 @@ def api_inventory_task_history():
 def api_inventory_task(task_id):
     owner, _actor = _inventory_identity()
     task = _inventory_owned_task(owner, task_id)
+    _inventory_attach_serial_prefetch_status(
+        owner, task_id, task.get("items") or []
+    )
     return jsonify({"success": True, "task": _inventory_public_task(task)})
 
 

@@ -261,6 +261,12 @@ article.inventory-item { cursor: default; }
     background: rgba(68, 229, 166, .08);
 }
 
+.inventory-serial-cache-badge.is-loading {
+    color: var(--aurora-amber);
+    border-color: rgba(255, 198, 88, .34);
+    background: rgba(255, 198, 88, .08);
+}
+
 .inventory-serial-input-head {
     display: flex;
     align-items: center;

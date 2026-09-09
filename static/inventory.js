@@ -430,11 +430,14 @@ function renderInventoryItems(items) {
         product.append(serialBadge);
         if (item.has_serial) {
             const cacheReady = Boolean(item.serial_synced_at);
+            const cacheLoading = Boolean(item.serial_syncing);
             const cacheCount = Number(item.serial_expected_count || 0);
             product.append(inventoryNode(
                 'span',
-                `inventory-serial-cache-badge inventory-item-full-only${cacheReady ? ' is-ready' : ''}`,
-                cacheReady ? `序列号已缓存 ${cacheCount}` : '序列号未缓存',
+                `inventory-serial-cache-badge${cacheLoading ? ' is-loading' : (cacheReady ? ' is-ready' : '')}`,
+                cacheLoading
+                    ? '序列号读取中'
+                    : (cacheReady ? `序列号已缓存 ${cacheCount}` : '序列号未缓存'),
             ));
         }
         const stateBadge = inventoryNode('span', 'inventory-state-badge', inventoryStateLabel(item));

@@ -1326,6 +1326,11 @@ class InventoryRouteTest(unittest.TestCase):
         key = ("counter-id", "task-1", "B2")
         thread = app_module.inventory_serial_prefetch_threads[key]
         self.assertTrue(thread.daemon)
+        items = [{"barcode": "B2", "has_serial": True}]
+        app_module._inventory_attach_serial_prefetch_status(
+            "counter-id", "task-1", items
+        )
+        self.assertTrue(items[0]["serial_syncing"])
         self.assertFalse(app_module._ensure_inventory_serial_prefetch(
             "counter-id", "task-1", "B2", "device-b"
         ))
@@ -1333,6 +1338,10 @@ class InventoryRouteTest(unittest.TestCase):
         release.set()
         thread.join(1)
         self.assertNotIn(key, app_module.inventory_serial_prefetch_threads)
+        app_module._inventory_attach_serial_prefetch_status(
+            "counter-id", "task-1", items
+        )
+        self.assertFalse(items[0]["serial_syncing"])
         self.service.refresh_serial_item.assert_called_once_with(
             "counter-id", "task-1", "B2", "device-a", "system", force=False
         )
