@@ -8635,6 +8635,22 @@ def load_gyj_inbound_history():
     ]
 
 
+def delete_gyj_inbound_history(order_no):
+    order_no = str(order_no or '').strip()
+    if not order_no:
+        return False
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            deleted = connection.execute(
+                'DELETE FROM gyj_inbound_history WHERE order_no = ?', (order_no,)
+            ).rowcount > 0
+            connection.commit()
+            return deleted
+        finally:
+            connection.close()
+
+
 def clear_gyj_inbound_history():
     with INBOUND_HISTORY_LOCK:
         connection = _inbound_history_connection()
@@ -10546,7 +10562,20 @@ def api_inbound_history_record(packing_slip_no):
 
 @app.route("/api/inbound/gyj/history", methods=["GET"])
 def api_inbound_gyj_history():
-    return jsonify({'success': True, 'records': load_gyj_inbound_history()})
+    return jsonify({
+        'success': True,
+        'records': load_gyj_inbound_history(),
+        'can_delete': is_admin_account(),
+    })
+
+
+@app.route("/api/inbound/gyj/history/<order_no>", methods=["DELETE"])
+def api_inbound_gyj_history_record(order_no):
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可删除历史入库'}), 403
+    if not delete_gyj_inbound_history(order_no):
+        return jsonify({'success': False, 'error': 'GYJ 历史入库不存在'}), 404
+    return jsonify({'success': True})
 
 
 @app.route("/api/inbound/export", methods=["GET"])

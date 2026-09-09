@@ -734,6 +734,53 @@ class FrontendContractTest(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_gyj_inbound_history_delete_is_visible_and_sent_only_for_admin(self):
+        inbound = self.source("inbound.html")
+        inline_script = re.findall(r"<script>(.*?)</script>", inbound, re.S)[-1]
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content('<div id="gyjInboundHistoryList"></div>')
+                page.evaluate(
+                    """
+                    window.confirm = () => true;
+                    window.requestedHistoryDeletes = [];
+                    window.fetch = async (url, options = {}) => {
+                        if (options.method === 'DELETE') {
+                            window.requestedHistoryDeletes.push(String(url));
+                        }
+                        return {
+                            ok: true,
+                            json: async () => ({success: true, records: [], can_delete: true})
+                        };
+                    };
+                    """
+                )
+                page.add_script_tag(content=inline_script)
+                record = {
+                    "order_no": "CGRK00001849380",
+                    "packing_slip_no": "SH202608140032",
+                    "actor": "admin",
+                    "saved_at": "2026-09-09 17:47:58",
+                    "products": [],
+                }
+
+                page.evaluate("record => renderGYJInboundHistory([record], false)", record)
+                self.assertEqual(page.locator(".gyj-inbound-history-delete").count(), 0)
+
+                page.evaluate("record => renderGYJInboundHistory([record], true)", record)
+                self.assertEqual(page.locator(".gyj-inbound-history-delete").count(), 1)
+                page.locator(".gyj-inbound-history-delete").click()
+                page.wait_for_function("window.requestedHistoryDeletes.length === 1")
+                self.assertEqual(
+                    page.evaluate("window.requestedHistoryDeletes[0]"),
+                    "/api/inbound/gyj/history/CGRK00001849380",
+                )
+            finally:
+                browser.close()
+
     def test_settings_gyj_login_uses_backend_credentials_contract(self):
         inbound = self.source("accounts.html")
         for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):

@@ -78,7 +78,9 @@
         .gyj-card-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
         .gyj-inbound-history[hidden] { display:none !important; }
         .gyj-inbound-history-list { display:grid; gap:10px; margin-top:12px; }
+        .gyj-inbound-history-entry { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:start; }
         .gyj-inbound-history-row { overflow:hidden; border:1px solid rgba(116,191,232,.28); border-radius:8px; background:rgba(7,20,38,.92); }
+        .gyj-inbound-history-delete { min-height:36px; padding:7px 10px; border:1px solid rgba(255,105,132,.45); border-radius:8px; background:rgba(74,20,42,.46); color:#ff9aae; font-weight:800; cursor:pointer; }
         .gyj-inbound-history-row summary { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px 16px; align-items:center; padding:12px; color:#e6f6ff; cursor:pointer; }
         .gyj-inbound-history-order { color:#6ee7ff; font-weight:800; overflow-wrap:anywhere; }
         .gyj-inbound-history-meta { color:#9bb4cb; font-size:11px; text-align:right; }
@@ -547,12 +549,12 @@ let gyjPollTimer = null;
 let gyjLoggedIn = false;
 let gyjJobRunning = false;
 
-function renderGYJInboundHistory(records) {
+function renderGYJInboundHistory(records, canDelete=false) {
     const list = document.getElementById('gyjInboundHistoryList');
     const rows = Array.isArray(records) ? records : [];
     list.innerHTML = rows.length ? rows.map((record, recordIndex) => {
         const products = Array.isArray(record.products) ? record.products : [];
-        return `<details class="gyj-inbound-history-row">
+        return `<div class="gyj-inbound-history-entry"><details class="gyj-inbound-history-row">
             <summary>
                 <span class="gyj-inbound-history-order">入库单 ${escapeHtml(record.order_no || '未返回单号')}</span>
                 <span class="gyj-inbound-history-meta">${escapeHtml(record.saved_at || '')} · 操作账号 ${escapeHtml(record.actor || '未知')}</span>
@@ -565,8 +567,20 @@ function renderGYJInboundHistory(records) {
                     return `<section class="gyj-saved-product"><div class="gyj-saved-product-head"><div class="gyj-saved-product-title">${escapeHtml(product.product_code)} ${escapeHtml(product.description || '无物料描述')}${serials.length ? `<button class="gyj-saved-serial-toggle" type="button" onclick="document.getElementById('${serialId}').hidden=!document.getElementById('${serialId}').hidden">条码 ${escapeHtml(serials.length)} 条</button>` : ''}</div><span class="gyj-saved-product-quantity">${escapeHtml(product.quantity)} 件</span></div>${serials.length ? `<div class="inbound-serials" id="${serialId}" hidden>${serials.map(serial => `<code>${escapeHtml(serial)}</code>`).join('')}</div>` : ''}</section>`;
                 }).join('') : '<span class="muted">没有商品明细</span>'}</div>
             </div>
-        </details>`;
+        </details>${canDelete ? `<button class="gyj-inbound-history-delete" type="button" data-order-no="${escapeHtml(record.order_no || '')}" onclick="deleteGYJInboundHistory(this.dataset.orderNo)">删除</button>` : ''}</div>`;
     }).join('') : '<div class="inbound-history-empty">暂无历史入库。</div>';
+}
+
+async function deleteGYJInboundHistory(orderNo) {
+    if (!orderNo || !confirm(`确定删除历史入库：${orderNo}？`)) return;
+    try {
+        const response = await fetch('/api/inbound/gyj/history/' + encodeURIComponent(orderNo), {method: 'DELETE'});
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || '删除失败');
+        await loadGYJInboundHistory();
+    } catch (error) {
+        alert(error.message || '删除失败');
+    }
 }
 
 async function loadGYJInboundHistory() {
@@ -575,7 +589,7 @@ async function loadGYJInboundHistory() {
         const response = await fetch('/api/inbound/gyj/history');
         const data = await response.json();
         if (!response.ok || !data.success) throw new Error(data.error || '读取失败');
-        renderGYJInboundHistory(data.records);
+        renderGYJInboundHistory(data.records, Boolean(data.can_delete));
     } catch (_error) {
         list.textContent = '历史入库读取失败，请稍后重试。';
     }

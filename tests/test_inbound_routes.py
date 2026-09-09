@@ -545,6 +545,51 @@ class InboundRouteTest(unittest.TestCase):
             "历史记录保存失败" in entry["message"] for entry in saved_job["logs"]
         ))
 
+    def test_admin_can_delete_one_gyj_inbound_history_record(self):
+        app_module.upsert_gyj_inbound_history(
+            {"order_no": "CGRK00001849380", "products": []},
+            PACKING_SLIP_NO,
+            "admin",
+            "2026-09-09 17:47:58",
+        )
+        client = self._login("admin", "88293529")
+
+        self.assertTrue(client.get("/api/inbound/gyj/history").get_json()["can_delete"])
+
+        response = client.delete("/api/inbound/gyj/history/CGRK00001849380")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(client.get("/api/inbound/gyj/history").get_json()["records"], [])
+
+    def test_non_admin_cannot_delete_gyj_inbound_history_record(self):
+        app_module.upsert_gyj_inbound_history(
+            {"order_no": "CGRK00001849380", "products": []},
+            PACKING_SLIP_NO,
+            "admin",
+            "2026-09-09 17:47:58",
+        )
+        client = self._login("inbound-other", "inbound-pass")
+
+        self.assertFalse(client.get("/api/inbound/gyj/history").get_json()["can_delete"])
+
+        response = client.delete("/api/inbound/gyj/history/CGRK00001849380")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.get_json()["success"])
+        self.assertEqual(
+            client.get("/api/inbound/gyj/history").get_json()["records"][0]["order_no"],
+            "CGRK00001849380",
+        )
+
+    def test_admin_delete_missing_gyj_inbound_history_returns_not_found(self):
+        client = self._login("admin", "88293529")
+
+        response = client.delete("/api/inbound/gyj/history/CGRK-NOT-FOUND")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(response.get_json()["success"])
+
     def test_gyj_status_exposes_each_completed_line_before_save_finishes(self):
         class StreamingGYJWorker(FakeGYJWorker):
             def __init__(self):
