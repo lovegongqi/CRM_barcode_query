@@ -51,6 +51,7 @@ let inventoryCameraCapabilities = null;
 let cartonPreview = [];
 let cartonPreviewQuantity = 0;
 let cartonSubmissionPending = false;
+let cartonQuantityEditing = false;
 let expandedSerialGroups = new Set();
 
 function inventoryElement(id) {
@@ -1505,6 +1506,7 @@ function renderCartonEntry() {
     const preset = currentSerialData && currentSerialData.carton_preset;
     const quantity = inventoryOptionalElement('inventoryCartonQuantity');
     if (quantity && !quantity.value) quantity.value = preset ? preset.carton_quantity : '';
+    renderCartonQuantityEditor();
     const enabled = serialWorkspaceEditable && hasSuccessfulSerialCache();
     ['inventoryCartonQuantity', 'inventoryCartonPresetSave', 'inventoryCartonStartSerial',
         'inventoryCartonCameraStart', 'inventoryCartonGenerate', 'inventoryCartonExtraSerial',
@@ -1513,6 +1515,37 @@ function renderCartonEntry() {
         if (element) element.disabled = !enabled || cartonSubmissionPending;
     });
     renderCartonPreview();
+}
+
+function renderCartonQuantityEditor() {
+    const quantity = inventoryOptionalElement('inventoryCartonQuantity');
+    const editor = inventoryOptionalElement('inventoryCartonQuantityEditor');
+    const toggle = inventoryOptionalElement('inventoryCartonQuantityToggle');
+    if (!quantity || !editor || !toggle) return;
+    const value = Number(quantity.value);
+    const hasQuantity = Number.isInteger(value) && value >= 1;
+    editor.hidden = hasQuantity && !cartonQuantityEditing;
+    toggle.hidden = !hasQuantity;
+    toggle.textContent = cartonQuantityEditing ? '收起' : `${value}/箱`;
+}
+
+function toggleCartonQuantityEditor() {
+    const quantity = inventoryOptionalElement('inventoryCartonQuantity');
+    const value = Number(quantity && quantity.value);
+    if (!Number.isInteger(value) || value < 1) return;
+    cartonQuantityEditing = !cartonQuantityEditing;
+    const entry = inventoryOptionalElement('inventoryCartonEntry');
+    if (cartonQuantityEditing && entry) entry.open = true;
+    renderCartonQuantityEditor();
+    if (cartonQuantityEditing) {
+        quantity.focus();
+        quantity.select();
+    }
+}
+
+function handleCartonQuantityInput() {
+    cartonQuantityEditing = true;
+    renderCartonQuantityEditor();
 }
 
 function generateCartonPreview() {
@@ -1541,6 +1574,8 @@ async function saveCartonPreset() {
         );
         acceptInventoryMutationVersion(data);
         if (currentSerialData) currentSerialData.carton_preset = data.preset;
+        cartonQuantityEditing = false;
+        renderCartonEntry();
         setCartonMessage(`箱规已长期保存：每箱 ${quantity} 条。`, 'success');
     } catch (error) {
         setCartonMessage(error.message || '箱规保存失败，请重试。', 'error');
@@ -1880,6 +1915,7 @@ async function openSerialItem(barcode) {
     currentSerialData = null;
     cartonPreview = [];
     cartonPreviewQuantity = 0;
+    cartonQuantityEditing = false;
     resetSerialGroupState();
     setCartonMessage('');
     serialWorkspaceOpen = true;
@@ -2941,6 +2977,8 @@ function initializeInventoryPage() {
         if (button) button.addEventListener('click', () => applyInventoryCameraZoom(level));
     });
     const cartonBindings = [
+        ['inventoryCartonQuantityToggle', 'click', toggleCartonQuantityEditor],
+        ['inventoryCartonQuantity', 'input', handleCartonQuantityInput],
         ['inventoryCartonPresetSave', 'click', saveCartonPreset],
         ['inventoryCartonCameraStart', 'click', () => startInventoryCamera('carton-start')],
         ['inventoryCartonGenerate', 'click', generateCartonPreview],

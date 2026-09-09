@@ -648,6 +648,7 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-carton-entry {
+    position: relative;
     margin: 12px 0;
     padding: 12px;
     border: 1px solid var(--aurora-line);
@@ -656,10 +657,28 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-carton-entry > summary {
+    padding-right: 72px;
     color: var(--aurora-cyan);
     cursor: pointer;
     font-weight: 800;
 }
+
+.inventory-carton-quantity-toggle {
+    position: absolute;
+    top: 7px;
+    right: 8px;
+    z-index: 1;
+    min-height: 30px;
+    padding: 4px 9px;
+    border: 1px solid rgba(103, 232, 249, .42);
+    border-radius: 999px;
+    background: rgba(8, 47, 73, .58);
+    color: var(--aurora-cyan);
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.inventory-carton-quantity-toggle[hidden] { display: none; }
 
 .inventory-carton-fields,
 .inventory-carton-actions,

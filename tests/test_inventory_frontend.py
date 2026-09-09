@@ -582,6 +582,69 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_saved_carton_quantity_collapses_to_editable_corner_badge(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor(value = '') {
+                    this.value = value;
+                    this.hidden = false;
+                    this.disabled = false;
+                    this.textContent = '';
+                    this.focused = 0;
+                    this.selected = 0;
+                }
+                focus() { this.focused += 1; }
+                select() { this.selected += 1; }
+            }
+            const elements = {
+                inventoryCartonQuantity: new FakeNode(),
+                inventoryCartonQuantityEditor: new FakeNode(),
+                inventoryCartonQuantityToggle: new FakeNode(),
+            };
+            [
+                'inventoryCartonPresetSave', 'inventoryCartonStartSerial',
+                'inventoryCartonCameraStart', 'inventoryCartonGenerate',
+                'inventoryCartonExtraSerial', 'inventoryCartonAddSerial',
+            ].forEach(id => { elements[id] = new FakeNode(); });
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) { return elements[id] || null; },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`
+                currentSerialData = {
+                    item: {serial_synced_at: 'now'},
+                    carton_preset: {carton_quantity: 20},
+                };
+                serialWorkspaceEditable = true;
+                cartonQuantityEditing = false;
+                renderCartonPreview = () => {};
+                renderCartonEntry();
+            `, context);
+            assert.equal(elements.inventoryCartonQuantity.value, 20);
+            assert.equal(elements.inventoryCartonQuantityEditor.hidden, true);
+            assert.equal(elements.inventoryCartonQuantityToggle.hidden, false);
+            assert.equal(elements.inventoryCartonQuantityToggle.textContent, '20/箱');
+
+            vm.runInContext('toggleCartonQuantityEditor()', context);
+            assert.equal(elements.inventoryCartonQuantityEditor.hidden, false);
+            assert.equal(elements.inventoryCartonQuantityToggle.textContent, '收起');
+            assert.equal(elements.inventoryCartonQuantity.focused, 1);
+            assert.equal(elements.inventoryCartonQuantity.selected, 1);
+
+            elements.inventoryCartonQuantity.value = '24';
+            vm.runInContext('toggleCartonQuantityEditor()', context);
+            assert.equal(elements.inventoryCartonQuantityEditor.hidden, true);
+            assert.equal(elements.inventoryCartonQuantityToggle.textContent, '24/箱');
+            """
+        )
+
     def test_carton_preview_submits_edited_serials_once(self):
         self.run_node(
             r"""

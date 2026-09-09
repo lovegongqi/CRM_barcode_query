@@ -1157,6 +1157,7 @@ class FrontendContractTest(unittest.TestCase):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         for element_id in (
             "inventoryCartonQuantity", "inventoryCartonPresetSave",
+            "inventoryCartonQuantityEditor", "inventoryCartonQuantityToggle",
             "inventoryCartonStartSerial", "inventoryCartonCameraStart",
             "inventoryCartonGenerate", "inventoryCartonPreview",
             "inventoryCartonAddSerial", "inventoryCartonSave",

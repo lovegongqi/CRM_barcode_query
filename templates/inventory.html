@@ -201,9 +201,10 @@
             </div>
         </div>
         <p id="inventoryCameraMessage" class="inventory-camera-message" role="status" aria-live="polite"></p>
-        <details class="inventory-carton-entry">
+        <details class="inventory-carton-entry" id="inventoryCartonEntry">
             <summary>整箱快捷录入</summary>
-            <div class="inventory-carton-fields">
+            <button class="inventory-carton-quantity-toggle" id="inventoryCartonQuantityToggle" type="button" hidden></button>
+            <div class="inventory-carton-fields" id="inventoryCartonQuantityEditor">
                 <label class="inventory-count-field" for="inventoryCartonQuantity">
                     <span>每箱数量</span>
                     <input id="inventoryCartonQuantity" type="number" inputmode="numeric" min="1" max="999" step="1" autocomplete="off">
