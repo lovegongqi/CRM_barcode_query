@@ -522,12 +522,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             vm.runInContext(`inventoryTask = {items: ${JSON.stringify(items)}}`, context);
             vm.runInContext("inventoryExpandedBarcodes.add('A'); renderInventoryItems(inventoryTask.items)", context);
             assert(root.children[0].className.includes('is-expanded'));
-            assert.equal(root.children[0].children[0].children.at(-1).attributes['aria-expanded'], 'true');
+            const firstTopActions = root.children[0].children[0].children[1];
+            assert.equal(firstTopActions.children.at(-1).attributes['aria-expanded'], 'true');
 
             vm.runInContext('renderInventoryItems(inventoryTask.items)', context);
             assert(root.children[0].className.includes('is-expanded'));
-            const serialProduct = root.children[1].children[0].children[0];
-            const cachedBadge = serialProduct.children.find(
+            const serialTopActions = root.children[1].children[0].children[1];
+            const cachedBadge = serialTopActions.children.find(
                 node => node.textContent === '序列号已缓存 1277'
             );
             assert(cachedBadge);
@@ -538,8 +539,8 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 inventoryTask.items[1].serial_syncing = true;
                 renderInventoryItems(inventoryTask.items);
             `, context);
-            const loadingProduct = root.children[1].children[0].children[0];
-            assert(loadingProduct.children.some(node => node.textContent === '序列号读取中'));
+            const loadingTopActions = root.children[1].children[0].children[1];
+            assert(loadingTopActions.children.some(node => node.textContent === '序列号读取中'));
 
             filter.value = 'variance';
             vm.runInContext('renderInventoryItems(inventoryTask.items)', context);

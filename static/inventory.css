@@ -223,6 +223,31 @@ article.inventory-item { cursor: default; }
     justify-content: space-between;
 }
 
+.inventory-item-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+}
+
+.inventory-item-product {
+    min-width: 0;
+    flex-wrap: wrap;
+}
+
+.inventory-item-top-actions {
+    display: grid;
+    grid-template-columns: auto auto;
+    align-items: center;
+    justify-content: end;
+    gap: 6px;
+    margin-left: auto;
+}
+
+.inventory-item-top-actions .inventory-serial-cache-badge {
+    grid-column: 1 / -1;
+    justify-self: end;
+}
+
 .inventory-item-barcode {
     color: var(--aurora-cyan);
     font: 750 14px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1356,8 +1381,8 @@ article.inventory-item { cursor: default; }
     .inventory-item-foot { align-items: flex-start; flex-wrap: wrap; }
     .inventory-item-top {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto auto;
-        align-items: center;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: start;
         gap: 6px;
     }
     .inventory-item-product { gap: 6px; }

@@ -143,6 +143,7 @@
         <div class="inbound-workspace-tabs" role="tablist" aria-label="入库工作区">
             <button class="inbound-workspace-tab active" id="crmPackingTab" role="tab" aria-selected="true" onclick="selectInboundWorkspace('crm')">CRM装箱单</button>
             <button class="inbound-workspace-tab" id="gyjPurchaseTab" role="tab" aria-selected="false" onclick="selectInboundWorkspace('gyj')">GYJ采购入库</button>
+            <button class="inbound-workspace-tab" id="gyjInboundHistoryTab" role="tab" aria-selected="false" onclick="selectInboundWorkspace('history')">历史入库</button>
         </div>
         <div class="aurora-account-session">
             <span class="aurora-account-name">{{ account.username if account else '未登录' }}</span>
@@ -203,7 +204,6 @@
                     <div class="muted">使用当前账号最近一次成功读取的 CRM 装箱单。默认供应商：昆山怡口净水系统有限公司；结算账户：江西天麓；仓库：沈桥仓。</div>
                 </div>
                 <div class="gyj-card-actions">
-                    <button class="btn btn-secondary" type="button" id="gyjInboundHistoryToggle" onclick="toggleGYJInboundHistory()">历史入库</button>
                     {% if account.is_admin %}
                     <a class="btn btn-secondary" id="gyjLoginBtn" href="/accounts#gyjChannelCard">GYJ 已登录 0/5</a>
                     {% else %}
@@ -224,10 +224,6 @@
             <div class="gyj-selection" id="gyjSelection">请先读取或选择一张 CRM 装箱单。</div>
             <div style="margin-top:12px;"><button class="btn btn-primary" id="gyjStartBtn" onclick="startGYJPurchaseInbound()" disabled>创建并保存</button></div>
         </section>
-        <section class="card gyj-inbound-history" id="gyjInboundHistory" hidden>
-            <h2>历史入库</h2>
-            <div class="gyj-inbound-history-list" id="gyjInboundHistoryList" aria-live="polite">正在读取…</div>
-        </section>
         <div class="inbound-results">
             <section class="card inbound-panel">
                 <h2>GYJ 实时日志</h2>
@@ -238,6 +234,13 @@
                 <div class="inbound-box" id="gyjResult">登录 GYJ 后可创建采购入库单。</div>
             </section>
         </div>
+    </div>
+
+    <div class="inbound-workspace" id="gyjInboundHistoryWorkspace" hidden>
+        <section class="card gyj-inbound-history" id="gyjInboundHistory">
+            <h2>历史入库</h2>
+            <div class="gyj-inbound-history-list" id="gyjInboundHistoryList" aria-live="polite">正在读取…</div>
+        </section>
     </div>
 </div>
 
@@ -578,14 +581,6 @@ async function loadGYJInboundHistory() {
     }
 }
 
-function toggleGYJInboundHistory() {
-    const panel = document.getElementById('gyjInboundHistory');
-    const button = document.getElementById('gyjInboundHistoryToggle');
-    panel.hidden = !panel.hidden;
-    button.textContent = panel.hidden ? '历史入库' : '收起历史';
-    if (!panel.hidden) loadGYJInboundHistory();
-}
-
 function renderGYJSelection(result) {
     const items = result && Array.isArray(result.items) ? result.items : [];
     const packingSlipNo = String((result || {}).packing_slip_no || selectedInboundHistoryNo || '');
@@ -659,20 +654,27 @@ function updateGYJStartButton() {
 }
 
 function selectInboundWorkspace(workspace) {
+    const isCRM = workspace === 'crm';
     const isGYJ = workspace === 'gyj';
-    document.getElementById('crmPackingWorkspace').hidden = isGYJ;
+    const isHistory = workspace === 'history';
+    document.getElementById('crmPackingWorkspace').hidden = !isCRM;
     document.getElementById('gyjPurchaseWorkspace').hidden = !isGYJ;
+    document.getElementById('gyjInboundHistoryWorkspace').hidden = !isHistory;
     const crmTab = document.getElementById('crmPackingTab');
     const gyjTab = document.getElementById('gyjPurchaseTab');
-    crmTab.classList.toggle('active', !isGYJ);
+    const historyTab = document.getElementById('gyjInboundHistoryTab');
+    crmTab.classList.toggle('active', isCRM);
     gyjTab.classList.toggle('active', isGYJ);
-    crmTab.setAttribute('aria-selected', String(!isGYJ));
+    historyTab.classList.toggle('active', isHistory);
+    crmTab.setAttribute('aria-selected', String(isCRM));
     gyjTab.setAttribute('aria-selected', String(isGYJ));
-    sessionStorage.setItem('inbound_workspace', isGYJ ? 'gyj' : 'crm');
+    historyTab.setAttribute('aria-selected', String(isHistory));
+    sessionStorage.setItem('inbound_workspace', isHistory ? 'history' : (isGYJ ? 'gyj' : 'crm'));
     if (isGYJ) {
         checkGYJLoginStatus();
         restoreGYJInboundJob();
     }
+    if (isHistory) loadGYJInboundHistory();
 }
 
 function renderGYJInboundStatus(data) {
@@ -699,7 +701,7 @@ function renderGYJInboundStatus(data) {
         clearInterval(gyjPollTimer);
         gyjPollTimer = null;
     }
-    if (data.done && data.success && !document.getElementById('gyjInboundHistory').hidden) {
+    if (data.done && data.success && !document.getElementById('gyjInboundHistoryWorkspace').hidden) {
         loadGYJInboundHistory();
     }
 }
@@ -864,7 +866,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const packingSlipNo = sessionStorage.getItem('inbound_history_packing_slip_no') || '';
         if (packingSlipNo) selectInboundHistory(packingSlipNo, false);
     });
-    if (sessionStorage.getItem('inbound_workspace') === 'gyj') selectInboundWorkspace('gyj');
+    const workspace = sessionStorage.getItem('inbound_workspace');
+    if (workspace === 'gyj' || workspace === 'history') selectInboundWorkspace(workspace);
 });
 </script>
 </body>

@@ -675,11 +675,10 @@ class FrontendContractTest(unittest.TestCase):
     def test_gyj_inbound_history_uses_order_number_and_expandable_details(self):
         inbound = self.source("inbound.html")
         for element_id in (
-            "gyjInboundHistoryToggle", "gyjInboundHistory",
-            "gyjInboundHistoryList",
+            "gyjInboundHistoryTab", "gyjInboundHistoryWorkspace",
+            "gyjInboundHistory", "gyjInboundHistoryList",
         ):
             self.assertIn(f'id="{element_id}"', inbound)
-        self.assertIn("function toggleGYJInboundHistory", inbound)
         self.assertIn("function loadGYJInboundHistory", inbound)
         self.assertIn("function renderGYJInboundHistory", inbound)
         self.assertIn("/api/inbound/gyj/history", inbound)
@@ -687,6 +686,53 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("record.packing_slip_no", inbound)
         self.assertIn("record.actor", inbound)
         self.assertIn("<details", inbound)
+
+    def test_gyj_inbound_history_is_a_dedicated_top_level_workspace(self):
+        inbound = self.source("inbound.html")
+        inline_script = re.findall(r"<script>(.*?)</script>", inbound, re.S)[-1]
+        markup = re.sub(r"<script\b.*?</script>", "", inbound, flags=re.S)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(markup)
+                page.evaluate(
+                    """
+                    Object.defineProperty(window, 'sessionStorage', {value: {
+                        getItem: () => null,
+                        setItem: () => {},
+                        removeItem: () => {}
+                    }});
+                    window.requestedUrls = [];
+                    window.fetch = async url => {
+                        window.requestedUrls.push(String(url));
+                        return {ok: true, json: async () => ({success: true, records: []})};
+                    };
+                    """
+                )
+                page.add_script_tag(content=inline_script)
+
+                self.assertEqual(
+                    page.locator("#gyjInboundHistoryTab").evaluate(
+                        "element => element.parentElement.className"
+                    ),
+                    "inbound-workspace-tabs",
+                )
+                page.evaluate("selectInboundWorkspace('history')")
+                page.wait_for_function(
+                    "window.requestedUrls.includes('/api/inbound/gyj/history')"
+                )
+
+                self.assertTrue(page.locator("#crmPackingWorkspace").evaluate("el => el.hidden"))
+                self.assertTrue(page.locator("#gyjPurchaseWorkspace").evaluate("el => el.hidden"))
+                self.assertFalse(page.locator("#gyjInboundHistoryWorkspace").evaluate("el => el.hidden"))
+                self.assertEqual(
+                    page.locator("#gyjInboundHistoryTab").get_attribute("aria-selected"),
+                    "true",
+                )
+            finally:
+                browser.close()
 
     def test_settings_gyj_login_uses_backend_credentials_contract(self):
         inbound = self.source("accounts.html")
@@ -849,6 +895,56 @@ class FrontendContractTest(unittest.TestCase):
                 box = page.locator(".inventory-camera-zoom-controls button").bounding_box()
                 self.assertGreaterEqual(box["width"], 44)
                 self.assertGreaterEqual(box["height"], 44)
+            finally:
+                browser.close()
+
+    def test_inventory_card_keeps_cache_and_state_badges_in_right_control_stack(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{css}</style>
+                    <select id="inventoryFilters"><option value="all">全部</option></select>
+                    <input id="inventorySearch" value="">
+                    <div id="inventoryItems"></div>
+                    """
+                )
+                page.add_script_tag(content=script)
+                page.evaluate(
+                    """
+                    renderInventoryItems([{
+                        barcode: '926019505',
+                        name: 'CTO滤芯测试商品',
+                        has_serial: true,
+                        serial_synced_at: '2026-09-09T17:00:00',
+                        serial_expected_count: 1277,
+                        state: 'serial_pending',
+                        book_qty: 1277,
+                        actual_qty: 0,
+                        diff_qty: -1277
+                    }]);
+                    """
+                )
+
+                card = page.locator(".inventory-item").bounding_box()
+                controls = page.locator(".inventory-item-top-actions").bounding_box()
+                self.assertEqual(
+                    page.locator(".inventory-item-top-actions .inventory-serial-cache-badge").inner_text(),
+                    "序列号已缓存 1277",
+                )
+                self.assertEqual(
+                    page.locator(".inventory-item-top-actions .inventory-state-badge").inner_text(),
+                    "待序列号",
+                )
+                self.assertLessEqual(
+                    abs((controls["x"] + controls["width"]) - (card["x"] + card["width"] - 10)),
+                    2,
+                )
             finally:
                 browser.close()
 

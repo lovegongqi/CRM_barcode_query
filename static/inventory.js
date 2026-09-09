@@ -428,11 +428,12 @@ function renderInventoryItems(items) {
             item.data_error ? '序列号资料未知' : (item.has_serial ? '序列号商品' : '无序列号'),
         );
         product.append(serialBadge);
+        const topActions = inventoryNode('div', 'inventory-item-top-actions');
         if (item.has_serial) {
             const cacheReady = Boolean(item.serial_synced_at);
             const cacheLoading = Boolean(item.serial_syncing);
             const cacheCount = Number(item.serial_expected_count || 0);
-            product.append(inventoryNode(
+            topActions.append(inventoryNode(
                 'span',
                 `inventory-serial-cache-badge${cacheLoading ? ' is-loading' : (cacheReady ? ' is-ready' : '')}`,
                 cacheLoading
@@ -448,7 +449,8 @@ function renderInventoryItems(items) {
         toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
         toggle.setAttribute('aria-label', `${expanded ? '收起' : '展开'} ${inventoryText(item.name, barcode)} 详情`);
         toggle.addEventListener('click', () => toggleInventoryItemDetails(barcode));
-        top.append(product, stateBadge, toggle);
+        topActions.append(stateBadge, toggle);
+        top.append(product, topActions);
 
         const metrics = inventoryNode('div', 'inventory-item-metrics');
         const direction = decimalDirection(item.diff_qty);
