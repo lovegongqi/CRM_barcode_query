@@ -1170,6 +1170,13 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("function toggleSerialGroup(key)", script)
         self.assertIn("inventoryCameraMode === 'carton-start'", script)
 
+    def test_inventory_saved_carton_quantity_editor_can_actually_hide(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertRegex(
+            css,
+            r"\.inventory-carton-fields\[hidden\]\s*\{\s*display:\s*none",
+        )
+
     def test_inventory_dialog_async_work_cannot_restart_after_close(self):
         script = (STATIC / "inventory.js").read_text(encoding="utf-8")
         self.assertNotIn("const requestId = ++countDialogRequestId;", script)

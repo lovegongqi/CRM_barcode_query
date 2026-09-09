@@ -690,6 +690,8 @@ article.inventory-item { cursor: default; }
     margin-top: 10px;
 }
 
+.inventory-carton-fields[hidden] { display: none; }
+
 .inventory-carton-fields .inventory-count-field,
 .inventory-carton-add input,
 .inventory-carton-group-correction input { flex: 1; }
