@@ -244,6 +244,7 @@ class GYJPlaywrightPage:
         self._entered_lines = []
         self._product_picker = None
         self._log = log
+        self._order_no = ""
         # Set of unique product_codes confirmed to exist by the 商品信息 search
         # during the pre-check stage. _add_product_line consults this so the
         # inline defense-in-depth retry does NOT try to recreate products we
@@ -413,6 +414,20 @@ class GYJPlaywrightPage:
             raise GYJInboundError("未找到 GYJ 采购入库的新增按钮")
         new_button.click()
         self.form = self._visible_purchase_form()
+        self._remember_order_number()
+
+    def _remember_order_number(self):
+        if not self.form:
+            return self._order_no
+        try:
+            field = self.form.locator("input#number")
+            if field.count() == 1:
+                order_no = str(field.input_value() or "").strip()
+                if order_no:
+                    self._order_no = order_no
+        except Exception:
+            pass
+        return self._order_no
 
     def select_header(self, label, value):
         if not self.form:
@@ -941,6 +956,7 @@ class GYJPlaywrightPage:
         self.form = None
         self._headers = {}
         self._entered_lines = []
+        self._order_no = ""
 
     def _rollback_filling(self):
         """Best-effort cleanup after a filling failure.
@@ -1106,6 +1122,7 @@ class GYJPlaywrightPage:
     def click_plain_save(self):
         if not self.form:
             raise GYJInboundError("GYJ 入库表单尚未打开")
+        order_no = self._remember_order_number()
         save = self.form.get_by_role("button", name="保存（Ctrl+S）", exact=True)
         if save.count() != 1:
             try:
@@ -1139,14 +1156,14 @@ class GYJPlaywrightPage:
                 page_text = self.page.locator("body").inner_text()
                 confirmation = f"{notice_text}\n{page_text}"
                 if "保存成功" in confirmation or "操作成功" in confirmation:
-                    return ""
+                    return order_no
                 if any(
                     response.startswith("200 addDepotHeadAndDetail ")
                     and ('"code":200' in response or '"code": 200' in response)
                     and ("操作成功" in response or "保存成功" in response)
                     for response in responses
                 ):
-                    return ""
+                    return order_no
                 self.page.wait_for_timeout(100)
         finally:
             if can_capture and callable(getattr(self.page, "remove_listener", None)):

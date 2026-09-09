@@ -290,6 +290,28 @@ class _VisibleForm:
         return 1
 
 
+class _OrderNumberInput:
+    def __init__(self, value):
+        self.value = value
+
+    def count(self):
+        return 1
+
+    def input_value(self):
+        return self.value
+
+
+class _VisibleOrderNumberForm(_VisibleForm):
+    def __init__(self, order_no):
+        super().__init__()
+        self.order_number_input = _OrderNumberInput(order_no)
+
+    def locator(self, selector):
+        if selector == "input#number":
+            return self.order_number_input
+        raise AssertionError(f"unexpected selector: {selector}")
+
+
 class _PurchaseInboundListPage:
     def __init__(self):
         self.new_button = _DelayedNewButton()
@@ -341,6 +363,8 @@ class _ActualGYJSaveForm:
         return _MissingButton()
 
     def locator(self, selector):
+        if selector == "input#number":
+            return _OrderNumberInput("CGRK00001849380")
         if selector == "button":
             return _SaveButtonCollection(["取 消", "保存并审核", "保存"])
         raise AssertionError(f"unexpected selector: {selector}")
@@ -2122,6 +2146,15 @@ class GYJSessionLoginDetectionTest(unittest.TestCase):
         self.assertEqual(message, "GYJ 已登录")
 
 class GYJPurchaseInboundPageTest(unittest.TestCase):
+    def test_remembers_purchase_inbound_number_when_new_form_opens(self):
+        page = _PurchaseInboundListPage()
+        page.modal = _VisibleOrderNumberForm("CGRK00001849380")
+
+        adapter = GYJPlaywrightPage(page)
+        adapter.open_new_form()
+
+        self.assertEqual(adapter._order_no, "CGRK00001849380")
+
     def test_waits_for_purchase_inbound_new_button_before_clicking(self):
         page = _PurchaseInboundListPage()
 
@@ -2144,9 +2177,10 @@ class GYJPurchaseInboundPageTest(unittest.TestCase):
         adapter = GYJPlaywrightPage(_ActualGYJSavePage())
         adapter.form = form
 
-        adapter.click_plain_save()
+        order_no = adapter.click_plain_save()
 
         self.assertTrue(form.save_button.clicked)
+        self.assertEqual(order_no, "CGRK00001849380")
 
     def test_accepts_the_asynchronous_gyj_save_notification(self):
         form = _ActualGYJSaveForm()
