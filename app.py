@@ -4692,11 +4692,12 @@ def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
 
 
 def _empty_inbound_gyj_job(
-    owner, packing_slip_no, source_job_id, lines, packing_slip_type=""
+    owner, packing_slip_no, source_job_id, lines, packing_slip_type="", actor=""
 ):
     return {
         'job_id': uuid.uuid4().hex,
         'owner': str(owner or ''),
+        'actor': str(actor or ''),
         'packing_slip_no': str(packing_slip_no or ''),
         'packing_slip_type': str(packing_slip_type or ''),
         'source_job_id': str(source_job_id or ''),
@@ -5804,6 +5805,20 @@ def _run_inbound_gyj_job(job_id, worker, lines, lease=None):
         ]
         saved_result = dict(result) if isinstance(result, dict) else {}
         saved_result['products'] = saved_products
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with inbound_gyj_job_lock:
+            active_job = inbound_gyj_jobs.get(job_id) or {}
+            actor = str(active_job.get('actor') or active_job.get('owner') or '')
+        try:
+            upsert_gyj_inbound_history(
+                saved_result, packing_slip_no, actor, finished_at
+            )
+        except Exception as history_error:
+            log(
+                'GYJ 已入库，但历史记录保存失败：'
+                + (_brief_batch_error(history_error, 300) or '未知错误'),
+                'warn',
+            )
         with inbound_gyj_job_lock:
             job = inbound_gyj_jobs.get(job_id)
             if job:
@@ -5814,7 +5829,7 @@ def _run_inbound_gyj_job(job_id, worker, lines, lease=None):
                     'success': True,
                     'error': '',
                     'result': saved_result,
-                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'finished_at': finished_at,
                 })
         log('GYJ 采购入库单已保存', 'success')
     except Exception as error:
@@ -8414,6 +8429,17 @@ def _inbound_history_connection():
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gyj_inbound_history (
+            order_no TEXT PRIMARY KEY,
+            packing_slip_no TEXT NOT NULL DEFAULT '',
+            actor TEXT NOT NULL DEFAULT '',
+            saved_at TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
     return connection
 
 
@@ -8532,6 +8558,88 @@ def clear_inbound_history():
         connection = _inbound_history_connection()
         try:
             connection.execute('DELETE FROM inbound_history')
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def _gyj_inbound_history_row_to_dict(row):
+    if not row:
+        return None
+    record = dict(row)
+    try:
+        result = json.loads(record.pop('result_json') or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result = {}
+    record['products'] = list(result.get('products') or [])
+    record['result'] = result
+    return record
+
+
+def upsert_gyj_inbound_history(result, packing_slip_no='', actor='', saved_at=''):
+    result = json.loads(json.dumps(
+        result if isinstance(result, dict) else {}, ensure_ascii=False
+    ))
+    order_no = str(result.get('order_no') or '').strip()
+    if not order_no:
+        raise ValueError('GYJ 入库单号不能为空')
+    packing_slip_no = str(
+        packing_slip_no or result.get('packing_slip_no') or ''
+    ).strip()
+    actor = str(actor or '').strip()
+    saved_at = str(saved_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO gyj_inbound_history (
+                    order_no, packing_slip_no, actor, saved_at, result_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(order_no) DO UPDATE SET
+                    packing_slip_no=excluded.packing_slip_no,
+                    actor=excluded.actor,
+                    saved_at=excluded.saved_at,
+                    result_json=excluded.result_json
+                """,
+                (
+                    order_no, packing_slip_no, actor, saved_at,
+                    json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return {
+        'order_no': order_no,
+        'packing_slip_no': packing_slip_no,
+        'actor': actor,
+        'saved_at': saved_at,
+        'products': list(result.get('products') or []),
+        'result': result,
+    }
+
+
+def load_gyj_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            rows = connection.execute(
+                'SELECT * FROM gyj_inbound_history '
+                'ORDER BY datetime(saved_at) DESC, rowid DESC'
+            ).fetchall()
+        finally:
+            connection.close()
+    return [
+        record for record in map(_gyj_inbound_history_row_to_dict, rows) if record
+    ]
+
+
+def clear_gyj_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute('DELETE FROM gyj_inbound_history')
             connection.commit()
         finally:
             connection.close()
@@ -10267,6 +10375,11 @@ def _current_inbound_owner():
     return str(account.get('id') or account.get('username') or '')
 
 
+def _current_inbound_actor():
+    account = current_account() or {}
+    return str(account.get('username') or account.get('display_name') or '').strip()
+
+
 def _inbound_status_payload(job, owner=''):
     if not job:
         return {
@@ -10429,6 +10542,11 @@ def api_inbound_history_record(packing_slip_no):
     if not record:
         return jsonify({'success': False, 'error': '装箱单历史不存在'}), 404
     return jsonify({'success': True, 'record': record})
+
+
+@app.route("/api/inbound/gyj/history", methods=["GET"])
+def api_inbound_gyj_history():
+    return jsonify({'success': True, 'records': load_gyj_inbound_history()})
 
 
 @app.route("/api/inbound/export", methods=["GET"])
@@ -10766,7 +10884,8 @@ def api_inbound_gyj_start():
             }), 409
         _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner)
         job = _empty_inbound_gyj_job(
-            owner, packing_slip_no, source_job_id, lines, packing_slip_type
+            owner, packing_slip_no, source_job_id, lines, packing_slip_type,
+            actor=_current_inbound_actor(),
         )
         job.update({
             'running': True,
@@ -10965,9 +11084,7 @@ def _inventory_owned_task(owner, task_id):
 
 
 def _inventory_sync_is_due(snapshot):
-    if snapshot.get("phase") == "sync_error":
-        return True
-    value = snapshot.get("last_sync_at")
+    value = snapshot.get("last_sync_attempt_at") or snapshot.get("last_sync_at")
     if not value:
         return True
     try:

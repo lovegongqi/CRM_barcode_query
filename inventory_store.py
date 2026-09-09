@@ -195,6 +195,7 @@ class InventoryStore:
                     started_at TEXT NOT NULL,
                     completed_at TEXT,
                     last_sync_at TEXT,
+                    last_sync_attempt_at TEXT,
                     gyj_status TEXT,
                     sync_resume_phase TEXT
                 );
@@ -421,6 +422,10 @@ class InventoryStore:
                 connection.execute(
                     "ALTER TABLE inventory_tasks ADD COLUMN sync_resume_phase TEXT"
                 )
+            if "last_sync_attempt_at" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE inventory_tasks ADD COLUMN last_sync_attempt_at TEXT"
+                )
             item_columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(inventory_items)")
             }
@@ -526,6 +531,14 @@ class InventoryStore:
         item = cls._item_dict(row)
         if item is None:
             return None
+        item["serial_expected_count"] = (
+            connection.execute(
+                "SELECT COUNT(*) FROM inventory_serial_expected "
+                "WHERE task_id = ? AND barcode = ? AND sync_status = 'active'",
+                (item["task_id"], item["barcode"]),
+            ).fetchone()[0]
+            if item.get("has_serial") and item.get("serial_synced_at") else 0
+        )
         entries = cls._count_entries(
             connection, item["task_id"], item["barcode"]
         )
@@ -1479,9 +1492,10 @@ class InventoryStore:
                 )
                 connection.execute(
                     """UPDATE inventory_tasks
-                       SET phase = 'sync_error', sync_resume_phase = ?, gyj_status = ?
+                       SET phase = ?, sync_resume_phase = NULL, gyj_status = ?,
+                           last_sync_attempt_at = ?
                        WHERE task_id = ?""",
-                    (resume_phase, str(error), task_id),
+                    (resume_phase or "counting", str(error), timestamp, task_id),
                 )
                 self._bump_version(connection, task_id)
                 self._audit(
@@ -1542,10 +1556,10 @@ class InventoryStore:
                 recovered_phase = task["sync_resume_phase"] or "counting"
             connection.execute(
                 """UPDATE inventory_tasks
-                   SET phase = ?, last_sync_at = ?, gyj_status = 'synced',
-                       sync_resume_phase = NULL
+                   SET phase = ?, last_sync_at = ?, last_sync_attempt_at = ?,
+                       gyj_status = 'synced', sync_resume_phase = NULL
                    WHERE task_id = ?""",
-                (recovered_phase, timestamp, task_id),
+                (recovered_phase, timestamp, timestamp, task_id),
             )
             self._bump_version(connection, task_id)
             self._audit(
@@ -2222,12 +2236,14 @@ class InventoryStore:
                 row["classification"] = "system_only"
                 if row["serial"] not in matched_serials:
                     system_only.append(row)
+            public_item = self._item_dict(item)
+            public_item["serial_expected_count"] = len(expected_rows)
             result = {
                 "task_id": task_id,
                 "barcode": barcode,
                 "phase": task["phase"],
                 "version": task["version"],
-                "item": self._item_dict(item),
+                "item": public_item,
                 "carton_preset": self._row_dict(connection.execute(
                     "SELECT * FROM inventory_carton_presets WHERE barcode = ?",
                     (barcode,),

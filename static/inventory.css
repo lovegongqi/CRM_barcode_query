@@ -237,6 +237,7 @@ article.inventory-item { cursor: default; }
 }
 
 .inventory-serial-badge,
+.inventory-serial-cache-badge,
 .inventory-state-badge {
     flex: 0 0 auto;
     padding: 4px 8px;
@@ -246,6 +247,37 @@ article.inventory-item { cursor: default; }
     background: rgba(95, 229, 255, .08);
     font-size: 11px;
     font-weight: 800;
+}
+
+.inventory-serial-cache-badge {
+    color: var(--aurora-muted);
+    border-color: var(--aurora-line);
+    background: rgba(142, 165, 183, .06);
+}
+
+.inventory-serial-cache-badge.is-ready {
+    color: var(--aurora-green);
+    border-color: rgba(68, 229, 166, .32);
+    background: rgba(68, 229, 166, .08);
+}
+
+.inventory-serial-input-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.inventory-scanner-mode {
+    min-height: 32px;
+    padding: 5px 10px;
+    font-size: 12px;
+}
+
+.inventory-scanner-mode[aria-pressed="true"] {
+    color: var(--aurora-green);
+    border-color: rgba(68, 229, 166, .4);
+    background: rgba(68, 229, 166, .1);
 }
 
 .inventory-serial-badge.is-off {

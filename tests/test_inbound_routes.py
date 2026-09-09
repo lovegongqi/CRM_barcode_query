@@ -271,6 +271,10 @@ class InboundRouteTest(unittest.TestCase):
 
     def setUp(self):
         self._original_accounts = app_module.load_accounts()
+        self._original_gyj_inbound_history = (
+            app_module.load_gyj_inbound_history()
+            if hasattr(app_module, "load_gyj_inbound_history") else []
+        )
         self._original_inbound_history = [
             record
             for record in (
@@ -337,6 +341,8 @@ class InboundRouteTest(unittest.TestCase):
             app_module.latest_background_query_job_by_owner.clear()
         if hasattr(app_module, "clear_inbound_history"):
             app_module.clear_inbound_history()
+        if hasattr(app_module, "clear_gyj_inbound_history"):
+            app_module.clear_gyj_inbound_history()
 
     def tearDown(self):
         if hasattr(app_module, "inbound_job_lock"):
@@ -359,6 +365,15 @@ class InboundRouteTest(unittest.TestCase):
             for record in self._original_inbound_history:
                 app_module.upsert_inbound_history(
                     record.get("result") or {}, record.get("read_at") or ""
+                )
+        if hasattr(app_module, "clear_gyj_inbound_history"):
+            app_module.clear_gyj_inbound_history()
+            for record in self._original_gyj_inbound_history:
+                app_module.upsert_gyj_inbound_history(
+                    record.get("result") or {},
+                    record.get("packing_slip_no") or "",
+                    record.get("actor") or "",
+                    record.get("saved_at") or "",
                 )
         app_module.save_accounts(self._original_accounts)
 
@@ -495,6 +510,40 @@ class InboundRouteTest(unittest.TestCase):
         }])
         self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
         self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
+
+        history_response = client.get("/api/inbound/gyj/history")
+        self.assertEqual(history_response.status_code, 200)
+        records = history_response.get_json()["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["order_no"], "CG202608130001")
+        self.assertEqual(records[0]["packing_slip_no"], PACKING_SLIP_NO)
+        self.assertEqual(records[0]["actor"], "admin")
+        self.assertEqual(records[0]["products"], status["result"]["products"])
+
+    def test_gyj_history_failure_does_not_change_successful_inbound_result(self):
+        lines = [{
+            "product_code": "916000024", "description": "中央净水机",
+            "quantity": 1, "serials": ["SN00000001"], "record_type": "条码",
+        }]
+        worker = FakeGYJWorker()
+        job = app_module._empty_inbound_gyj_job(
+            "admin", PACKING_SLIP_NO, "history:test", lines, "销售订单",
+            actor="admin",
+        )
+        with app_module.inbound_gyj_job_lock:
+            app_module.inbound_gyj_jobs[job["job_id"]] = job
+
+        with mock.patch.object(
+            app_module, "upsert_gyj_inbound_history", side_effect=OSError("disk full")
+        ):
+            app_module._run_inbound_gyj_job(job["job_id"], worker, lines)
+
+        saved_job = app_module.inbound_gyj_jobs[job["job_id"]]
+        self.assertTrue(saved_job["success"])
+        self.assertEqual(saved_job["result"]["order_no"], "CG202608130001")
+        self.assertTrue(any(
+            "历史记录保存失败" in entry["message"] for entry in saved_job["logs"]
+        ))
 
     def test_gyj_status_exposes_each_completed_line_before_save_finishes(self):
         class StreamingGYJWorker(FakeGYJWorker):

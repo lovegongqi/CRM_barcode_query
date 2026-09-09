@@ -38,6 +38,7 @@ let serialRenderedGeneration = 0;
 let serialRefreshPromise = null;
 let serialRefreshRequestId = 0;
 let serialMutationFailures = new Map();
+let serialScannerMode = false;
 let inventoryCameraControls = null;
 let inventoryCameraStartPromise = null;
 let inventoryCameraGeneration = 0;
@@ -427,6 +428,15 @@ function renderInventoryItems(items) {
             item.data_error ? '序列号资料未知' : (item.has_serial ? '序列号商品' : '无序列号'),
         );
         product.append(serialBadge);
+        if (item.has_serial) {
+            const cacheReady = Boolean(item.serial_synced_at);
+            const cacheCount = Number(item.serial_expected_count || 0);
+            product.append(inventoryNode(
+                'span',
+                `inventory-serial-cache-badge inventory-item-full-only${cacheReady ? ' is-ready' : ''}`,
+                cacheReady ? `序列号已缓存 ${cacheCount}` : '序列号未缓存',
+            ));
+        }
         const stateBadge = inventoryNode('span', 'inventory-state-badge', inventoryStateLabel(item));
         const toggle = inventoryNode(
             'button', 'btn btn-secondary inventory-item-toggle', expanded ? '收起' : '展开'
@@ -523,8 +533,7 @@ function renderInventoryTask(task) {
         const serialItem = (task.items || []).find(
             (item) => item.barcode === currentSerialBarcode
         );
-        if (!serialItem || serialItem.state === 'serial_pending') refreshSerialItem();
-        else closeSerialWorkspace();
+        if (!serialItem || serialItem.state !== 'serial_pending') closeSerialWorkspace();
     }
     if (task.gyj_status && task.gyj_status !== 'synced') setInventoryNotice(task.gyj_status, 'error');
 }
@@ -1825,6 +1834,35 @@ function closeSerialWorkspace() {
     if (dialog.open) dialog.close();
 }
 
+function applySerialScannerMode() {
+    const button = inventoryOptionalElement('inventorySerialScannerMode');
+    if (button) {
+        button.textContent = serialScannerMode ? '扫码枪已开启' : '扫码枪模式';
+        if (button.setAttribute) {
+            button.setAttribute('aria-pressed', serialScannerMode ? 'true' : 'false');
+        }
+    }
+    [
+        'inventorySerialInput',
+        'inventoryCartonStartSerial',
+        'inventoryCartonExtraSerial',
+    ].forEach((id) => {
+        const input = inventoryOptionalElement(id);
+        if (!input) return;
+        input.inputMode = serialScannerMode ? 'none' : 'text';
+        if (serialScannerMode && input.setAttribute) {
+            input.setAttribute('virtualkeyboardpolicy', 'manual');
+        } else if (!serialScannerMode && input.removeAttribute) {
+            input.removeAttribute('virtualkeyboardpolicy');
+        }
+    });
+}
+
+function toggleSerialScannerMode() {
+    serialScannerMode = !serialScannerMode;
+    applySerialScannerMode();
+}
+
 async function openSerialItem(barcode) {
     if (!inventoryTask || !['counting', 'serial_check'].includes(inventoryTask.phase)) return;
     const item = (inventoryTask.items || []).find((row) => row.barcode === barcode);
@@ -1870,9 +1908,15 @@ async function openSerialItem(barcode) {
         inventoryElement('inventorySerialRefresh').disabled = false;
         closeButton.textContent = '关闭并保存';
         inventoryElement('inventoryCameraStart').disabled = false;
-        setSerialMessage('已载入缓存，可立即扫描；正在后台刷新账面序列号…');
+        const serialItem = data.serial && data.serial.item ? data.serial.item : {};
+        const cacheCount = Number(serialItem.serial_expected_count || 0);
+        setSerialMessage(
+            serialItem.serial_synced_at
+                ? `已载入序列号缓存（${cacheCount} 条），可立即扫描。`
+                : '尚未缓存账面序列号，请点击“重新获取”。',
+            serialItem.serial_synced_at ? 'success' : '',
+        );
         input.focus();
-        refreshSerialItem(true, 'opening').catch(() => null);
     } catch (_error) {
         if (requestId !== serialWorkspaceRequestId || !serialWorkspaceOpen || !dialog.open) return;
         serialWorkspaceEditable = false;
@@ -2007,8 +2051,11 @@ async function submitDecodedSerial(serial) {
                 acceptInventoryMutationVersion(data);
             } catch (error) {
                 if (serialOperationIsOpen(requestId)) {
-                    serialMutationFailures.set(mutationKey, '扫码保存失败，请重试。');
-                    setSerialMessage('扫码保存失败，请重试。', 'error');
+                    const message = error && error.status === 502
+                        ? 'GYJ 序列号核验暂时不可用，本条未保存，请稍后重试。'
+                        : '扫码保存失败，请重试。';
+                    serialMutationFailures.set(mutationKey, message);
+                    setSerialMessage(message, 'error');
                 }
                 return false;
             }
@@ -2880,6 +2927,8 @@ function initializeInventoryPage() {
     inventoryElement('inventoryCountClose').addEventListener('click', closeCountDialog);
     inventoryElement('inventoryCountCancel').addEventListener('click', closeCountDialog);
     inventoryElement('inventorySerialInput').addEventListener('keydown', scanSerial);
+    inventoryElement('inventorySerialScannerMode').addEventListener('click', toggleSerialScannerMode);
+    applySerialScannerMode();
     inventoryElement('inventoryCameraStart').addEventListener('click', startInventoryCamera);
     inventoryElement('inventoryCameraStop').addEventListener('click', stopInventoryCamera);
     [1, 2, 3, 5].forEach((level) => {

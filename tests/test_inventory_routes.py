@@ -952,8 +952,9 @@ class InventoryRouteTest(unittest.TestCase):
         ):
             app_module._run_inventory_sync("admin", task_id)
             failed = store.get_task_snapshot("admin", task_id)
-            self.assertEqual(failed["phase"], "sync_error")
+            self.assertEqual(failed["phase"], "counting")
             self.assertIsNone(failed["last_sync_at"])
+            self.assertIsNotNone(failed["last_sync_attempt_at"])
             self.assertNotIn("999", failed["gyj_status"])
             self.assertNotIn("secret", failed["gyj_status"])
             self.assertNotIn("html", failed["gyj_status"].lower())
@@ -966,6 +967,16 @@ class InventoryRouteTest(unittest.TestCase):
             self.assertNotIn("999", response_body)
             self.assertNotIn("secret", response_body)
             self.assertNotIn("html", response_body.lower())
+            with store.connect() as connection:
+                connection.execute(
+                    "UPDATE inventory_tasks SET last_sync_attempt_at = ? "
+                    "WHERE task_id = ?",
+                    ((datetime.now() - timedelta(seconds=60)).isoformat(), task_id),
+                )
+            response = self.login_account("counter").get(
+                "/api/inventory/tasks/active"
+            )
+            self.assertEqual(response.status_code, 200)
             self.assertTrue(retry_started.wait(1))
             with app_module.inventory_sync_lock:
                 retry_thread = app_module.inventory_sync_threads.get(task_id)
@@ -1281,17 +1292,20 @@ class InventoryRouteTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         release.set()
 
-    def test_recent_sync_does_not_start_a_daemon_but_sync_error_does(self):
+    def test_recent_sync_attempt_does_not_start_a_daemon_until_sixty_seconds(self):
         self.store.get_task_snapshot.return_value = {
             "task_id": "task-1",
             "phase": "counting",
-            "last_sync_at": datetime.now().isoformat(timespec="seconds"),
+            "last_sync_at": None,
+            "last_sync_attempt_at": datetime.now().isoformat(timespec="seconds"),
         }
         self.assertFalse(app_module._ensure_inventory_sync("counter-id", "task-1"))
         self.service.sync_completed_items.assert_not_called()
 
         done = threading.Event()
-        self.store.get_task_snapshot.return_value["phase"] = "sync_error"
+        self.store.get_task_snapshot.return_value["last_sync_attempt_at"] = (
+            datetime.now() - timedelta(seconds=60)
+        ).isoformat(timespec="seconds")
         self.service.sync_completed_items.side_effect = lambda *_args: done.set()
         self.assertTrue(app_module._ensure_inventory_sync("counter-id", "task-1"))
         self.assertTrue(done.wait(1))

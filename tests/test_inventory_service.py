@@ -574,6 +574,12 @@ class InventoryServiceTests(unittest.TestCase):
             "admin", task["task_id"], "B2", "device-a", "甲", force=True
         )
         synced_at = cached["item"]["serial_synced_at"]
+        self.assertEqual(cached["item"]["serial_expected_count"], 1)
+        snapshot = self.store.get_task_snapshot("admin", task["task_id"])
+        serial_item = next(
+            item for item in snapshot["items"] if item["barcode"] == "B2"
+        )
+        self.assertEqual(serial_item["serial_expected_count"], 1)
         self.worker.serials["B2"] = [{
             "serial": "B-NEW", "barcode": "B2", "name": "序列商品",
             "warehouse": "其他仓", "shipped": False,
@@ -1325,8 +1331,11 @@ class InventoryServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryServiceError, "B2"):
             self.service.sync_completed_items("admin", task["task_id"], force=True)
         failed = self.store.get_task_snapshot("admin", task["task_id"])
-        self.assertEqual(failed["phase"], "sync_error")
+        self.assertEqual(failed["phase"], "serial_check")
         self.assertIsNone(failed["last_sync_at"])
+        self.assertEqual(
+            failed["last_sync_attempt_at"], self.current[0].isoformat()
+        )
         for row in failed["items"]:
             self.assertEqual(
                 row["latest_book_quantity"],
@@ -1339,6 +1348,7 @@ class InventoryServiceTests(unittest.TestCase):
             ).fetchone()[0], 0)
 
         self.worker.totals_result = (True, {"A1": "1"})
+        self.current[0] += timedelta(seconds=60)
         recovered = self.service.sync_completed_items("admin", task["task_id"])
         self.assertFalse(recovered["skipped"])
         self.assertEqual(recovered["phase"], "serial_check")
@@ -1350,12 +1360,54 @@ class InventoryServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(InventoryServiceError, "GYJ 库存报表暂时不可用"):
             self.service.sync_completed_items("admin", task["task_id"], force=True)
         failed = self.store.get_task_snapshot("admin", task["task_id"])
-        self.assertEqual(failed["phase"], "sync_error")
+        self.assertEqual(failed["phase"], "counting")
         self.assertEqual(failed["gyj_status"], "GYJ 库存报表暂时不可用")
+        self.assertEqual(
+            failed["last_sync_attempt_at"], self.current[0].isoformat()
+        )
         self.assertEqual(
             next(row for row in failed["items"] if row["barcode"] == "A1")["state"],
             "matched",
         )
+
+    def test_failed_stock_sync_does_not_block_cached_serial_scans(self):
+        task = self.create_serial_task()
+        self.worker.serials["B2"] = [{
+            "serial": "B-1", "barcode": "B2", "name": "序列商品",
+            "warehouse": "沈桥仓", "shipped": False,
+        }]
+        self.service.refresh_serial_item(
+            "admin", task["task_id"], "B2", "device-a", "甲", force=True
+        )
+        self.worker.totals_result = (False, "GYJ 库存报表暂时不可用")
+
+        with self.assertRaises(InventoryServiceError):
+            self.service.sync_completed_items("admin", task["task_id"], force=True)
+
+        scan = self.service.scan_serial(
+            "admin", task["task_id"], "B2", "device-a", "甲", "B-1"
+        )
+        self.assertEqual(scan["classification"], "matched")
+
+    def test_failed_stock_sync_retries_only_after_sixty_seconds(self):
+        task = self.create_task()
+        self.submit(task["task_id"], "A1", "2")
+        self.worker.totals_result = (False, "GYJ 库存报表暂时不可用")
+
+        with self.assertRaises(InventoryServiceError):
+            self.service.sync_completed_items("admin", task["task_id"], force=True)
+        self.assertEqual(self.worker.totals_reads, 1)
+
+        skipped = self.service.sync_completed_items("admin", task["task_id"])
+        self.assertTrue(skipped["skipped"])
+        self.assertEqual(self.worker.totals_reads, 1)
+
+        self.current[0] += timedelta(seconds=60)
+        self.worker.totals_result = (True, {"A1": "2"})
+        recovered = self.service.sync_completed_items("admin", task["task_id"])
+        self.assertFalse(recovered["skipped"])
+        self.assertEqual(self.worker.totals_reads, 2)
+        self.assertEqual(recovered["gyj_status"], "synced")
 
     def test_sync_includes_item_completed_while_totals_are_being_read(self):
         task = self.create_task()

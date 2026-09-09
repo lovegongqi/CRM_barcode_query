@@ -672,6 +672,22 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('id="gyjStage"', inbound)
         self.assertNotIn('id="gyjProgress"', inbound)
 
+    def test_gyj_inbound_history_uses_order_number_and_expandable_details(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "gyjInboundHistoryToggle", "gyjInboundHistory",
+            "gyjInboundHistoryList",
+        ):
+            self.assertIn(f'id="{element_id}"', inbound)
+        self.assertIn("function toggleGYJInboundHistory", inbound)
+        self.assertIn("function loadGYJInboundHistory", inbound)
+        self.assertIn("function renderGYJInboundHistory", inbound)
+        self.assertIn("/api/inbound/gyj/history", inbound)
+        self.assertIn("record.order_no", inbound)
+        self.assertIn("record.packing_slip_no", inbound)
+        self.assertIn("record.actor", inbound)
+        self.assertIn("<details", inbound)
+
     def test_settings_gyj_login_uses_backend_credentials_contract(self):
         inbound = self.source("accounts.html")
         for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):
@@ -1001,6 +1017,7 @@ class FrontendContractTest(unittest.TestCase):
             "inventoryCartonStartSerial", "inventoryCartonCameraStart",
             "inventoryCartonGenerate", "inventoryCartonPreview",
             "inventoryCartonAddSerial", "inventoryCartonSave",
+            "inventorySerialScannerMode",
         ):
             self.assertIn(f'id="{element_id}"', source)
         self.assertNotIn('id="inventoryCartonCode"', source)

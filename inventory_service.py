@@ -249,17 +249,17 @@ class InventoryService:
             owner, task_id, {"counting", "serial_check", "sync_error"}
         )
         check_time = self.now()
-        if (
-            not force
-            and snapshot["phase"] != "sync_error"
-            and snapshot["last_sync_at"]
-        ):
-            last_sync = datetime.fromisoformat(snapshot["last_sync_at"])
-            if (check_time - last_sync).total_seconds() < 60:
+        last_attempt_at = (
+            snapshot.get("last_sync_attempt_at") or snapshot.get("last_sync_at")
+        )
+        if not force and last_attempt_at:
+            last_attempt = datetime.fromisoformat(last_attempt_at)
+            if (check_time - last_attempt).total_seconds() < 60:
                 return {
                     "skipped": True,
                     "phase": snapshot["phase"],
                     "last_sync_at": snapshot["last_sync_at"],
+                    "last_sync_attempt_at": last_attempt_at,
                     "items": snapshot["items"],
                 }
 
