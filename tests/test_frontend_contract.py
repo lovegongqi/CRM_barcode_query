@@ -515,6 +515,61 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="settings"\] \.settings-primary-grid\s*\{[^}]*grid-template-columns:',
         )
 
+    def test_settings_gyj_channel_card_spans_row_without_desktop_overflow(self):
+        template = self.source("accounts.html")
+        inline_css = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
+        aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 1106, "height": 1024})
+                page.set_content(
+                    f"""
+                    <style>{inline_css}\n{aurora_css}</style>
+                    <body data-aurora-page="settings">
+                      <div class="container">
+                        <div class="settings-primary-grid">
+                          <div class="card"></div>
+                          <div class="card"></div>
+                          <div class="card" id="gyjChannelCard">
+                            <h2 class="gyj-card-heading"><span>GYJ 五通道登录</span><strong>GYJ 已登录 1/5</strong></h2>
+                            <div class="gyj-channel-tabs">
+                              <button class="gyj-channel-tab">通道 1<small>已登录</small></button>
+                              <button class="gyj-channel-tab">通道 2<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 3<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 4<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 5<small>未启动</small></button>
+                            </div>
+                            <div class="gyj-login-grid">
+                              <div><label>GYJ 账号</label><input value="jxtl"></div>
+                              <div><label>GYJ 密码</label><input placeholder="已记住时可留空"></div>
+                              <label class="remember-inline"><input type="checkbox"> 记住账号密码</label>
+                              <button class="btn btn-primary">重新登录所选通道</button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </body>
+                    """
+                )
+                grid = page.locator(".settings-primary-grid").bounding_box()
+                card = page.locator("#gyjChannelCard").bounding_box()
+                overflow = page.locator("#gyjChannelCard").evaluate(
+                    "element => element.scrollWidth - element.clientWidth"
+                )
+                self.assertAlmostEqual(card["x"], grid["x"], delta=1)
+                self.assertAlmostEqual(card["width"], grid["width"], delta=1)
+                self.assertLessEqual(overflow, 0)
+            finally:
+                browser.close()
+
+    def test_settings_page_cache_busts_aurora_layout_css(self):
+        self.assertIn(
+            '/static/aurora.css{{ aurora_css_v }}',
+            self.source("accounts.html"),
+        )
+
     def test_settings_bulk_login_buttons_show_each_slot_latest_message(self):
         template = self.source("accounts.html")
         self.assertIn("mergeBulkCrmSlotProgress(data.slots || [])", template)
