@@ -452,7 +452,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_category_filter_combines_with_state(self):
+    def test_multiple_category_filter_combines_with_state(self):
         self.run_node(
             r"""
             const state = {value: 'variance'};
@@ -469,13 +469,42 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             };
             vm.createContext(context);
             vm.runInContext(source, context);
-            vm.runInContext("inventorySelectedCategory = '滤芯'", context);
+            vm.runInContext("inventorySelectedCategories = new Set(['滤芯', '整机'])", context);
             const visible = vm.runInContext(`inventoryVisibleItems([
                 {barcode: 'A', category: '滤芯', diff_qty: '-1'},
                 {barcode: 'B', category: '整机', diff_qty: '-1'},
-                {barcode: 'C', category: '滤芯', diff_qty: '0'}
+                {barcode: 'C', category: '配件', diff_qty: '-1'},
+                {barcode: 'D', category: '滤芯', diff_qty: '0'}
             ])`, context);
-            assert.deepEqual(Array.from(visible, item => item.barcode), ['A']);
+            assert.deepEqual(Array.from(visible, item => item.barcode), ['A', 'B']);
+            """
+        )
+
+    def test_filtered_book_total_uses_current_category_and_state(self):
+        self.run_node(
+            r"""
+            const state = {value: 'completed'};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    getElementById(id) {
+                        if (id === 'inventoryFilters') return state;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext("inventorySelectedCategories = new Set(['滤芯', '配件'])", context);
+            const total = vm.runInContext(`inventoryFilteredBookTotal([
+                {barcode: 'A', category: '滤芯', latest_book_qty: '2.5', completed_actual_qty: '1'},
+                {barcode: 'B', category: '整机', latest_book_qty: '100', completed_actual_qty: '1'},
+                {barcode: 'C', category: '配件', latest_book_qty: '3', completed_actual_qty: null},
+                {barcode: 'D', category: '配件', latest_book_qty: '4', completed_actual_qty: '2'}
+            ])`, context);
+            assert.equal(total, '6.5');
             """
         )
 

@@ -22,6 +22,7 @@ import shutil
 import hashlib
 from contextlib import closing, contextmanager
 from collections import OrderedDict
+from decimal import Decimal
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
@@ -11272,8 +11273,14 @@ def _inventory_public_task(task):
 
 
 def _inventory_task_summary(items):
+    eligible_items = []
+    for item in items:
+        initial_stock = Decimal(normalize_quantity(item.get("initial_stock") or "0"))
+        actual_quantity = Decimal(normalize_quantity(item.get("completed_actual_qty") or "0"))
+        if initial_stock != 0 or actual_quantity > 0:
+            eligible_items.append(item)
     summary = {
-        "total": len(items),
+        "total": len(eligible_items),
         "completed": 0,
         "pending": 0,
         "matched": 0,
@@ -11282,7 +11289,7 @@ def _inventory_task_summary(items):
         "serial_pending": 0,
         "data_error": 0,
     }
-    for item in items:
+    for item in eligible_items:
         if item.get("state") == "data_error":
             summary["data_error"] += 1
         elif item.get("completed_actual_qty") is None:

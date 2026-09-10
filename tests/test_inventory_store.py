@@ -73,6 +73,13 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual([row["barcode"] for row in store.list_items(task["task_id"])], ["A1"])
         self.assertEqual([row["barcode"] for row in store.list_items(task["task_id"], query="B2")], ["B2"])
 
+    def test_zero_book_stock_with_positive_actual_stays_visible_without_search(self):
+        store, task = self.serial_ready_store()
+        self.assertEqual(
+            [row["barcode"] for row in store.list_items(task["task_id"])],
+            ["A1", "B2"],
+        )
+
     def test_snapshot_omits_items_when_version_is_unchanged(self):
         store = InventoryStore(self.db_path)
         task = store.create_task("admin", "管理员", self.catalog())

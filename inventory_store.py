@@ -679,7 +679,10 @@ class InventoryStore:
             pattern = f"%{query}%"
             params.extend((pattern, pattern))
         elif not include_zero:
-            clauses.append("initial_stock <> '0'")
+            clauses.append(
+                "(CAST(COALESCE(initial_stock, '0') AS REAL) <> 0 "
+                "OR CAST(COALESCE(completed_counted_quantity, '0') AS REAL) > 0)"
+            )
         sql = "SELECT * FROM inventory_items WHERE " + " AND ".join(clauses) + " ORDER BY barcode"
         with closing(self.connect()) as connection:
             return [

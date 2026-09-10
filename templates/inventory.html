@@ -65,12 +65,13 @@
                     <span>搜索或扫描商品</span>
                     <input id="inventorySearch" type="search" autocomplete="off" placeholder="输入商品条码或名称，扫描后按 Enter">
                 </label>
-                <label class="inventory-filter-field" for="inventoryCategoryFilter">
+                <div class="inventory-filter-field">
                     <span>产品类别</span>
-                    <select id="inventoryCategoryFilter">
-                        <option value="">全部类别</option>
-                    </select>
-                </label>
+                    <details id="inventoryCategoryFilter" class="inventory-category-filter">
+                        <summary id="inventoryCategorySummary">全部类别</summary>
+                        <div id="inventoryCategoryOptions" class="inventory-category-options"></div>
+                    </details>
+                </div>
                 <label class="inventory-filter-field" for="inventoryFilters">
                     <span>查看范围</span>
                     <select id="inventoryFilters">

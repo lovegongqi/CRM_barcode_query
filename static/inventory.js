@@ -9,7 +9,7 @@ let inventoryPollQueuedForce = false;
 let inventoryQueryGeneration = 0;
 let inventoryPollTimer = null;
 let inventorySearchTimer = null;
-let inventorySelectedCategory = '';
+let inventorySelectedCategories = new Set();
 let inventoryExpandedBarcodes = new Set();
 let currentCountItem = null;
 let countDialogEditable = false;
@@ -243,6 +243,20 @@ function decimalDirection(value) {
     return text.startsWith('-') ? -1 : 1;
 }
 
+function decimalSumText(values) {
+    const parts = values.map(decimalParts).filter(Boolean);
+    if (!parts.length) return '0';
+    const scale = Math.max(...parts.map((part) => part.scale));
+    const total = parts.reduce(
+        (sum, part) => sum + part.digits * (10n ** BigInt(scale - part.scale)), 0n,
+    );
+    const digits = total.toString().padStart(scale + 1, '0');
+    if (!scale) return digits;
+    const whole = digits.slice(0, -scale) || '0';
+    const fraction = digits.slice(-scale).replace(/0+$/, '');
+    return fraction ? `${whole}.${fraction}` : whole;
+}
+
 function inventoryBookQuantity(item) {
     if (!item) return null;
     for (const value of (
@@ -314,7 +328,7 @@ function renderInventorySummary(task) {
         ['盘盈', summaryValue(summary, ['surplus', 'surplus_items'], computed.surplus), 'is-warn'],
         ['盘亏', summaryValue(summary, ['deficit', 'deficit_items'], computed.deficit), 'is-bad'],
         ['待序列号', summaryValue(summary, ['serial_pending', 'serial_pending_items'], computed.serial_pending), 'is-warn'],
-        ['资料异常', summaryValue(summary, ['data_error', 'data_error_items'], computed.data_error), 'is-bad'],
+        ['账面合计', inventoryFilteredBookTotal((task && task.items) || []), ''],
     ];
     cards.forEach(([label, value, className]) => {
         const card = inventoryNode('div', `inventory-summary-card ${className}`.trim());
@@ -332,9 +346,17 @@ function inventoryVisibleItems(items) {
     return categoryItems;
 }
 
+function inventoryFilteredBookTotal(items) {
+    return decimalSumText(
+        inventoryVisibleItems(Array.isArray(items) ? items : [])
+            .map(inventoryBookQuantity)
+            .filter((value) => value !== null),
+    );
+}
+
 function inventoryCategoryMatches(item) {
-    return !inventorySelectedCategory
-        || inventoryText(item && item.category, '') === inventorySelectedCategory;
+    return !inventorySelectedCategories.size
+        || inventorySelectedCategories.has(inventoryText(item && item.category, ''));
 }
 
 function inventoryCategoryElement() {
@@ -343,30 +365,54 @@ function inventoryCategoryElement() {
 }
 
 function renderInventoryCategories(categories) {
-    const select = inventoryCategoryElement();
-    if (!select) return;
+    const filter = inventoryCategoryElement();
+    const summary = inventoryOptionalElement('inventoryCategorySummary');
+    const optionsRoot = inventoryOptionalElement('inventoryCategoryOptions');
+    if (!filter || !summary || !optionsRoot) return;
     const values = Array.from(new Set(
         (Array.isArray(categories) ? categories : [])
             .map((value) => inventoryText(value, '').trim())
             .filter(Boolean),
     )).sort((left, right) => left.localeCompare(right, 'zh-CN'));
-    const retained = values.includes(inventorySelectedCategory)
-        ? inventorySelectedCategory : '';
-    const options = [inventoryNode('option', '', '全部类别')];
-    options[0].value = '';
+    inventorySelectedCategories = new Set(
+        Array.from(inventorySelectedCategories).filter((value) => values.includes(value)),
+    );
+    summary.textContent = inventorySelectedCategories.size
+        ? Array.from(inventorySelectedCategories).join('、') : '全部类别';
+    summary.title = summary.textContent;
+    const options = [];
+
+    const allOption = inventoryNode('label', 'inventory-category-option');
+    const allInput = inventoryNode('input');
+    allInput.type = 'checkbox';
+    allInput.checked = inventorySelectedCategories.size === 0;
+    allInput.addEventListener('change', () => {
+        inventorySelectedCategories.clear();
+        applyInventoryCategorySelection();
+    });
+    allOption.append(allInput, inventoryNode('span', '', '全部类别'));
+    options.push(allOption);
+
     values.forEach((value) => {
-        const option = inventoryNode('option', '', value);
-        option.value = value;
+        const option = inventoryNode('label', 'inventory-category-option');
+        const input = inventoryNode('input');
+        input.type = 'checkbox';
+        input.value = value;
+        input.checked = inventorySelectedCategories.has(value);
+        input.addEventListener('change', () => {
+            if (input.checked) inventorySelectedCategories.add(value);
+            else inventorySelectedCategories.delete(value);
+            applyInventoryCategorySelection();
+        });
+        option.append(input, inventoryNode('span', '', value));
         options.push(option);
     });
-    select.replaceChildren(...options);
-    select.value = retained;
-    inventorySelectedCategory = retained;
+    optionsRoot.replaceChildren(...options);
 }
 
-function handleInventoryCategoryChange() {
-    const select = inventoryCategoryElement();
-    inventorySelectedCategory = select ? select.value : '';
+function applyInventoryCategorySelection() {
+    renderInventoryCategories((inventoryTask && inventoryTask.categories) || []);
+    renderInventorySummary(inventoryTask);
     renderInventoryItems((inventoryTask && inventoryTask.items) || []);
 }
 
@@ -509,8 +555,8 @@ function renderInventoryTask(task) {
         meta.textContent = '尚无进行中的盘点任务。';
         createButton.hidden = false;
         completeButton.hidden = true;
-        renderInventorySummary(null);
         renderInventoryCategories([]);
+        renderInventorySummary(null);
         renderInventoryItems([]);
         return;
     }
@@ -520,8 +566,8 @@ function renderInventoryTask(task) {
     meta.textContent = `${phase} · 最近 GYJ 同步 ${syncTime}`;
     createButton.hidden = true;
     completeButton.hidden = !['counting', 'serial_check'].includes(task.phase);
-    renderInventorySummary(task);
     renderInventoryCategories(task.categories || []);
+    renderInventorySummary(task);
     renderInventoryItems(task.items || []);
     if (currentCountItem && inventoryElement('inventoryCountDialog').open) {
         const draft = inventoryElement('inventoryCountNewQuantity').value;
@@ -2953,9 +2999,6 @@ function initializeInventoryPage() {
     inventoryElement('inventorySearch').addEventListener('input', handleInventorySearchInput);
     inventoryElement('inventorySearch').addEventListener('keydown', handleInventorySearchEnter);
     inventoryElement('inventoryFilters').addEventListener('change', runInventorySearch);
-    inventoryElement('inventoryCategoryFilter').addEventListener(
-        'change', handleInventoryCategoryChange
-    );
     inventoryElement('inventoryCountNewQuantity').addEventListener('keydown', (event) => {
         if (event.key === 'Enter') addCountEntry();
     });

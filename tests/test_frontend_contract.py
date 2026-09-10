@@ -130,7 +130,7 @@ class FrontendContractTest(unittest.TestCase):
             r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
         )
 
-    def test_mobile_results_actions_use_equal_three_column_grid(self):
+    def test_mobile_results_actions_use_equal_five_column_grid(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
@@ -147,11 +147,19 @@ class FrontendContractTest(unittest.TestCase):
             self.assertNotIn(selector, after_mobile)
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+            r'body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)',
         )
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*11px[^}]*white-space:\s*nowrap',
+            r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*9px[^}]*white-space:\s*normal',
+        )
+
+    def test_mobile_results_filters_use_equal_two_column_grid(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        _before_mobile, mobile_css, _after_mobile = self.media_block(css, 640)
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="results"\] \.filter-area\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)',
         )
 
     def test_mobile_results_stats_stay_in_one_equal_three_column_row(self):
@@ -1151,6 +1159,15 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("inventory-item-primary-action", script)
         self.assertIn(".inventory-item:not(.is-expanded) .inventory-item-full-only", style)
         self.assertIn(".inventory-item-toggle", style)
+
+    def test_inventory_category_filter_is_multi_select(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn('id="inventoryCategoryFilter"', source)
+        self.assertIn('id="inventoryCategorySummary"', source)
+        self.assertIn('id="inventoryCategoryOptions"', source)
+        self.assertNotIn('<select id="inventoryCategoryFilter">', source)
+        self.assertIn("let inventorySelectedCategories = new Set();", script)
 
     def test_inventory_serial_dialog_has_carton_controls(self):
         source = self.source("inventory.html")

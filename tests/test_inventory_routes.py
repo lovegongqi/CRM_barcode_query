@@ -344,6 +344,30 @@ class InventoryRouteTest(unittest.TestCase):
         )
         ensure.assert_called_once_with("admin", "task-1")
 
+    def test_active_summary_excludes_zero_stock_until_actual_is_positive(self):
+        summary = app_module._inventory_task_summary([
+            {
+                "barcode": "A", "initial_stock": "2",
+                "completed_actual_qty": None, "state": "pending", "diff_qty": None,
+            },
+            {
+                "barcode": "B", "initial_stock": "0",
+                "completed_actual_qty": None, "state": "pending", "diff_qty": None,
+            },
+            {
+                "barcode": "C", "initial_stock": "0",
+                "completed_actual_qty": "0", "state": "matched", "diff_qty": "0",
+            },
+            {
+                "barcode": "D", "initial_stock": "0",
+                "completed_actual_qty": "3", "state": "variance", "diff_qty": "3",
+            },
+        ])
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["pending"], 1)
+        self.assertEqual(summary["completed"], 1)
+        self.assertEqual(summary["surplus"], 1)
+
     def test_active_unchanged_snapshot_does_not_reload_items(self):
         self.store.get_active_task.return_value = {"task_id": "task-1"}
         self.store.get_task_snapshot.return_value = {

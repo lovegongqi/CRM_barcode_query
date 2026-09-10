@@ -169,6 +169,59 @@ body[data-aurora-page="inventory"] .status-bar .inventory-workspace-tabs {
     background: var(--aurora-control-bg) !important;
 }
 
+.inventory-category-filter {
+    position: relative;
+    min-width: 0;
+}
+
+.inventory-category-filter > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 44px;
+    padding: 8px 12px;
+    overflow: hidden;
+    color: var(--aurora-text);
+    border: 1px solid var(--aurora-line-strong);
+    border-radius: 11px;
+    background: var(--aurora-control-bg);
+    cursor: pointer;
+    list-style: none;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.inventory-category-filter > summary::-webkit-details-marker { display: none; }
+.inventory-category-filter > summary::after { content: "⌄"; margin-left: 8px; }
+
+.inventory-category-options {
+    position: absolute;
+    top: calc(100% + 5px);
+    right: 0;
+    z-index: 20;
+    display: grid;
+    width: max(100%, 220px);
+    max-height: 280px;
+    padding: 7px;
+    overflow-y: auto;
+    border: 1px solid var(--aurora-line-strong);
+    border-radius: 11px;
+    background: #08182a;
+    box-shadow: 0 16px 32px rgba(0, 0, 0, .35);
+}
+
+.inventory-category-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 5px 7px;
+    color: var(--aurora-text);
+    cursor: pointer;
+}
+
+.inventory-category-option input { min-height: 0; }
+
 .inventory-items {
     display: grid;
     gap: 10px;
@@ -1382,13 +1435,15 @@ article.inventory-item { cursor: default; }
         gap: 6px;
     }
     .inventory-toolbar .inventory-filter-field span { white-space: nowrap; }
-    .inventory-toolbar .inventory-filter-field select {
+    .inventory-toolbar .inventory-filter-field select,
+    .inventory-toolbar .inventory-category-filter > summary {
         width: 100%;
         min-width: 0;
         min-height: 36px;
         height: 36px;
         padding-inline: 8px;
     }
+    .inventory-category-options { width: max(100%, 190px); }
     .inventory-item { padding: 10px; }
     .inventory-item:not(.is-expanded) .inventory-item-full-only { display: none !important; }
     .inventory-item-toggle {
