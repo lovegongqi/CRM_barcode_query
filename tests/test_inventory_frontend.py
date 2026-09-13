@@ -508,6 +508,59 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_summary_uses_current_category_and_state(self):
+        self.run_node(
+            r"""
+            class FakeNode {
+                constructor() {
+                    this.children = []; this.textContent = ''; this.className = '';
+                }
+                append(...nodes) { this.children.push(...nodes); }
+                replaceChildren(...nodes) { this.children = [...nodes]; }
+            }
+            const summaryRoot = new FakeNode();
+            const state = {value: 'completed'};
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {},
+                    createElement() { return new FakeNode(); },
+                    getElementById(id) {
+                        if (id === 'inventoryTaskSummary') return summaryRoot;
+                        if (id === 'inventoryFilters') return state;
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext("inventorySelectedCategories = new Set(['滤芯'])", context);
+            vm.runInContext(`renderInventorySummary({
+                summary: {
+                    total: 3, completed: 2, pending: 1, matched: 1,
+                    surplus: 1, deficit: 0, serial_pending: 0,
+                },
+                items: [
+                    {
+                        barcode: 'A', category: '滤芯', latest_book_qty: '2',
+                        completed_actual_qty: '2', state: 'matched', diff_qty: '0',
+                    },
+                    {
+                        barcode: 'B', category: '滤芯', latest_book_qty: '3',
+                        completed_actual_qty: null, state: 'pending', diff_qty: '0',
+                    },
+                    {
+                        barcode: 'C', category: '配件', latest_book_qty: '4',
+                        completed_actual_qty: '5', state: 'variance', diff_qty: '1',
+                    },
+                ],
+            })`, context);
+            const values = summaryRoot.children.map(card => card.children[1].textContent);
+            assert.deepEqual(Array.from(values), [1, 1, 0, 1, 0, 0, 0, '2']);
+            """
+        )
+
     def test_product_card_expansion_survives_poll_render(self):
         self.run_node(
             r"""
@@ -1341,7 +1394,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_count_entry_mutation_forces_full_task_summary_refresh(self):
+    def test_count_entry_mutation_refreshes_task_and_filtered_summary(self):
         self.run_node(
             r"""
             class FakeNode {
@@ -1416,8 +1469,8 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(requests.length, 2);
                 assert.equal(requests[1].url, '/api/inventory/tasks/active');
                 const cards = element('inventoryTaskSummary').children;
-                assert.equal(cards[1].children[1].textContent, 3);
-                assert.equal(cards[2].children[1].textContent, 1);
+                assert.equal(cards[1].children[1].textContent, 1);
+                assert.equal(cards[2].children[1].textContent, 0);
                 assert.equal(vm.runInContext('inventoryTask.summary.completed', context), 3);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """

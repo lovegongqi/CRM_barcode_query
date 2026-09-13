@@ -308,27 +308,20 @@ function computedInventorySummary(items) {
     return result;
 }
 
-function summaryValue(summary, names, fallback) {
-    for (const name of names) {
-        if (summary && summary[name] !== null && summary[name] !== undefined) return summary[name];
-    }
-    return fallback;
-}
-
 function renderInventorySummary(task) {
     const root = inventoryElement('inventoryTaskSummary');
     root.replaceChildren();
-    const computed = computedInventorySummary((task && task.items) || []);
-    const summary = (task && task.summary) || {};
+    const visible = inventoryVisibleItems((task && task.items) || []);
+    const computed = computedInventorySummary(visible);
     const cards = [
-        ['商品总数', summaryValue(summary, ['total', 'total_items'], computed.total), ''],
-        ['已完成', summaryValue(summary, ['completed', 'completed_items'], computed.completed), 'is-good'],
-        ['待盘点', summaryValue(summary, ['pending', 'pending_items'], computed.pending), 'is-warn'],
-        ['数量一致', summaryValue(summary, ['matched', 'matched_items'], computed.matched), 'is-good'],
-        ['盘盈', summaryValue(summary, ['surplus', 'surplus_items'], computed.surplus), 'is-warn'],
-        ['盘亏', summaryValue(summary, ['deficit', 'deficit_items'], computed.deficit), 'is-bad'],
-        ['待序列号', summaryValue(summary, ['serial_pending', 'serial_pending_items'], computed.serial_pending), 'is-warn'],
-        ['账面合计', inventoryFilteredBookTotal((task && task.items) || []), ''],
+        ['商品总数', computed.total, ''],
+        ['已完成', computed.completed, 'is-good'],
+        ['待盘点', computed.pending, 'is-warn'],
+        ['数量一致', computed.matched, 'is-good'],
+        ['盘盈', computed.surplus, 'is-warn'],
+        ['盘亏', computed.deficit, 'is-bad'],
+        ['待序列号', computed.serial_pending, 'is-warn'],
+        ['账面合计', decimalSumText(visible.map(inventoryBookQuantity).filter((value) => value !== null)), ''],
     ];
     cards.forEach(([label, value, className]) => {
         const card = inventoryNode('div', `inventory-summary-card ${className}`.trim());

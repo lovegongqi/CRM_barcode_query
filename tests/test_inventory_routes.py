@@ -339,9 +339,12 @@ class InventoryRouteTest(unittest.TestCase):
         self.store.get_task_snapshot.assert_called_once_with(
             "admin", "task-1", known_version=7
         )
-        self.store.list_items.assert_called_once_with(
-            "task-1", query="Zero stock", state="pending", include_zero=True
-        )
+        self.store.list_items.assert_has_calls([
+            mock.call("task-1"),
+            mock.call(
+                "task-1", query="Zero stock", state="pending", include_zero=True
+            ),
+        ])
         ensure.assert_called_once_with("admin", "task-1")
 
     def test_active_summary_excludes_zero_stock_until_actual_is_positive(self):
@@ -393,11 +396,17 @@ class InventoryRouteTest(unittest.TestCase):
                 {"barcode": "B", "category": "整机"},
                 {"barcode": "C", "category": "滤芯"},
                 {"barcode": "D", "category": ""},
+                {"barcode": "E", "category": "成品"},
             ],
         }
-        self.store.list_items.return_value = [{
-            "barcode": "B", "category": "整机",
-        }]
+        self.store.list_items.side_effect = [
+            [
+                {"barcode": "A", "category": "滤芯"},
+                {"barcode": "B", "category": "整机"},
+                {"barcode": "C", "category": "滤芯"},
+            ],
+            [{"barcode": "B", "category": "整机"}],
+        ]
 
         with mock.patch.object(app_module, "_ensure_inventory_sync"):
             response = self.login_account("counter").get(
@@ -407,6 +416,10 @@ class InventoryRouteTest(unittest.TestCase):
         task = response.get_json()["task"]
         self.assertEqual(task["categories"], ["整机", "滤芯"])
         self.assertEqual([item["barcode"] for item in task["items"]], ["B"])
+        self.store.list_items.assert_has_calls([
+            mock.call("task-1"),
+            mock.call("task-1", query="B", state="", include_zero=True),
+        ])
 
     def test_all_json_routes_use_the_declared_methods_and_response_keys(self):
         client = self.login_account("admin", "admin-pass")

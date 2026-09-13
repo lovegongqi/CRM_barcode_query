@@ -11345,19 +11345,22 @@ def api_inventory_active_task():
     if not snapshot.get("unchanged"):
         unfiltered_items = snapshot.get("items") or []
         snapshot["summary"] = _inventory_task_summary(unfiltered_items)
+        visible_items = inventory_store.list_items(task_id)
         snapshot["categories"] = sorted({
             str(item.get("category") or "").strip()
-            for item in unfiltered_items
+            for item in visible_items
             if str(item.get("category") or "").strip()
         })
         query = str(request.args.get("query") or "").strip()
         state = str(request.args.get("state") or "").strip()
-        snapshot["items"] = inventory_store.list_items(
-            task_id,
-            query=query,
-            state=state,
-            include_zero=bool(query),
-        )
+        snapshot["items"] = visible_items
+        if query or state:
+            snapshot["items"] = inventory_store.list_items(
+                task_id,
+                query=query,
+                state=state,
+                include_zero=bool(query),
+            )
         _inventory_attach_lock_owners(task_id, snapshot["items"])
         _inventory_attach_serial_prefetch_status(owner, task_id, snapshot["items"])
     _ensure_inventory_sync(owner, task_id)
