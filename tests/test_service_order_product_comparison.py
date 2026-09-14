@@ -1,4 +1,6 @@
+import contextlib
 import unittest
+from unittest import mock
 
 import app as app_module
 
@@ -44,3 +46,78 @@ class ServiceOrderProductComparisonTests(unittest.TestCase):
             app_module._normalize_comparison_product_code(" 00ab-01 "),
             "00AB-01",
         )
+
+
+def make_crm_session():
+    session = object.__new__(app_module.CRMSession)
+    session.lock = __import__("threading").RLock()
+    session.logged_in = True
+    session.page = mock.Mock()
+    return session
+
+
+class CRMRelatedOrderTests(unittest.TestCase):
+    def _success_patches(self, session, fields=None, products=None):
+        patches = contextlib.ExitStack()
+        patches.enter_context(mock.patch.object(session, "is_alive", return_value=True))
+        patches.enter_context(mock.patch.object(session, "_is_current_page_logged_in", return_value=True))
+        patches.enter_context(mock.patch.object(session, "_open_service_order_list", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_search_service_order", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_service_detail_fields", return_value=fields or []))
+        patches.enter_context(mock.patch.object(session, "_open_store_order_list", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_search_store_order", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")))
+        patches.enter_context(mock.patch.object(session, "_store_order_detail_products", return_value=products or []))
+        return patches
+
+    def test_related_order_number_uses_only_explicit_supported_labels(self):
+        fields = [
+            {"label": "备注", "value": "订单 SO-WRONG"},
+            {"label": "关联订单号", "value": "SO20260914001"},
+        ]
+        self.assertEqual(
+            app_module._related_order_no_from_service_fields(fields),
+            "SO20260914001",
+        )
+
+    def test_query_related_order_products_returns_service_fields_and_order_rows(self):
+        session = make_crm_session()
+        fields = [{"label": "关联订单号", "value": "SO20260914001"}]
+        products = [{"product_name": "前置过滤器", "product_code": "916046216", "quantity": 2}]
+        with self._success_patches(session, fields, products):
+            ok, result = session.query_related_order_products("FWD20260914001")
+        self.assertTrue(ok)
+        self.assertEqual(result, {
+            "service_no": "FWD20260914001",
+            "order_no": "SO20260914001",
+            "service_fields": fields,
+            "order_products": products,
+        })
+
+    def test_query_related_order_products_names_missing_related_order_stage(self):
+        session = make_crm_session()
+        with self._success_patches(session, fields=[{"label": "备注", "value": "无关联"}]):
+            ok, result = session.query_related_order_products("FWD20260914001")
+        self.assertFalse(ok)
+        self.assertIn("服务单没有关联订单号", result["error"])
+
+    def test_query_related_order_products_names_exact_order_search_failure_stage(self):
+        session = make_crm_session()
+        fields = [{"label": "关联订单号", "value": "SO20260914001"}]
+        with self._success_patches(session, fields=fields), mock.patch.object(
+            session,
+            "_search_store_order",
+            return_value=(False, "订单搜索后未找到精确订单号：SO20260914001"),
+        ):
+            ok, result = session.query_related_order_products("FWD20260914001")
+        self.assertFalse(ok)
+        self.assertIn("订单搜索后未找到精确订单号", result["error"])
+
+    def test_query_related_order_products_names_empty_product_table_stage(self):
+        session = make_crm_session()
+        fields = [{"label": "关联订单号", "value": "SO20260914001"}]
+        with self._success_patches(session, fields=fields, products=[]):
+            ok, result = session.query_related_order_products("FWD20260914001")
+        self.assertFalse(ok)
+        self.assertIn("订单详情未读取到产品明细", result["error"])

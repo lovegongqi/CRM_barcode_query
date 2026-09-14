@@ -1897,6 +1897,145 @@ class CRMSession:
                 pass
         return False, "点击服务单号后未进入服务单详情"
 
+    def _store_order_list_ready(self):
+        try:
+            compact = re.sub(r"\s+", "", self.page.inner_text("body", timeout=3000) or "")
+            return "订单列表" in compact and "订单号" in compact
+        except Exception:
+            return False
+
+    def _open_store_order_list(self, emit):
+        emit("打开 CRM 门店管理订单列表...")
+        if not self._click_visible_crm_text("门店管理"):
+            return False, "未找到门店管理菜单"
+        if not self._click_visible_crm_text("订单列表"):
+            return False, "未找到门店管理订单列表"
+        for _ in range(20):
+            if self._store_order_list_ready():
+                return True, ""
+            time.sleep(0.5)
+        return False, "未进入门店管理订单列表"
+
+    def _set_store_order_search_keyword(self, order_no):
+        return bool(self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const items = Array.from(document.querySelectorAll('.el-form-item,.ant-form-item,.form-group'));
+        let input = items.filter(visible).map(item => ({
+            item,
+            input: item.querySelector('input:not([disabled]),textarea:not([disabled])'),
+            text: clean(item.innerText || item.textContent || '')
+        })).find(row => row.input && row.text.includes('订单号'))?.input;
+        if (!input) input = Array.from(document.querySelectorAll('input:not([disabled])'))
+            .filter(visible).find(el => clean(el.placeholder).includes('订单号'));
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        input.focus();
+        if (setter) setter.call(input, orderNo); else input.value = orderNo;
+        input.dispatchEvent(new Event('input', {bubbles: true}));
+        input.dispatchEvent(new Event('change', {bubbles: true}));
+        input.setAttribute('data-codex-service-search', '1');
+        return true;
+    }""", str(order_no)))
+
+    def _click_store_order_search_button(self):
+        return self._click_service_search_button()
+
+    def _store_order_search_snapshot(self, order_no):
+        return self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const rows = Array.from(document.querySelectorAll('tbody tr')).filter(visible);
+        const found = rows.some(row => Array.from(row.querySelectorAll('td'))
+            .some(cell => clean(cell.innerText || cell.textContent || '') === clean(orderNo)));
+        const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]'))
+            .some(visible);
+        const body = clean(document.body?.innerText || '');
+        return {found, loading, noData: /暂无数据|无数据|暂无记录|没有数据/.test(body)};
+    }""", str(order_no))
+
+    def _search_store_order(self, order_no):
+        if not self._set_store_order_search_keyword(order_no):
+            return False, "未找到订单号搜索输入框"
+        if not self._click_store_order_search_button():
+            return False, "未找到订单查询按钮"
+        stable_empty = 0
+        for _ in range(35):
+            time.sleep(0.8)
+            snapshot = self._store_order_search_snapshot(order_no) or {}
+            if snapshot.get("found"):
+                return True, ""
+            if snapshot.get("loading"):
+                stable_empty = 0
+            elif snapshot.get("noData"):
+                stable_empty += 1
+                if stable_empty >= 4:
+                    return False, f"订单列表未找到订单号：{order_no}"
+            else:
+                stable_empty = 0
+        return False, f"订单搜索后未找到精确订单号：{order_no}"
+
+    def _open_store_order_detail(self, order_no):
+        clicked = self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const row = Array.from(document.querySelectorAll('tbody tr')).filter(visible)
+            .find(tr => Array.from(tr.querySelectorAll('td'))
+                .some(td => clean(td.innerText || td.textContent || '') === clean(orderNo)));
+        const target = row && Array.from(row.querySelectorAll('a,button,td,span'))
+            .filter(visible).find(el => clean(el.innerText || el.textContent || '') === clean(orderNo));
+        const clickable = target && (target.closest('a,button') || target);
+        if (!clickable) return false;
+        clickable.click();
+        return true;
+    }""", str(order_no))
+        if not clicked:
+            return False, f"未找到可打开的订单：{order_no}"
+        for _ in range(20):
+            time.sleep(0.5)
+            compact = re.sub(r"\s+", "", self.page.inner_text("body", timeout=3000) or "")
+            if str(order_no).replace(" ", "") in compact and "产品" in compact:
+                return True, ""
+        return False, f"点击订单后未进入订单详情：{order_no}"
+
+    def _store_order_detail_products(self):
+        rows = self.page.evaluate("""() => {
+        const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+        const labels = {
+            name: ['产品名称', '商品名称', '物料名称'],
+            code: ['产品编码', '商品编码', '物料编码'],
+            quantity: ['数量', '产品数量', '订单数量', '购买数量']
+        };
+        for (const table of document.querySelectorAll('.el-table,.ant-table,table')) {
+            const headers = Array.from(table.querySelectorAll('thead th')).map(cell => clean(cell.innerText));
+            const index = key => headers.findIndex(text => labels[key].some(label => text === label || text.includes(label)));
+            const nameIndex = index('name');
+            const codeIndex = index('code');
+            const quantityIndex = index('quantity');
+            if (codeIndex < 0 || quantityIndex < 0) continue;
+            return Array.from(table.querySelectorAll('tbody tr')).map(tr => {
+                const cells = Array.from(tr.querySelectorAll(':scope > td'));
+                return {
+                    product_name: nameIndex >= 0 && cells[nameIndex] ? clean(cells[nameIndex].innerText) : '',
+                    product_code: cells[codeIndex] ? clean(cells[codeIndex].innerText) : '',
+                    quantity: cells[quantityIndex] ? clean(cells[quantityIndex].innerText) : ''
+                };
+            }).filter(row => row.product_code || row.quantity);
+        }
+        return [];
+    }""")
+        products = []
+        for row in rows or []:
+            code = _normalize_comparison_product_code((row or {}).get("product_code"))
+            if not code:
+                raise ValueError("订单产品缺少产品编码")
+            products.append({
+                "product_name": _clean_export_value((row or {}).get("product_name")),
+                "product_code": code,
+                "quantity": _parse_order_product_quantity((row or {}).get("quantity")),
+            })
+        return products
+
     def _service_detail_closed_state(self):
         try:
             result = self.page.evaluate("""() => {
@@ -2311,6 +2450,51 @@ class CRMSession:
                 return True, {"products": products}
         except Exception as e:
             return False, {"error": str(e)}
+
+    def query_related_order_products(self, service_no, log=None):
+        def emit(message, level="info"):
+            if log:
+                log(message, level)
+        try:
+            service_no = _clean_export_value(service_no)
+            if not service_no:
+                return False, {"error": "服务单号为空"}
+            with self.lock:
+                if not self.is_alive() and not self._ensure_browser():
+                    return False, {"error": "浏览器未启动，请先登录 CRM"}
+                if not self.logged_in and not self._is_current_page_logged_in():
+                    return False, {"error": "CRM 当前未登录，请先登录 CRM"}
+                for operation in (
+                    lambda: self._open_service_order_list(emit),
+                    lambda: self._search_service_order(service_no),
+                    lambda: self._open_service_order_detail(service_no),
+                ):
+                    ok, message = operation()
+                    if not ok:
+                        return False, {"error": message}
+                fields = self._service_detail_fields()
+                order_no = _related_order_no_from_service_fields(fields)
+                if not order_no:
+                    return False, {"error": "服务单没有关联订单号"}
+                for operation in (
+                    lambda: self._open_store_order_list(emit),
+                    lambda: self._search_store_order(order_no),
+                    lambda: self._open_store_order_detail(order_no),
+                ):
+                    ok, message = operation()
+                    if not ok:
+                        return False, {"error": message}
+                order_products = self._store_order_detail_products()
+                if not order_products:
+                    return False, {"error": "订单详情未读取到产品明细"}
+                return True, {
+                    "service_no": service_no,
+                    "order_no": order_no,
+                    "service_fields": fields,
+                    "order_products": order_products,
+                }
+        except Exception as error:
+            return False, {"error": str(error)}
 
     def _move_create_url(self):
         cfg = load_crm_config()
@@ -3673,6 +3857,9 @@ class CRMWorker:
         if log:
             log(f"CRM 重查产品明细任务已加入队列：{service_no}", "dim")
         return self._call("refresh_service_order_products", service_no, log)
+
+    def query_related_order_products(self, service_no, log=None):
+        return self._call("query_related_order_products", service_no, log)
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
@@ -6894,6 +7081,15 @@ def _clean_export_value(value):
 
 def _normalize_comparison_product_code(value):
     return _clean_export_value(value).upper()
+
+RELATED_ORDER_FIELD_LABELS = ("关联订单号", "订单号", "销售订单号")
+
+def _related_order_no_from_service_fields(fields):
+    for wanted in RELATED_ORDER_FIELD_LABELS:
+        for field in fields or []:
+            if _clean_export_value((field or {}).get("label")).rstrip("：:") == wanted:
+                return _clean_export_value((field or {}).get("value"))
+    return ""
 
 def _parse_order_product_quantity(value):
     text = _clean_export_value(value).replace(",", "")
