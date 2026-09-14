@@ -62,10 +62,38 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("受理时间", results)
         self.assertIn("客户预约时间", results)
         self.assertIn("服务人员", results)
-        self.assertIn("<th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th>", results)
+        self.assertIn("<th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th>", results)
         self.assertNotIn("<th>型号</th>", results)
         self.assertNotIn("product.product_model", results)
         self.assertNotIn("service-close-summary-log", results)
+
+    def test_service_detail_can_query_and_compare_related_order_products(self):
+        """The service-detail UI must expose its order comparison workflow."""
+        html = self.source("index.html")
+        for text in (
+            "查询订单产品明细",
+            "订单数量",
+            "服务单数量",
+            "对比结果",
+            "startOrderProductQuery",
+            "pollOrderProductQuery",
+            "/order-products/start",
+            "/order-products/status",
+            "服务单缺少",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, html)
+
+    def test_service_detail_order_product_query_resumes_and_guards_modal_identity(self):
+        """A duplicate start must resume polling without updating a replaced modal."""
+        html = self.source("index.html")
+        self.assertRegex(
+            html,
+            r"response\.status\s*!==\s*409\s*&&\s*\(!response\.ok\s*\|\|\s*!data\.success\)",
+        )
+        self.assertIn("isCurrentServiceOrderDetail(serviceNo)", html)
+        self.assertIn("setTimeout(() => pollOrderProductQuery(serviceNo, jobId), 1000)", html)
+        self.assertIn("resumeOrderProductQuery(serviceNo)", html)
 
     def test_results_page_can_export_service_orders_in_install_template(self):
         results = self.source("index.html")

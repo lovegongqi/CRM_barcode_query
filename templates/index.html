@@ -371,6 +371,8 @@
         .service-detail-refresh { background: rgba(0, 200, 220, 0.12); border: 1px solid rgba(0, 200, 220, 0.4); color: #67e8f9; padding: 4px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, transform 0.15s; }
         .service-detail-refresh:hover:not(:disabled) { background: rgba(0, 200, 220, 0.22); }
         .service-detail-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+        .service-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .service-detail-order-meta { margin-top: 5px; color: #94a3b8; font-size: 11px; line-height: 1.5; }
         .service-detail-refresh-icon { display: inline-block; font-size: 14px; line-height: 1; }
         .service-detail-refresh-icon.spinning { animation: service-detail-spin 0.9s linear infinite; }
         @keyframes service-detail-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -422,6 +424,12 @@
         .service-detail-relation { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
         .service-detail-relation.is-selected { color: #7dd3fc; background: rgba(14, 165, 233, .16); border: 1px solid rgba(56, 189, 248, .35); }
         .service-detail-relation.is-related { color: #c4b5fd; background: rgba(139, 92, 246, .16); border: 1px solid rgba(167, 139, 250, .35); }
+        .service-detail-comparison { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+        .service-detail-comparison.is-matched { color: #86efac; background: rgba(34, 197, 94, .15); border: 1px solid rgba(74, 222, 128, .35); }
+        .service-detail-comparison.is-mismatch { color: #fde68a; background: rgba(245, 158, 11, .15); border: 1px solid rgba(251, 191, 36, .35); }
+        .service-detail-comparison.is-order-missing { color: #fca5a5; background: rgba(239, 68, 68, .15); border: 1px solid rgba(248, 113, 113, .35); }
+        .service-detail-comparison.is-service-missing { color: #c4b5fd; background: rgba(139, 92, 246, .16); border: 1px solid rgba(167, 139, 250, .35); }
+        .service-detail-comparison.is-unmatchable { color: #cbd5e1; background: rgba(148, 163, 184, .16); border: 1px solid rgba(203, 213, 225, .3); }
         .service-detail-empty { padding: 28px; color: #94a3b8; text-align: center; }
         @media (max-width: 760px) {
             .service-detail-fields { grid-template-columns: 1fr; }
@@ -1482,6 +1490,11 @@
         let lastServiceCloseLogSeq = 0;
         let serviceCloseStartAtMs = 0;
         const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1';
+        let serviceDetailCurrentServiceNo = '';
+        let orderProductQueryTimer = null;
+        let orderProductQueryServiceNo = '';
+        let orderProductQueryJobId = '';
+        let orderProductQueryPollInFlight = false;
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -2474,6 +2487,8 @@
         }
 
         function openDetailDocument(title, filePath) {
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = '';
             const detailFrame = document.getElementById('detailFrame');
             const serviceDetailContent = document.getElementById('serviceDetailContent');
             serviceDetailContent.style.display = 'none';
@@ -2517,6 +2532,11 @@
             const content = document.getElementById('serviceDetailContent');
             const selectedSet = new Set((detail.selected_barcodes || []).map(String));
             const relatedSet = new Set((detail.related_barcodes || []).map(String));
+            const orderLookup = detail.order_lookup && typeof detail.order_lookup === 'object' ? detail.order_lookup : {};
+            const hasSuccessfulOrderLookup = Boolean(orderLookup.order_no);
+            const comparisonByCode = new Map((orderLookup.comparison || []).map(row => [
+                String(row.product_code || '').trim().toUpperCase(), row,
+            ]));
             const fields = (detail.fields || []).filter(row => row && row.label && row.value);
             const fieldValue = (labels) => {
                 for (const label of labels) {
@@ -2552,20 +2572,156 @@
                 const barcode = String(product.barcode || '');
                 const selected = selectedSet.has(barcode);
                 const related = relatedSet.has(barcode) || !selected;
+                const productCode = String(product.product_code || '').trim().toUpperCase();
+                const comparison = productCode ? comparisonByCode.get(productCode) : null;
+                const orderQuantity = comparison ? comparison.order_quantity : '—';
+                const serviceQuantity = comparison ? comparison.service_quantity : '—';
+                const comparisonLabel = comparison
+                    ? (comparison.status_label || '—')
+                    : (hasSuccessfulOrderLookup && !productCode ? '无法比对' : '—');
+                const comparisonClass = comparison ? {
+                    matched: 'is-matched',
+                    quantity_mismatch: 'is-mismatch',
+                    order_missing: 'is-order-missing',
+                    service_missing: 'is-service-missing',
+                }[comparison.status] || '' : (hasSuccessfulOrderLookup && !productCode ? 'is-unmatchable' : '');
                 return `<tr>
                     <td>${escapeHtml(product.product_name || '—')}</td>
                     <td>${escapeHtml(product.product_code || '—')}</td>
                     <td>${escapeHtml(product.barcode || '—')}</td>
                     <td><span class="service-detail-relation ${selected ? 'is-selected' : 'is-related'}">${selected ? '已选' : (related ? '关联' : '服务单')}</span></td>
+                    <td>${escapeHtml(orderQuantity)}</td>
+                    <td>${escapeHtml(serviceQuantity)}</td>
+                    <td><span class="service-detail-comparison ${comparisonClass}">${escapeHtml(comparisonLabel)}</span></td>
                 </tr>`;
-            }).join('');
+            }).concat((orderLookup.comparison || []).filter(row => row && row.status === 'service_missing').map(row => `<tr>
+                <td>${escapeHtml(row.product_name || '—')}</td>
+                <td>${escapeHtml(row.product_code || '—')}</td>
+                <td>—</td>
+                <td></td>
+                <td>${escapeHtml(row.order_quantity)}</td>
+                <td>${escapeHtml(row.service_quantity)}</td>
+                <td><span class="service-detail-comparison is-service-missing">${escapeHtml(row.status_label || '服务单缺少')}</span></td>
+            </tr>`)).join('');
             const refreshButton = `<button type="button" class="service-detail-refresh" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="refreshServiceOrderProducts(this.dataset.serviceNo)" title="重新打开 CRM 服务单详情并重抓产品明细"><span class="service-detail-refresh-icon">↻</span>重查产品明细</button>`;
-            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><h3>产品明细</h3>${refreshButton}</div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
+            const orderQueryButton = `<button type="button" class="service-detail-refresh service-detail-order-query"
+                data-service-no="${escapeHtml(detail.service_no || '')}"
+                onclick="startOrderProductQuery(this.dataset.serviceNo)">查询订单产品明细</button>`;
+            const orderMetadata = hasSuccessfulOrderLookup ? `<div class="service-detail-order-meta">关联订单：${escapeHtml(orderLookup.order_no)}<br>查询时间：${escapeHtml(orderLookup.queried_at || '—')}</div>` : '';
+            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><div><h3>产品明细</h3>${orderMetadata}</div><div class="service-detail-actions">${refreshButton}${orderQueryButton}</div></div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
             content.innerHTML = customerSection + serviceSection + productSection;
+        }
+
+        function isCurrentServiceOrderDetail(serviceNo) {
+            const modal = document.getElementById('detailModal');
+            return serviceDetailCurrentServiceNo === serviceNo && modal.classList.contains('overlay-show');
+        }
+
+        function stopOrderProductQueryPolling(serviceNo = '') {
+            if (serviceNo && orderProductQueryServiceNo !== serviceNo) return;
+            if (orderProductQueryTimer) clearTimeout(orderProductQueryTimer);
+            orderProductQueryTimer = null;
+            orderProductQueryServiceNo = '';
+            orderProductQueryJobId = '';
+            orderProductQueryPollInFlight = false;
+        }
+
+        function setOrderProductQueryButtonState(serviceNo, disabled, text = '') {
+            const button = Array.from(document.querySelectorAll('.service-detail-order-query'))
+                .find(item => item.dataset.serviceNo === serviceNo);
+            if (!button) return;
+            button.dataset.originalText = button.dataset.originalText || button.textContent;
+            button.disabled = disabled;
+            button.textContent = text || button.dataset.originalText;
+        }
+
+        function startOrderProductQueryPolling(serviceNo, jobId) {
+            if (orderProductQueryServiceNo === serviceNo && orderProductQueryJobId === jobId
+                && (orderProductQueryTimer || orderProductQueryPollInFlight)) return;
+            stopOrderProductQueryPolling();
+            orderProductQueryServiceNo = serviceNo;
+            orderProductQueryJobId = jobId;
+            pollOrderProductQuery(serviceNo, jobId);
+        }
+
+        async function startOrderProductQuery(serviceNo) {
+            if (!serviceNo || !isCurrentServiceOrderDetail(serviceNo)) return;
+            setOrderProductQueryButtonState(serviceNo, true, '查询中…');
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`, { method: 'POST' });
+                const data = await response.json();
+                if (response.status !== 409 && (!response.ok || !data.success)) {
+                    throw new Error(data.error || '订单产品明细查询失败');
+                }
+                if (!data.job_id) throw new Error(data.error || '订单产品明细查询失败');
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                startOrderProductQueryPolling(serviceNo, data.job_id);
+            } catch (error) {
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                stopOrderProductQueryPolling(serviceNo);
+                setOrderProductQueryButtonState(serviceNo, false);
+                showToast(error.message || '订单产品明细查询失败');
+            }
+        }
+
+        async function pollOrderProductQuery(serviceNo, jobId) {
+            if (!isCurrentServiceOrderDetail(serviceNo)
+                || orderProductQueryServiceNo !== serviceNo || orderProductQueryJobId !== jobId
+                || orderProductQueryPollInFlight) return;
+            orderProductQueryPollInFlight = true;
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`);
+                const data = await response.json();
+                if (!isCurrentServiceOrderDetail(serviceNo)) {
+                    stopOrderProductQueryPolling(serviceNo);
+                    return;
+                }
+                if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败');
+                if (data.running) {
+                    setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
+                    orderProductQueryTimer = setTimeout(() => pollOrderProductQuery(serviceNo, jobId), 1000);
+                    return;
+                }
+                stopOrderProductQueryPolling(serviceNo);
+                if (!data.success) {
+                    setOrderProductQueryButtonState(serviceNo, false);
+                    showToast(data.error || '订单产品明细查询失败');
+                    return;
+                }
+                const detailResponse = await fetch(data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                const detail = await detailResponse.json();
+                if (!detailResponse.ok || detail.success === false) {
+                    throw new Error(detail.error || '服务单详情读取失败');
+                }
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                renderServiceOrderDetail(detail);
+                showToast(`关联订单：${data.order_no || detail.order_lookup?.order_no || '—'}`);
+            } catch (error) {
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                stopOrderProductQueryPolling(serviceNo);
+                setOrderProductQueryButtonState(serviceNo, false);
+                showToast(error.message || '订单产品明细查询失败');
+            } finally {
+                orderProductQueryPollInFlight = false;
+            }
+        }
+
+        async function resumeOrderProductQuery(serviceNo) {
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status`);
+                const data = await response.json();
+                if (!response.ok || !data.running || !data.job_id || !isCurrentServiceOrderDetail(serviceNo)) return;
+                setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
+                startOrderProductQueryPolling(serviceNo, data.job_id);
+            } catch (_) {
+                // Status recovery is best-effort; the explicit query action reports errors.
+            }
         }
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
             if (!detailUrl) return;
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = serviceNo;
             const modal = document.getElementById('detailModal');
             const detailFrame = document.getElementById('detailFrame');
             const content = document.getElementById('serviceDetailContent');
@@ -2580,8 +2736,11 @@
                 const response = await fetch(detailUrl);
                 const detail = await response.json();
                 if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在');
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
                 renderServiceOrderDetail(detail);
+                resumeOrderProductQuery(serviceNo);
             } catch (error) {
+                if (!isCurrentServiceOrderDetail(serviceNo)) return;
                 content.innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`;
             }
         }
@@ -2591,7 +2750,7 @@
                 showToast('服务单号为空');
                 return;
             }
-            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh'));
+            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh:not(.service-detail-order-query)'));
             buttons.forEach(btn => { btn.disabled = true; btn.classList.add('is-loading'); btn.dataset.originalText = btn.dataset.originalText || btn.textContent; btn.innerHTML = '<span class="service-detail-refresh-icon spinning">↻</span>重查中…'; });
             try {
                 const res = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, { method: 'POST' });
@@ -2603,8 +2762,9 @@
                 const detailUrl = data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`;
                 const response = await fetch(detailUrl);
                 const detail = await response.json();
-                if (response.ok && detail && detail.success !== false) {
+                if (response.ok && detail && detail.success !== false && isCurrentServiceOrderDetail(serviceNo)) {
                     renderServiceOrderDetail(detail);
+                    resumeOrderProductQuery(serviceNo);
                 }
             } catch (e) {
                 showToast(`重查失败：${e.message || e}`);
@@ -2614,6 +2774,8 @@
         }
 
         function closeDetailModal() {
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = '';
             document.getElementById('detailModal').classList.remove('overlay-show');
             document.getElementById('detailFrame').srcdoc = '';
             document.getElementById('detailFrame').src = '';
