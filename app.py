@@ -4709,7 +4709,12 @@ query_slot_reservation_lock = threading.RLock()
 priority_query_work_lock = threading.RLock()
 priority_query_waiters = []
 priority_query_slot_reservations = {}
-PRIORITY_QUERY_WORK_ORDER = {'inbound': 1, 'service_close': 2, 'library': 3}
+PRIORITY_QUERY_WORK_ORDER = {
+    'inbound': 1,
+    'service_close': 2,
+    'order_products': 3,
+    'library': 3,
+}
 
 batch_job_lock = threading.Lock()
 batch_jobs = {}
@@ -4750,6 +4755,10 @@ latest_inbound_gyj_job_by_owner = {}
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
 latest_service_close_job_by_slot = {}
+
+order_product_job_lock = threading.RLock()
+order_product_jobs = {}
+latest_order_product_job_by_service = {}
 
 summary_job_lock = threading.Lock()
 summary_jobs = {}
@@ -4972,6 +4981,22 @@ def _empty_service_close_job(slot_id=None, orders=None):
         'no_service': [],
         'log_seq': 0,
         'logs': [],
+        'started_at': '',
+        'finished_at': '',
+    }
+
+def _empty_order_product_job(service_no):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'service_no': _clean_export_value(service_no),
+        'order_no': '',
+        'slot_id': '',
+        'slot_label': '',
+        'running': False,
+        'done': False,
+        'success': False,
+        'stage': 'waiting',
+        'error': '',
         'started_at': '',
         'finished_at': '',
     }
@@ -6036,6 +6061,71 @@ def _run_inbound_gyj_job(job_id, worker, lines, lease=None):
     finally:
         if lease is not None:
             lease.release()
+
+def _run_order_product_job(job_id, worker):
+    with order_product_job_lock:
+        job = order_product_jobs.get(job_id)
+        if not job:
+            return
+        service_no = job['service_no']
+
+    try:
+        ok, result = worker.query_related_order_products(service_no, log=lambda *_args: None)
+        if not ok:
+            error = result.get('error') if isinstance(result, dict) else result
+            raise RuntimeError(_brief_batch_error(error, 800) or '订单产品明细查询失败')
+        if not isinstance(result, dict):
+            raise ValueError('订单产品明细返回格式不正确')
+
+        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+        with open(filepath, 'r', encoding='utf-8') as file:
+            detail = json.load(file)
+        if not isinstance(detail, dict):
+            raise ValueError('服务单详情格式不正确')
+
+        order_no = _clean_export_value(result.get('order_no'))
+        order_products = list(result.get('order_products') or [])
+        service_fields = list(result.get('service_fields') or [])
+        comparison = _build_service_order_product_comparison(
+            detail.get('products') or [],
+            order_products,
+        )
+        queried_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        detail['fields'] = service_fields
+        detail['order_lookup'] = {
+            'order_no': order_no,
+            'products': order_products,
+            'comparison': comparison,
+            'queried_at': queried_at,
+        }
+        detail_url = _write_service_order_detail(service_no, detail)
+        if not detail_url:
+            raise RuntimeError('服务单详情保存失败')
+
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            if current:
+                current.update({
+                    'order_no': order_no,
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'stage': 'success',
+                    'error': '',
+                    'finished_at': queried_at,
+                })
+    except Exception as error:
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            if current:
+                current.update({
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'stage': 'failed',
+                    'error': _brief_batch_error(error, 800) or '订单产品明细查询失败',
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -8404,6 +8494,22 @@ def _normalize_service_order_detail(detail, service_no=""):
         )
         products.append(product)
     payload["products"] = products
+    order_lookup = payload.get("order_lookup")
+    if isinstance(order_lookup, dict):
+        order_lookup = dict(order_lookup)
+        order_lookup["products"] = (
+            list(order_lookup.get("products"))
+            if isinstance(order_lookup.get("products"), list)
+            else []
+        )
+        order_lookup["comparison"] = (
+            list(order_lookup.get("comparison"))
+            if isinstance(order_lookup.get("comparison"), list)
+            else []
+        )
+        payload["order_lookup"] = order_lookup
+    else:
+        payload["order_lookup"] = {}
     return payload
 
 def _write_service_order_detail(service_no, detail):
@@ -8416,8 +8522,7 @@ def _write_service_order_detail(service_no, detail):
     os.makedirs(SERVICE_ORDER_DIR, exist_ok=True)
     filename = f"{service_no}.json"
     filepath = os.path.join(SERVICE_ORDER_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
+    _atomic_save_json_rows(filepath, payload)
     return f"/api/service-orders/{service_no}"
 
 
@@ -10517,6 +10622,86 @@ def api_service_order_detail(service_no):
     except Exception:
         return jsonify({"success": False, "error": "服务单详情读取失败"}), 500
     return jsonify(_normalize_service_order_detail(payload, service_no))
+
+
+def _order_product_job_status_payload(job, service_no):
+    current = job or {}
+    successful = bool(current.get('success'))
+    return {
+        'job_id': current.get('job_id') or '',
+        'service_no': current.get('service_no') or _clean_export_value(service_no),
+        'order_no': current.get('order_no') or '',
+        'slot_id': current.get('slot_id') or '',
+        'slot_label': current.get('slot_label') or '',
+        'running': bool(current.get('running')),
+        'done': bool(current.get('done')),
+        'success': successful,
+        'stage': current.get('stage') or 'idle',
+        'error': current.get('error') or '',
+        'started_at': current.get('started_at') or '',
+        'finished_at': current.get('finished_at') or '',
+        'detail_url': f"/api/service-orders/{service_no}" if successful else '',
+    }
+
+
+@app.route("/api/service-orders/<service_no>/order-products/start", methods=["POST"])
+def api_service_order_products_start(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+    service_no = _clean_export_value(service_no)
+
+    with order_product_job_lock:
+        running_id = latest_order_product_job_by_service.get(service_no)
+        running_job = order_product_jobs.get(running_id)
+        if running_job and running_job.get('running'):
+            return jsonify(_order_product_job_status_payload(running_job, service_no)), 409
+        job = _empty_order_product_job(service_no)
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        job_id = job['job_id']
+        order_product_jobs[job_id] = job
+        latest_order_product_job_by_service[service_no] = job_id
+
+    def launch(worker, slot_id, slot_label):
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            current.update({
+                'slot_id': slot_id,
+                'slot_label': slot_label,
+                'stage': 'querying_service_order',
+            })
+
+        def run():
+            try:
+                _run_order_product_job(job_id, worker)
+            finally:
+                _release_priority_query_slot(slot_id)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('order_products', job_id, launch)
+    return jsonify({
+        'success': True,
+        'job_id': job_id,
+        'service_no': service_no,
+        'running': True,
+        'stage': 'waiting',
+    })
+
+
+@app.route("/api/service-orders/<service_no>/order-products/status")
+def api_service_order_products_status(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+    service_no = _clean_export_value(service_no)
+    with order_product_job_lock:
+        job_id = request.args.get('job_id') or latest_order_product_job_by_service.get(service_no)
+        job = order_product_jobs.get(job_id)
+        if job and job.get('service_no') != service_no:
+            job = None
+        return jsonify(_order_product_job_status_payload(job, service_no))
 
 
 @app.route("/api/service-orders/<service_no>/refresh-products", methods=["POST"])

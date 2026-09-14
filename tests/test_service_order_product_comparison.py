@@ -48,6 +48,34 @@ class ServiceOrderProductComparisonTests(unittest.TestCase):
             "00AB-01",
         )
 
+    def test_service_detail_normalizes_cached_order_lists_without_losing_legacy_fields(self):
+        detail = app_module._normalize_service_order_detail({
+            "service_no": "FWD20260914001",
+            "legacy_note": "keep me",
+            "order_lookup": {
+                "order_no": "SO20260914001",
+                "products": None,
+                "comparison": "invalid",
+                "legacy_lookup_field": "keep this too",
+            },
+        })
+
+        self.assertEqual(detail["legacy_note"], "keep me")
+        self.assertEqual(detail["order_lookup"], {
+            "order_no": "SO20260914001",
+            "products": [],
+            "comparison": [],
+            "legacy_lookup_field": "keep this too",
+        })
+
+    def test_legacy_service_detail_does_not_gain_a_fake_successful_lookup(self):
+        detail = app_module._normalize_service_order_detail({
+            "service_no": "FWD20260914001",
+            "products": [],
+        })
+
+        self.assertEqual(detail["order_lookup"], {})
+
 
 def make_crm_session():
     session = object.__new__(app_module.CRMSession)
