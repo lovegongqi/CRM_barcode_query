@@ -22,7 +22,7 @@ import shutil
 import hashlib
 from contextlib import closing, contextmanager
 from collections import OrderedDict
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from functools import wraps
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
@@ -6891,6 +6891,66 @@ def _clean_export_value(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return html_mod.unescape(str(value)).replace('\xa0', ' ').strip()
+
+def _normalize_comparison_product_code(value):
+    return _clean_export_value(value).upper()
+
+def _parse_order_product_quantity(value):
+    text = _clean_export_value(value).replace(",", "")
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"订单产品数量无法解析：{value}")
+    if not number.is_finite() or number < 0 or number != number.to_integral_value():
+        raise ValueError(f"订单产品数量必须是非负整数：{value}")
+    return int(number)
+
+def _build_service_order_product_comparison(service_products, order_products):
+    service_counts = {}
+    service_names = {}
+    order_counts = {}
+    order_names = {}
+    service_order = []
+    order_order = []
+    for product in service_products or []:
+        code = _normalize_comparison_product_code((product or {}).get("product_code"))
+        if not code:
+            continue
+        if code not in service_counts:
+            service_order.append(code)
+        service_counts[code] = service_counts.get(code, 0) + 1
+        service_names.setdefault(code, _clean_export_value((product or {}).get("product_name")))
+    for product in order_products or []:
+        code = _normalize_comparison_product_code((product or {}).get("product_code"))
+        if not code:
+            raise ValueError("订单产品缺少产品编码")
+        if code not in order_counts:
+            order_order.append(code)
+        order_counts[code] = order_counts.get(code, 0) + _parse_order_product_quantity(
+            (product or {}).get("quantity")
+        )
+        order_names.setdefault(code, _clean_export_value((product or {}).get("product_name")))
+    rows = []
+    for code in [*service_order, *[code for code in order_order if code not in service_counts]]:
+        order_quantity = order_counts.get(code, 0)
+        service_quantity = service_counts.get(code, 0)
+        if not service_quantity:
+            status, label = "service_missing", "服务单缺少"
+        elif code not in order_counts:
+            status, label = "order_missing", "订单缺少"
+        elif order_quantity == service_quantity:
+            status, label = "matched", "一致"
+        else:
+            status, label = "quantity_mismatch", "数量不一致"
+        rows.append({
+            "product_code": code,
+            "product_name": service_names.get(code) or order_names.get(code) or "",
+            "order_quantity": order_quantity,
+            "service_quantity": service_quantity,
+            "status": status,
+            "status_label": label,
+        })
+    return rows
 
 def is_disassembly_barcode(barcode):
     barcode = _clean_export_value(barcode)
