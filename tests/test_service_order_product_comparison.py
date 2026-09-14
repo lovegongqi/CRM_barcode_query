@@ -3,6 +3,7 @@ import unittest
 from unittest import mock
 
 import app as app_module
+from playwright.sync_api import sync_playwright
 
 
 class ServiceOrderProductComparisonTests(unittest.TestCase):
@@ -121,3 +122,26 @@ class CRMRelatedOrderTests(unittest.TestCase):
             ok, result = session.query_related_order_products("FWD20260914001")
         self.assertFalse(ok)
         self.assertIn("订单详情未读取到产品明细", result["error"])
+
+    def test_store_order_detail_clicks_exact_order_link_before_matching_cell(self):
+        order_no = "SO20260914001"
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content(f"""
+                    <table><tbody><tr><td><a id="order-link">{order_no}</a></td></tr></tbody></table>
+                    <script>
+                    document.querySelector('#order-link').addEventListener('click', event => {{
+                        event.preventDefault();
+                        document.body.innerHTML = '<div>{order_no} 产品详情</div>';
+                    }});
+                    </script>
+                """)
+                session = make_crm_session()
+                session.page = page
+                with mock.patch.object(app_module.time, "sleep"):
+                    ok, message = session._open_store_order_detail(order_no)
+                self.assertTrue(ok, message)
+            finally:
+                browser.close()

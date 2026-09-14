@@ -1982,11 +1982,10 @@ class CRMSession:
         const row = Array.from(document.querySelectorAll('tbody tr')).filter(visible)
             .find(tr => Array.from(tr.querySelectorAll('td'))
                 .some(td => clean(td.innerText || td.textContent || '') === clean(orderNo)));
-        const target = row && Array.from(row.querySelectorAll('a,button,td,span'))
+        const target = row && Array.from(row.querySelectorAll('a,button'))
             .filter(visible).find(el => clean(el.innerText || el.textContent || '') === clean(orderNo));
-        const clickable = target && (target.closest('a,button') || target);
-        if (!clickable) return false;
-        clickable.click();
+        if (!target) return false;
+        target.click();
         return true;
     }""", str(order_no))
         if not clicked:
