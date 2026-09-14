@@ -9813,24 +9813,40 @@ def api_service_close_start():
         service_close_jobs[job['job_id']] = job
 
     def launch(worker, slot_id, slot_label):
+        worker_entries = [(worker, slot_id, slot_label)]
+        with query_slot_reservation_lock:
+            additional_workers, _error = _select_idle_query_workers_desc({slot_id})
+            with priority_query_work_lock:
+                for additional_worker, additional_slot_id, additional_slot_label in additional_workers:
+                    if additional_slot_id in priority_query_slot_reservations:
+                        continue
+                    priority_query_slot_reservations[additional_slot_id] = job['job_id']
+                    worker_entries.append((additional_worker, additional_slot_id, additional_slot_label))
+
+        slot_ids = [entry[1] for entry in worker_entries]
+        slot_labels = [entry[2] for entry in worker_entries]
         with service_close_job_lock:
             current = service_close_jobs.get(job['job_id'])
             if not current:
-                _release_priority_query_slot(slot_id)
+                for selected_slot_id in slot_ids:
+                    _release_priority_query_slot(selected_slot_id)
                 return
             current['slot_id'] = slot_id
-            current['slot_ids'] = [slot_id]
-            _append_job_log_unlocked(current, f'已分配查询通道：{slot_label}', 'info', 1000)
-            latest_service_close_job_by_slot[slot_id] = job['job_id']
+            current['slot_ids'] = slot_ids
+            _append_job_log_unlocked(current, f"已分配查询通道：{'、'.join(slot_labels)}", 'info', 1000)
+            for selected_slot_id in slot_ids:
+                latest_service_close_job_by_slot[selected_slot_id] = job['job_id']
 
         def run():
             try:
-                _run_service_close_job(job['job_id'], [(worker, slot_id, slot_label)], orders)
+                _run_service_close_job(job['job_id'], worker_entries, orders)
             finally:
                 with service_close_job_lock:
-                    if latest_service_close_job_by_slot.get(slot_id) == job['job_id']:
-                        latest_service_close_job_by_slot.pop(slot_id, None)
-                _release_priority_query_slot(slot_id)
+                    for selected_slot_id in slot_ids:
+                        if latest_service_close_job_by_slot.get(selected_slot_id) == job['job_id']:
+                            latest_service_close_job_by_slot.pop(selected_slot_id, None)
+                for selected_slot_id in slot_ids:
+                    _release_priority_query_slot(selected_slot_id)
         threading.Thread(target=run, daemon=True).start()
 
     enqueue_priority_query_work('service_close', job['job_id'], launch)

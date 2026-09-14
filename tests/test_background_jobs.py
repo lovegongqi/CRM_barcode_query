@@ -60,8 +60,8 @@ class FakeTransferWorker:
 
 
 class BlockingServiceCloseWorker:
-    def __init__(self, products=None, detail_url=""):
-        self.slot_id = "query-1"
+    def __init__(self, products=None, detail_url="", slot_id="query-1"):
+        self.slot_id = slot_id
         self.products = list(products or [])
         self.detail_url = detail_url
         self.started = threading.Event()
@@ -654,6 +654,81 @@ class BackgroundJobTests(unittest.TestCase):
             thread.join(timeout=2)
             with app_module.service_close_job_lock:
                 app_module.service_close_jobs.pop(job["job_id"], None)
+
+    def test_service_close_start_uses_all_available_query_channels(self):
+        orders = [
+            {"service_no": f"FWD20260914000{index}", "barcodes": [f"792500000000{index}"]}
+            for index in range(1, 4)
+        ]
+        workers = [
+            BlockingServiceCloseWorker(slot_id=f"query-{index}")
+            for index in range(1, 4)
+        ]
+
+        def dispatch_now(_kind, job_id, launch):
+            with app_module.priority_query_work_lock:
+                app_module.priority_query_slot_reservations["query-1"] = job_id
+            launch(workers[0], "query-1", "查询1")
+
+        with mock.patch.object(
+            app_module,
+            "selected_latest_service_orders",
+            return_value={"orders": orders, "missing": [], "no_service": []},
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=dispatch_now,
+        ), mock.patch.object(
+            app_module,
+            "_select_idle_query_workers_desc",
+            return_value=(
+                [
+                    (workers[1], "query-2", "查询2"),
+                    (workers[2], "query-3", "查询3"),
+                ],
+                "",
+            ),
+        ):
+            response = self.client.post(
+                "/api/service-close/start",
+                json={"barcodes": [row["barcodes"][0] for row in orders]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        job_id = response.get_json()["job_id"]
+        try:
+            self.assertTrue(workers[0].started.wait(timeout=1))
+            self.assertTrue(workers[1].started.wait(timeout=1))
+            self.assertTrue(workers[2].started.wait(timeout=1))
+            status = self.client.get(
+                "/api/service-close/status",
+                query_string={"job_id": job_id},
+            ).get_json()
+            self.assertEqual(
+                status["slot_ids"],
+                ["query-1", "query-2", "query-3"],
+            )
+            self.assertEqual(
+                {row["slot_label"] for row in status["service_rows"]},
+                {"查询1", "查询2", "查询3"},
+            )
+        finally:
+            for worker in workers:
+                worker.release.set()
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                with app_module.service_close_job_lock:
+                    current = app_module.service_close_jobs.get(job_id) or {}
+                    if current.get("done"):
+                        break
+                time.sleep(0.01)
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job_id, None)
+                for slot_id in ["query-1", "query-2", "query-3"]:
+                    app_module.latest_service_close_job_by_slot.pop(slot_id, None)
+            with app_module.priority_query_work_lock:
+                for slot_id in ["query-1", "query-2", "query-3"]:
+                    app_module.priority_query_slot_reservations.pop(slot_id, None)
 
     def test_service_close_merges_selected_and_detail_product_barcodes(self):
         row = {
