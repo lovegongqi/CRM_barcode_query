@@ -156,6 +156,71 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_service_detail_entry_requests_ignore_late_prior_lifecycle_for_same_service(self):
+        """Late start and recovery responses cannot replace a newer same-service poll."""
+        html = self.source("index.html")
+        start = html.index("function isCurrentServiceOrderDetail(serviceNo)")
+        end = html.index("async function showServiceOrderDetail(serviceNo, detailUrl)", start)
+        detail_functions = html[start:end]
+        script = f"""
+const assert = require('assert');
+const serviceNo = 'FWD20260914001';
+let serviceDetailCurrentServiceNo = serviceNo;
+let orderProductQueryTimer = null;
+let orderProductQueryServiceNo = '';
+let orderProductQueryJobId = '';
+let orderProductQueryPollInFlight = false;
+let orderProductQueryGeneration = 0;
+const modal = {{ classList: {{ contains: name => name === 'overlay-show' }} }};
+const button = {{ dataset: {{ serviceNo, originalText: '' }}, disabled: false, textContent: '查询订单产品明细' }};
+const document = {{ getElementById: () => modal, querySelectorAll: () => [button] }};
+const timers = [];
+const setTimeout = callback => {{ timers.push(callback); return timers.length; }};
+const clearTimeout = () => {{}};
+const pendingFetches = [];
+const fetch = () => new Promise(resolve => pendingFetches.push(resolve));
+const showToast = () => {{}};
+const renderServiceOrderDetail = () => {{}};
+{detail_functions}
+const response = data => ({{ ok: true, status: 200, json: async () => data }});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServiceNo = serviceNo; }};
+(async () => {{
+  startOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 1);
+  reopen();
+  startOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 2);
+  pendingFetches[1](response({{ success: true, job_id: 'new-start' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'new start owns its status poll');
+  pendingFetches[0](response({{ success: true, job_id: 'old-start' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'late start must not replace the new poll');
+
+  pendingFetches.length = 0;
+  reopen();
+  resumeOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 1);
+  reopen();
+  resumeOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 2);
+  pendingFetches[1](response({{ running: true, job_id: 'new-resume', stage: 'waiting' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'new recovery owns its status poll');
+  pendingFetches[0](response({{ running: true, job_id: 'old-resume', stage: 'waiting' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'late recovery must not replace the new poll');
+}})().catch(error => {{ console.error(error.stack); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_results_page_can_export_service_orders_in_install_template(self):
         results = self.source("index.html")
         self.assertIn('onclick="exportServiceOrdersXlsx()"', results)

@@ -2634,6 +2634,11 @@
                 && orderProductQueryJobId === jobId;
         }
 
+        function ownsOrderProductQueryLifecycle(serviceNo, generation) {
+            return generation === orderProductQueryGeneration
+                && isCurrentServiceOrderDetail(serviceNo);
+        }
+
         function setOrderProductQueryButtonState(serviceNo, disabled, text = '') {
             const button = Array.from(document.querySelectorAll('.service-detail-order-query'))
                 .find(item => item.dataset.serviceNo === serviceNo);
@@ -2653,22 +2658,26 @@
         }
 
         async function startOrderProductQuery(serviceNo) {
-            if (!serviceNo || !isCurrentServiceOrderDetail(serviceNo)) return;
+            const generation = orderProductQueryGeneration;
+            if (!serviceNo || !ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
             setOrderProductQueryButtonState(serviceNo, true, '查询中…');
             try {
                 const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`, { method: 'POST' });
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 const data = await response.json();
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 if (response.status !== 409 && (!response.ok || !data.success)) {
                     throw new Error(data.error || '订单产品明细查询失败');
                 }
                 if (!data.job_id) throw new Error(data.error || '订单产品明细查询失败');
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 startOrderProductQueryPolling(serviceNo, data.job_id);
             } catch (error) {
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
-                stopOrderProductQueryPolling(serviceNo);
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 setOrderProductQueryButtonState(serviceNo, false);
                 showToast(error.message || '订单产品明细查询失败');
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                stopOrderProductQueryPolling(serviceNo);
             }
         }
 
@@ -2732,11 +2741,17 @@
         }
 
         async function resumeOrderProductQuery(serviceNo) {
+            const generation = orderProductQueryGeneration;
+            if (!serviceNo || !ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
             try {
                 const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status`);
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 const data = await response.json();
-                if (!response.ok || !data.running || !data.job_id || !isCurrentServiceOrderDetail(serviceNo)) return;
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                if (!response.ok || !data.running || !data.job_id) return;
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 startOrderProductQueryPolling(serviceNo, data.job_id);
             } catch (_) {
                 // Status recovery is best-effort; the explicit query action reports errors.
