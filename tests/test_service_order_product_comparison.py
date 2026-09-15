@@ -298,11 +298,15 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         """)
 
         detail = self.detail_html(["产品编码", "数量"], [["A", "1"]], order_no=order_no)
-        observations = []
+        steps = []
+        observed_states = []
+        original_snapshot = self.session._store_order_search_snapshot
 
         def advance_results(_delay):
-            observations.append(self.session._store_order_search_snapshot(order_no)["found"])
-            if len(observations) == 1:
+            steps.append(1)
+            if len(steps) == 1:
+                return
+            if len(steps) == 2:
                 self.page.eval_on_selector("#orders", "(orders, orderNo) => { orders.innerHTML = `<tr><td>${orderNo}</td></tr>`; }", order_no)
                 return
             self.page.evaluate("""({ orderNo, detail }) => {
@@ -314,11 +318,18 @@ class CRMOrderProductDOMTests(unittest.TestCase):
                 });
             }""", {"orderNo": order_no, "detail": detail})
 
+        def record_snapshot(current_order_no):
+            snapshot = original_snapshot(current_order_no)
+            observed_states.append(snapshot["found"])
+            return snapshot
+
         with mock.patch.object(self.session, "_click_store_order_search_button", return_value=True), \
-             mock.patch.object(app_module.time, "sleep", side_effect=advance_results):
+             mock.patch.object(app_module.time, "sleep", side_effect=advance_results), \
+             mock.patch.object(self.session, "_store_order_search_snapshot", side_effect=record_snapshot):
             ok, message = self.session._search_store_order(order_no)
         self.assertTrue(ok, message)
-        self.assertEqual(observations, [False, False])
+        self.assertEqual(observed_states, [False, False, True])
+        self.assertEqual(len(steps), 3)
         self.assertEqual(self.page.input_value("#order-search"), order_no)
         self.assertEqual(self.page.input_value("#pager"), "")
 
