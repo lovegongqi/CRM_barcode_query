@@ -1899,8 +1899,20 @@ class CRMSession:
 
     def _store_order_list_ready(self):
         try:
-            compact = re.sub(r"\s+", "", self.page.inner_text("body", timeout=3000) or "")
-            return ("订单查询" in compact or "订单列表" in compact) and "订单号" in compact
+            if "#/ordertwoc/list" not in (self.page.url or ""):
+                return False
+            return bool(self.page.evaluate("""() => {
+                const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                const clean = value => (value || '').replace(/\\s+/g, '').trim();
+                const contexts = Array.from(document.querySelectorAll(
+                    'h1,h2,h3,h4,h5,h6,[role="heading"],header,.el-page-header__title,.page-title,[class*="page-title"],[class*="PageTitle"],[aria-current="page"],.el-breadcrumb__inner'
+                )).filter(visible);
+                const hasHeading = contexts.some(node => ['订单查询', '订单列表'].includes(clean(node.innerText || node.textContent || '')));
+                const hasOrderHeader = Array.from(document.querySelectorAll('table')).filter(visible)
+                    .some(table => Array.from(table.querySelectorAll('thead th')).filter(visible)
+                        .some(cell => clean(cell.innerText || cell.textContent || '') === '订单号'));
+                return hasHeading && hasOrderHeader;
+            }"""))
         except Exception:
             return False
 
@@ -1974,8 +1986,8 @@ class CRMSession:
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const clean = value => (value || '').replace(/\\s+/g, '').trim();
         const rows = Array.from(document.querySelectorAll('tbody tr')).filter(visible);
-        const found = rows.some(row => Array.from(row.querySelectorAll('td'))
-            .some(cell => clean(cell.innerText || cell.textContent || '') === clean(orderNo)));
+        const found = rows.some(row => Array.from(row.querySelectorAll('a,button')).filter(visible)
+            .some(target => clean(target.innerText || target.textContent || '') === clean(orderNo)));
         const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]'))
             .some(visible);
         const body = clean(document.body?.innerText || '');

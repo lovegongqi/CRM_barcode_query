@@ -130,23 +130,18 @@ class CRMRelatedOrderTests(unittest.TestCase):
         with mock.patch.object(app_module, "load_crm_config", return_value={
             "website": {"url": "http://crmportal.ecowaterchina.net.cn/"},
         }), mock.patch.object(session, "is_alive", return_value=True), \
+             mock.patch.object(session, "_store_order_list_ready", side_effect=[False, True]), \
              mock.patch.object(session, "_goto", return_value=(True, "")) as goto, \
              mock.patch.object(app_module.time, "sleep"):
             self.assertEqual(
                 session._store_order_list_url(),
                 "http://crmportal.ecowaterchina.net.cn/#/ordertwoc/list",
             )
-            self.assertTrue(session._store_order_list_ready())
             ok, message = session._open_store_order_list(lambda *_: None)
         self.assertTrue(ok, message)
         goto.assert_called_once_with(
             "http://crmportal.ecowaterchina.net.cn/#/ordertwoc/list", timeout=60000
         )
-
-    def test_store_order_list_ready_accepts_legacy_heading(self):
-        session = make_crm_session()
-        session.page.inner_text.return_value = "订单列表 订单号"
-        self.assertTrue(session._store_order_list_ready())
 
     def test_query_related_order_products_returns_service_fields_and_order_rows(self):
         session = make_crm_session()
@@ -228,6 +223,17 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             <table><thead><tr>{''.join(f'<th>{cell}</th>' for cell in headers)}</tr></thead>
             <tbody>{''.join('<tr>' + ''.join(f'<td>{cell}</td>' for cell in row) + '</tr>' for row in rows)}</tbody></table>{extra}'''
 
+    def set_crm_page(self, path, html):
+        def fulfill(route):
+            route.fulfill(body="<html><body></body></html>")
+
+        self.page.route("**/*", fulfill)
+        try:
+            self.page.goto(f"http://crmportal.ecowaterchina.net.cn/{path}")
+        finally:
+            self.page.unroute("**/*", fulfill)
+        self.page.set_content(html)
+
     def test_detail_readiness_waits_for_exact_context_and_loaded_recognized_table(self):
         list_html = '<h1>订单列表 产品筛选</h1><table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>'
         self.page.set_content(list_html)
@@ -251,22 +257,30 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             {"product_name": "", "product_code": "A", "quantity": 1},
         ])
 
-    def test_store_order_search_uses_unlabeled_top_input_not_pager_and_waits_for_exact_anchor(self):
+    def test_store_order_list_ready_requires_matching_route_visible_heading_and_order_header(self):
+        self.set_crm_page("#/ordertwoc/list", """
+            <nav>订单查询</nav><section>订单号</section><table><tbody><tr><td>详情</td></tr></tbody></table>
+        """)
+        self.assertFalse(self.session._store_order_list_ready())
+
+        self.set_crm_page("#/workOrder/list", """
+            <h1>订单查询</h1><table><thead><tr><th>订单号</th></tr></thead><tbody></tbody></table>
+        """)
+        self.assertFalse(self.session._store_order_list_ready())
+
+        self.set_crm_page("#/ordertwoc/list", """
+            <h1>订单列表</h1><table><thead><tr><th>订 单 号</th></tr></thead><tbody></tbody></table>
+        """)
+        self.assertTrue(self.session._store_order_list_ready())
+
+    def test_store_order_search_waits_for_clickable_exact_anchor_and_opens_detail(self):
         order_no = "ORD2511110743"
         self.page.set_content(f"""
             <h1>订单查询</h1>
             <input id="order-search" type="search" style="width: 520px">
             <button id="search-button">查询</button>
-            <table><thead><tr><th>订单号</th></tr></thead><tbody id="orders"></tbody></table>
+            <table><thead><tr><th>订单号</th></tr></thead><tbody id="orders"><tr><td><a>ORD25111107439</a></td></tr></tbody></table>
             <div class="el-pagination"><input id="pager" type="text" style="width: 40px"></div>
-            <script>
-              document.querySelector('#search-button').addEventListener('click', () => {{
-                document.querySelector('#orders').innerHTML = '<tr><td><a>ORD25111107439</a></td></tr>';
-                setTimeout(() => {{
-                  document.querySelector('#orders').innerHTML = '<tr><td><a>{order_no}</a></td></tr>';
-                }}, 20);
-              }});
-            </script>
         """)
 
         self.assertTrue(self.session._set_store_order_search_keyword(order_no))
@@ -274,13 +288,31 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         self.assertEqual(self.page.input_value("#pager"), "")
         self.assertFalse(self.session._store_order_search_snapshot(order_no)["found"])
 
-        def click_search():
-            self.page.click("#search-button")
-            return True
+        self.page.eval_on_selector("#orders", "(orders, orderNo) => { orders.innerHTML = `<tr><td>${orderNo}</td></tr>`; }", order_no)
+        self.assertFalse(self.session._store_order_search_snapshot(order_no)["found"])
 
-        with mock.patch.object(self.session, "_click_store_order_search_button", side_effect=click_search), \
-             mock.patch.object(app_module.time, "sleep", side_effect=lambda _: self.page.wait_for_timeout(30)):
+        detail = self.detail_html(["产品编码", "数量"], [["A", "1"]], order_no=order_no)
+        steps = []
+
+        def show_exact_anchor(_delay):
+            steps.append(1)
+            self.page.evaluate("""({ orderNo, detail }) => {
+                const orders = document.querySelector('#orders');
+                orders.innerHTML = `<tr><td><a id="order-link">${orderNo}</a></td></tr>`;
+                document.querySelector('#order-link').addEventListener('click', event => {
+                    event.preventDefault();
+                    document.body.innerHTML = detail;
+                });
+            }""", {"orderNo": order_no, "detail": detail})
+
+        with mock.patch.object(self.session, "_click_store_order_search_button", return_value=True), \
+             mock.patch.object(app_module.time, "sleep", side_effect=show_exact_anchor):
             ok, message = self.session._search_store_order(order_no)
+        self.assertTrue(ok, message)
+        self.assertEqual(len(steps), 1)
+
+        with mock.patch.object(app_module.time, "sleep"):
+            ok, message = self.session._open_store_order_detail(order_no)
         self.assertTrue(ok, message)
 
     def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
