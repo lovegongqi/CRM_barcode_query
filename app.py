@@ -1900,36 +1900,64 @@ class CRMSession:
     def _store_order_list_ready(self):
         try:
             compact = re.sub(r"\s+", "", self.page.inner_text("body", timeout=3000) or "")
-            return "订单列表" in compact and "订单号" in compact
+            return ("订单查询" in compact or "订单列表" in compact) and "订单号" in compact
         except Exception:
             return False
 
+    def _store_order_list_url(self):
+        cfg = load_crm_config()
+        return f"{cfg['website']['url'].rstrip('/')}/#/ordertwoc/list"
+
     def _open_store_order_list(self, emit):
         emit("打开 CRM 门店管理订单列表...")
-        if not self._click_visible_crm_text("门店管理"):
-            return False, "未找到门店管理菜单"
-        if not self._click_visible_crm_text("订单列表"):
-            return False, "未找到门店管理订单列表"
-        for _ in range(20):
+        if not self.is_alive():
+            if not self._ensure_browser():
+                return False, "浏览器未启动"
+        target_url = self._store_order_list_url()
+        if "#/ordertwoc/list" not in (self.page.url or "") or not self._store_order_list_ready():
+            ok, message = self._goto(target_url, timeout=60000)
+            if not ok:
+                return False, message
+        for _ in range(15):
+            time.sleep(0.8)
             if self._store_order_list_ready():
                 return True, ""
-            time.sleep(0.5)
-        return False, "未进入门店管理订单列表"
+        if not self._is_current_page_logged_in():
+            return False, "CRM 当前未登录，请先登录 CRM"
+        body = ""
+        try:
+            body = re.sub(r"\s+", " ", self.page.inner_text("body", timeout=2000))[:240]
+        except Exception:
+            pass
+        return False, f"未进入门店管理订单列表，当前页面：{body or self.page.url}"
 
     def _set_store_order_search_keyword(self, order_no):
         return bool(self.page.evaluate("""(orderNo) => {
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const eligible = input => {
+            const type = (input.getAttribute('type') || 'text').toLowerCase();
+            return visible(input)
+                && !input.disabled
+                && !['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(type)
+                && !input.closest('table,.el-pagination,.ant-pagination,[class*="pagination"],[class*="Pagination"]');
+        };
+        const inputs = Array.from(document.querySelectorAll('input:not([disabled]),textarea:not([disabled])'))
+            .filter(eligible);
         const items = Array.from(document.querySelectorAll('.el-form-item,.ant-form-item,.form-group'));
         let input = items.filter(visible).map(item => ({
-            item,
-            input: item.querySelector('input:not([disabled]),textarea:not([disabled])'),
+            inputs: Array.from(item.querySelectorAll('input:not([disabled]),textarea:not([disabled])')).filter(eligible),
             text: clean(item.innerText || item.textContent || '')
-        })).find(row => row.input && row.text.includes('订单号'))?.input;
-        if (!input) input = Array.from(document.querySelectorAll('input:not([disabled])'))
-            .filter(visible).find(el => clean(el.placeholder).includes('订单号'));
+        })).find(row => row.inputs.length && row.text.includes('订单号'))?.inputs[0];
+        if (!input) input = inputs.find(el => clean(el.placeholder).includes('订单号'));
+        const body = clean(document.body?.innerText || '');
+        if (!input && (body.includes('订单查询') || body.includes('订单列表'))) {
+            input = inputs.map(el => ({ el, rect: el.getBoundingClientRect() }))
+                .sort((a, b) => b.rect.width - a.rect.width || a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0]?.el;
+        }
         if (!input) return false;
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
         input.focus();
         if (setter) setter.call(input, orderNo); else input.value = orderNo;
         input.dispatchEvent(new Event('input', {bubbles: true}));
@@ -7220,7 +7248,7 @@ def _clean_export_value(value):
 def _normalize_comparison_product_code(value):
     return _clean_export_value(value).upper()
 
-RELATED_ORDER_FIELD_LABELS = ("关联订单号", "订单号", "销售订单号")
+RELATED_ORDER_FIELD_LABELS = ("关联订单", "关联订单号", "订单号", "销售订单号")
 
 def _related_order_no_from_service_fields(fields):
     for wanted in RELATED_ORDER_FIELD_LABELS:

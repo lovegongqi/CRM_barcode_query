@@ -113,6 +113,41 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "SO20260914001",
         )
 
+    def test_related_order_number_accepts_exact_live_crm_label_and_ignores_remarks(self):
+        fields = [
+            {"label": "备注", "value": "关联订单 ORD-WRONG"},
+            {"label": "关联订单", "value": "ORD2511110743"},
+        ]
+        self.assertEqual(
+            app_module._related_order_no_from_service_fields(fields),
+            "ORD2511110743",
+        )
+
+    def test_store_order_list_uses_live_crm_route_and_accepts_live_or_legacy_heading(self):
+        session = make_crm_session()
+        session.page.url = "http://crmportal.ecowaterchina.net.cn/#/workOrder/list"
+        session.page.inner_text.return_value = "订单查询 订单号"
+        with mock.patch.object(app_module, "load_crm_config", return_value={
+            "website": {"url": "http://crmportal.ecowaterchina.net.cn/"},
+        }), mock.patch.object(session, "is_alive", return_value=True), \
+             mock.patch.object(session, "_goto", return_value=(True, "")) as goto, \
+             mock.patch.object(app_module.time, "sleep"):
+            self.assertEqual(
+                session._store_order_list_url(),
+                "http://crmportal.ecowaterchina.net.cn/#/ordertwoc/list",
+            )
+            self.assertTrue(session._store_order_list_ready())
+            ok, message = session._open_store_order_list(lambda *_: None)
+        self.assertTrue(ok, message)
+        goto.assert_called_once_with(
+            "http://crmportal.ecowaterchina.net.cn/#/ordertwoc/list", timeout=60000
+        )
+
+    def test_store_order_list_ready_accepts_legacy_heading(self):
+        session = make_crm_session()
+        session.page.inner_text.return_value = "订单列表 订单号"
+        self.assertTrue(session._store_order_list_ready())
+
     def test_query_related_order_products_returns_service_fields_and_order_rows(self):
         session = make_crm_session()
         fields = [{"label": "关联订单号", "value": "SO20260914001"}]
@@ -215,6 +250,38 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         self.assertEqual(self.session._store_order_detail_products(), [
             {"product_name": "", "product_code": "A", "quantity": 1},
         ])
+
+    def test_store_order_search_uses_unlabeled_top_input_not_pager_and_waits_for_exact_anchor(self):
+        order_no = "ORD2511110743"
+        self.page.set_content(f"""
+            <h1>订单查询</h1>
+            <input id="order-search" type="search" style="width: 520px">
+            <button id="search-button">查询</button>
+            <table><thead><tr><th>订单号</th></tr></thead><tbody id="orders"></tbody></table>
+            <div class="el-pagination"><input id="pager" type="text" style="width: 40px"></div>
+            <script>
+              document.querySelector('#search-button').addEventListener('click', () => {{
+                document.querySelector('#orders').innerHTML = '<tr><td><a>ORD25111107439</a></td></tr>';
+                setTimeout(() => {{
+                  document.querySelector('#orders').innerHTML = '<tr><td><a>{order_no}</a></td></tr>';
+                }}, 20);
+              }});
+            </script>
+        """)
+
+        self.assertTrue(self.session._set_store_order_search_keyword(order_no))
+        self.assertEqual(self.page.input_value("#order-search"), order_no)
+        self.assertEqual(self.page.input_value("#pager"), "")
+        self.assertFalse(self.session._store_order_search_snapshot(order_no)["found"])
+
+        def click_search():
+            self.page.click("#search-button")
+            return True
+
+        with mock.patch.object(self.session, "_click_store_order_search_button", side_effect=click_search), \
+             mock.patch.object(app_module.time, "sleep", side_effect=lambda _: self.page.wait_for_timeout(30)):
+            ok, message = self.session._search_store_order(order_no)
+        self.assertTrue(ok, message)
 
     def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
         detail = self.detail_html(["产品编码", "数量"], [])
