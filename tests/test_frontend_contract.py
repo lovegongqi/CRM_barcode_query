@@ -1,5 +1,6 @@
 import pathlib
 import re
+import subprocess
 import unittest
 
 from playwright.sync_api import sync_playwright
@@ -92,8 +93,68 @@ class FrontendContractTest(unittest.TestCase):
             r"response\.status\s*!==\s*409\s*&&\s*\(!response\.ok\s*\|\|\s*!data\.success\)",
         )
         self.assertIn("isCurrentServiceOrderDetail(serviceNo)", html)
-        self.assertIn("setTimeout(() => pollOrderProductQuery(serviceNo, jobId), 1000)", html)
+        self.assertIn("setTimeout(() => pollOrderProductQuery(serviceNo, jobId, generation), 1000)", html)
         self.assertIn("resumeOrderProductQuery(serviceNo)", html)
+
+    def test_service_detail_polling_ignores_late_prior_lifecycle_for_same_service(self):
+        """A late poll from a closed modal cannot mutate its reopened replacement."""
+        html = self.source("index.html")
+        start = html.index("function isCurrentServiceOrderDetail(serviceNo)")
+        end = html.index("async function showServiceOrderDetail(serviceNo, detailUrl)", start)
+        polling_functions = html[start:end]
+        script = f"""
+const assert = require('assert');
+let serviceDetailCurrentServiceNo = 'FWD20260914001';
+let orderProductQueryTimer = null;
+let orderProductQueryServiceNo = '';
+let orderProductQueryJobId = '';
+let orderProductQueryPollInFlight = false;
+let orderProductQueryGeneration = 0;
+const modal = {{ classList: {{ contains: name => name === 'overlay-show' }} }};
+const button = {{ dataset: {{ serviceNo: 'FWD20260914001', originalText: '' }}, disabled: false, textContent: '查询订单产品明细' }};
+const document = {{
+  getElementById: () => modal,
+  querySelectorAll: () => [button],
+}};
+const timers = [];
+const clearedTimers = [];
+const setTimeout = callback => {{ timers.push(callback); return timers.length; }};
+const clearTimeout = timer => clearedTimers.push(timer);
+const pendingFetches = [];
+const fetch = () => new Promise(resolve => pendingFetches.push(resolve));
+const showToast = () => {{}};
+const renderServiceOrderDetail = () => {{}};
+{polling_functions}
+const response = data => ({{ ok: true, json: async () => data }});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+(async () => {{
+  startOrderProductQueryPolling('FWD20260914001', 'job-1');
+  assert.strictEqual(pendingFetches.length, 1);
+  stopOrderProductQueryPolling();
+  startOrderProductQueryPolling('FWD20260914001', 'job-1');
+  assert.strictEqual(pendingFetches.length, 2);
+  assert.strictEqual(orderProductQueryPollInFlight, true);
+
+  pendingFetches[0](response({{ running: true, stage: 'waiting' }}));
+  await flush();
+  await flush();
+  assert.strictEqual(timers.length, 0, 'late old poll must not schedule a timer');
+  assert.strictEqual(orderProductQueryPollInFlight, true, 'late old poll must not clear new in-flight state');
+
+  pendingFetches[1](response({{ running: true, stage: 'waiting' }}));
+  await flush();
+  await flush();
+  assert.strictEqual(timers.length, 1, 'only the current lifecycle schedules polling');
+  assert.strictEqual(orderProductQueryPollInFlight, false);
+}})().catch(error => {{ console.error(error.stack); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_results_page_can_export_service_orders_in_install_template(self):
         results = self.source("index.html")

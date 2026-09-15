@@ -1495,6 +1495,7 @@
         let orderProductQueryServiceNo = '';
         let orderProductQueryJobId = '';
         let orderProductQueryPollInFlight = false;
+        let orderProductQueryGeneration = 0;
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -2619,11 +2620,18 @@
 
         function stopOrderProductQueryPolling(serviceNo = '') {
             if (serviceNo && orderProductQueryServiceNo !== serviceNo) return;
+            orderProductQueryGeneration += 1;
             if (orderProductQueryTimer) clearTimeout(orderProductQueryTimer);
             orderProductQueryTimer = null;
             orderProductQueryServiceNo = '';
             orderProductQueryJobId = '';
             orderProductQueryPollInFlight = false;
+        }
+
+        function ownsOrderProductQueryPolling(serviceNo, jobId, generation) {
+            return generation === orderProductQueryGeneration
+                && orderProductQueryServiceNo === serviceNo
+                && orderProductQueryJobId === jobId;
         }
 
         function setOrderProductQueryButtonState(serviceNo, disabled, text = '') {
@@ -2641,7 +2649,7 @@
             stopOrderProductQueryPolling();
             orderProductQueryServiceNo = serviceNo;
             orderProductQueryJobId = jobId;
-            pollOrderProductQuery(serviceNo, jobId);
+            pollOrderProductQuery(serviceNo, jobId, orderProductQueryGeneration);
         }
 
         async function startOrderProductQuery(serviceNo) {
@@ -2664,45 +2672,62 @@
             }
         }
 
-        async function pollOrderProductQuery(serviceNo, jobId) {
+        async function pollOrderProductQuery(serviceNo, jobId, generation) {
             if (!isCurrentServiceOrderDetail(serviceNo)
-                || orderProductQueryServiceNo !== serviceNo || orderProductQueryJobId !== jobId
+                || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)
                 || orderProductQueryPollInFlight) return;
             orderProductQueryPollInFlight = true;
             try {
                 const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`);
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 const data = await response.json();
-                if (!isCurrentServiceOrderDetail(serviceNo)) {
-                    stopOrderProductQueryPolling(serviceNo);
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) {
                     return;
                 }
                 if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败');
                 if (data.running) {
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                     setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
-                    orderProductQueryTimer = setTimeout(() => pollOrderProductQuery(serviceNo, jobId), 1000);
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    orderProductQueryTimer = setTimeout(() => pollOrderProductQuery(serviceNo, jobId, generation), 1000);
                     return;
                 }
-                stopOrderProductQueryPolling(serviceNo);
                 if (!data.success) {
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                     setOrderProductQueryButtonState(serviceNo, false);
                     showToast(data.error || '订单产品明细查询失败');
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    stopOrderProductQueryPolling(serviceNo);
                     return;
                 }
                 const detailResponse = await fetch(data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 const detail = await detailResponse.json();
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 if (!detailResponse.ok || detail.success === false) {
                     throw new Error(detail.error || '服务单详情读取失败');
                 }
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 renderServiceOrderDetail(detail);
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 showToast(`关联订单：${data.order_no || detail.order_lookup?.order_no || '—'}`);
-            } catch (error) {
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 stopOrderProductQueryPolling(serviceNo);
+            } catch (error) {
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                 setOrderProductQueryButtonState(serviceNo, false);
                 showToast(error.message || '订单产品明细查询失败');
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                stopOrderProductQueryPolling(serviceNo);
             } finally {
-                orderProductQueryPollInFlight = false;
+                if (ownsOrderProductQueryPolling(serviceNo, jobId, generation)) {
+                    orderProductQueryPollInFlight = false;
+                }
             }
         }
 
