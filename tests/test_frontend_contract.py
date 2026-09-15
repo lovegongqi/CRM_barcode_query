@@ -115,6 +115,7 @@ const button = {{ dataset: {{ serviceNo: 'FWD20260914001', originalText: '' }}, 
 const document = {{
   getElementById: () => modal,
   querySelectorAll: () => [button],
+  querySelector: () => null,
 }};
 const timers = [];
 const clearedTimers = [];
@@ -173,7 +174,7 @@ let orderProductQueryPollInFlight = false;
 let orderProductQueryGeneration = 0;
 const modal = {{ classList: {{ contains: name => name === 'overlay-show' }} }};
 const button = {{ dataset: {{ serviceNo, originalText: '' }}, disabled: false, textContent: '查询订单产品明细' }};
-const document = {{ getElementById: () => modal, querySelectorAll: () => [button] }};
+const document = {{ getElementById: () => modal, querySelectorAll: () => [button], querySelector: () => null }};
 const timers = [];
 const setTimeout = callback => {{ timers.push(callback); return timers.length; }};
 const clearTimeout = () => {{}};

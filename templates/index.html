@@ -373,6 +373,7 @@
         .service-detail-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
         .service-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
         .service-detail-order-meta { margin-top: 5px; color: #94a3b8; font-size: 11px; line-height: 1.5; }
+        .service-detail-order-attempt { margin-top: 5px; color: #fca5a5; font-size: 11px; line-height: 1.5; white-space: pre-line; }
         .service-detail-refresh-icon { display: inline-block; font-size: 14px; line-height: 1; }
         .service-detail-refresh-icon.spinning { animation: service-detail-spin 0.9s linear infinite; }
         @keyframes service-detail-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -1491,6 +1492,7 @@
         let serviceCloseStartAtMs = 0;
         const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1';
         let serviceDetailCurrentServiceNo = '';
+        let serviceDetailGeneration = 0;
         let orderProductQueryTimer = null;
         let orderProductQueryServiceNo = '';
         let orderProductQueryJobId = '';
@@ -2488,6 +2490,7 @@
         }
 
         function openDetailDocument(title, filePath) {
+            serviceDetailGeneration += 1;
             stopOrderProductQueryPolling();
             serviceDetailCurrentServiceNo = '';
             const detailFrame = document.getElementById('detailFrame');
@@ -2608,7 +2611,8 @@
             const orderQueryButton = `<button type="button" class="service-detail-refresh service-detail-order-query"
                 data-service-no="${escapeHtml(detail.service_no || '')}"
                 onclick="startOrderProductQuery(this.dataset.serviceNo)">查询订单产品明细</button>`;
-            const orderMetadata = hasSuccessfulOrderLookup ? `<div class="service-detail-order-meta">关联订单：${escapeHtml(orderLookup.order_no)}<br>查询时间：${escapeHtml(orderLookup.queried_at || '—')}</div>` : '';
+            const orderMetadata = (hasSuccessfulOrderLookup ? `<div class="service-detail-order-meta">关联订单：${escapeHtml(orderLookup.order_no)}<br>查询时间：${escapeHtml(orderLookup.queried_at || '—')}</div>` : '')
+                + '<div class="service-detail-order-attempt" role="status" hidden></div>';
             const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><div><h3>产品明细</h3>${orderMetadata}</div><div class="service-detail-actions">${refreshButton}${orderQueryButton}</div></div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
             content.innerHTML = customerSection + serviceSection + productSection;
         }
@@ -2616,6 +2620,10 @@
         function isCurrentServiceOrderDetail(serviceNo) {
             const modal = document.getElementById('detailModal');
             return serviceDetailCurrentServiceNo === serviceNo && modal.classList.contains('overlay-show');
+        }
+
+        function ownsServiceOrderDetail(serviceNo, generation) {
+            return generation === serviceDetailGeneration && isCurrentServiceOrderDetail(serviceNo);
         }
 
         function stopOrderProductQueryPolling(serviceNo = '') {
@@ -2648,6 +2656,17 @@
             button.textContent = text || button.dataset.originalText;
         }
 
+        function setOrderProductQueryAttempt(serviceNo, data = null) {
+            if (!isCurrentServiceOrderDetail(serviceNo)) return;
+            const metadata = document.querySelector('.service-detail-order-attempt');
+            if (!metadata) return;
+            const failed = data && data.done && !data.success;
+            metadata.hidden = !failed;
+            metadata.textContent = failed
+                ? `本次查询：${data.started_at || data.finished_at || '—'}\n失败原因：${data.error || '订单产品明细查询失败'}`
+                : '';
+        }
+
         function startOrderProductQueryPolling(serviceNo, jobId) {
             if (orderProductQueryServiceNo === serviceNo && orderProductQueryJobId === jobId
                 && (orderProductQueryTimer || orderProductQueryPollInFlight)) return;
@@ -2661,6 +2680,7 @@
             const generation = orderProductQueryGeneration;
             if (!serviceNo || !ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
             setOrderProductQueryButtonState(serviceNo, true, '查询中…');
+            setOrderProductQueryAttempt(serviceNo);
             try {
                 const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`, { method: 'POST' });
                 if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
@@ -2706,6 +2726,7 @@
                 if (!data.success) {
                     if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                     setOrderProductQueryButtonState(serviceNo, false);
+                    setOrderProductQueryAttempt(serviceNo, data);
                     showToast(data.error || '订单产品明细查询失败');
                     if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
                     stopOrderProductQueryPolling(serviceNo);
@@ -2748,7 +2769,13 @@
                 if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 const data = await response.json();
                 if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
-                if (!response.ok || !data.running || !data.job_id) return;
+                if (!response.ok || !data.job_id) return;
+                if (data.done && !data.success) {
+                    setOrderProductQueryAttempt(serviceNo, data);
+                    setOrderProductQueryButtonState(serviceNo, false);
+                    return;
+                }
+                if (!data.running) return;
                 if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
                 setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
                 if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
@@ -2760,6 +2787,7 @@
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
             if (!detailUrl) return;
+            const generation = ++serviceDetailGeneration;
             stopOrderProductQueryPolling();
             serviceDetailCurrentServiceNo = serviceNo;
             const modal = document.getElementById('detailModal');
@@ -2774,13 +2802,15 @@
             modal.classList.add('overlay-show');
             try {
                 const response = await fetch(detailUrl);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const detail = await response.json();
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在');
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
                 renderServiceOrderDetail(detail);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 resumeOrderProductQuery(serviceNo);
             } catch (error) {
-                if (!isCurrentServiceOrderDetail(serviceNo)) return;
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 content.innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`;
             }
         }
@@ -2790,30 +2820,41 @@
                 showToast('服务单号为空');
                 return;
             }
+            const generation = serviceDetailGeneration;
+            if (!ownsServiceOrderDetail(serviceNo, generation)) return;
             const buttons = Array.from(document.querySelectorAll('.service-detail-refresh:not(.service-detail-order-query)'));
             buttons.forEach(btn => { btn.disabled = true; btn.classList.add('is-loading'); btn.dataset.originalText = btn.dataset.originalText || btn.textContent; btn.innerHTML = '<span class="service-detail-refresh-icon spinning">↻</span>重查中…'; });
             try {
                 const res = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, { method: 'POST' });
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const data = await res.json();
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 if (!res.ok || data.success === false) {
                     throw new Error(data.error || '重查失败');
                 }
                 showToast(`已重查 ${data.product_count || 0} 个产品明细（${data.slot_label || ''}）`);
                 const detailUrl = data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`;
                 const response = await fetch(detailUrl);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const detail = await response.json();
-                if (response.ok && detail && detail.success !== false && isCurrentServiceOrderDetail(serviceNo)) {
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
+                if (response.ok && detail && detail.success !== false) {
                     renderServiceOrderDetail(detail);
+                    if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                     resumeOrderProductQuery(serviceNo);
                 }
             } catch (e) {
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 showToast(`重查失败：${e.message || e}`);
             } finally {
-                buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
+                if (ownsServiceOrderDetail(serviceNo, generation)) {
+                    buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
+                }
             }
         }
 
         function closeDetailModal() {
+            serviceDetailGeneration += 1;
             stopOrderProductQueryPolling();
             serviceDetailCurrentServiceNo = '';
             document.getElementById('detailModal').classList.remove('overlay-show');

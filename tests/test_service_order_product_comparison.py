@@ -1,5 +1,8 @@
 import contextlib
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import app as app_module
@@ -162,7 +165,7 @@ class CRMRelatedOrderTests(unittest.TestCase):
                     <script>
                     document.querySelector('#order-link').addEventListener('click', event => {{
                         event.preventDefault();
-                        document.body.innerHTML = '<div>{order_no} 产品详情</div>';
+                        document.body.innerHTML = '<div class="el-form-item"><label>订单号</label><div class="el-form-item__content">{order_no}</div></div><table><thead><tr><th>产品编码</th><th>数量</th></tr></thead><tbody><tr><td>A</td><td>1</td></tr></tbody></table>';
                     }});
                     </script>
                 """)
@@ -173,3 +176,92 @@ class CRMRelatedOrderTests(unittest.TestCase):
                 self.assertTrue(ok, message)
             finally:
                 browser.close()
+
+
+class CRMOrderProductDOMTests(unittest.TestCase):
+    def setUp(self):
+        self.playwright = sync_playwright().start()
+        self.browser = self.playwright.chromium.launch()
+        self.addCleanup(self.playwright.stop)
+        self.addCleanup(self.browser.close)
+        self.page = self.browser.new_page()
+        self.session = make_crm_session()
+        self.session.page = self.page
+
+    def detail_html(self, headers, rows, order_no="SO-100", extra=""):
+        return f'''<div class="el-form-item"><label>订单号</label><div class="el-form-item__content">{order_no}</div></div>
+            <table><thead><tr>{''.join(f'<th>{cell}</th>' for cell in headers)}</tr></thead>
+            <tbody>{''.join('<tr>' + ''.join(f'<td>{cell}</td>' for cell in row) + '</tr>' for row in rows)}</tbody></table>{extra}'''
+
+    def test_detail_readiness_waits_for_exact_context_and_loaded_recognized_table(self):
+        list_html = '<h1>订单列表 产品筛选</h1><table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>'
+        self.page.set_content(list_html)
+        snapshots = [
+            list_html,
+            self.detail_html(["产品编码", "数量"], [["A", "1"]], order_no="SO-1000"),
+            self.detail_html(["产品编码", "数量"], [], extra='<div class="el-loading-mask">加载中</div>'),
+            self.detail_html(["产品编码", "数量"], [["A", "1"]]),
+        ]
+        steps = []
+
+        def advance(_delay):
+            steps.append(len(steps))
+            self.page.set_content(snapshots[min(len(steps) - 1, 3)])
+
+        with mock.patch.object(app_module.time, "sleep", side_effect=advance):
+            ok, message = self.session._open_store_order_detail("SO-100")
+        self.assertTrue(ok, message)
+        self.assertEqual(len(steps), 4, "a list, different order, or loading table cannot be ready")
+        self.assertEqual(self.session._store_order_detail_products(), [
+            {"product_name": "", "product_code": "A", "quantity": 1},
+        ])
+
+    def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
+        self.page.set_content('<table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>')
+        empty = self.detail_html(["产品编码", "数量"], [], extra="<div>暂无数据</div>")
+        steps = []
+
+        def show_empty(_delay):
+            steps.append(1)
+            self.page.set_content(empty)
+
+        with mock.patch.object(app_module.time, "sleep", side_effect=show_empty):
+            ok, message = self.session._open_store_order_detail("SO-100")
+        self.assertTrue(ok, message)
+        self.assertGreaterEqual(len(steps), 2)
+        self.assertEqual(self.session._store_order_detail_products(), [])
+
+    def test_quantity_header_ignores_unrelated_preceding_quantity(self):
+        self.page.set_content(self.detail_html(
+            ["商品名称", "已发数量", "物料编码", "订 单 数 量"],
+            [["净水器", "99", "00ab", "2"]],
+        ))
+        self.assertEqual(self.session._store_order_detail_products(), [
+            {"product_name": "净水器", "product_code": "00AB", "quantity": 2},
+        ])
+
+    def test_ambiguous_supported_quantity_headers_fail(self):
+        for headers in (["产品编码", "数量", "订单数量"], ["产品编码", "数量", "数量"]):
+            with self.subTest(headers=headers):
+                self.page.set_content(self.detail_html(headers, [["A", "1", "2"]]))
+                with self.assertRaisesRegex(ValueError, "数量.*表头|表头.*数量"):
+                    self.session._store_order_detail_products()
+
+    def test_incomplete_named_product_fails_lookup_and_preserves_successful_cache(self):
+        for incomplete in (["未编码净水器", "", ""], ["缺数量净水器", "B", ""], ['<input value="未编码净水器">', "", ""]):
+            with self.subTest(incomplete=incomplete), tempfile.TemporaryDirectory() as tempdir:
+                self.page.set_content(self.detail_html(["产品名称", "产品编码", "数量"], [["A", "A", "1"], incomplete]))
+                filepath = Path(tempdir) / "FWD20260914001.json"
+                original = json.dumps({"products": [], "order_lookup": {"order_no": "SO-OLD", "queried_at": "yesterday"}}).encode()
+                filepath.write_bytes(original)
+                job = app_module._empty_order_product_job("FWD20260914001")
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir))
+                    stack.enter_context(mock.patch.dict(app_module.order_product_jobs, {job["job_id"]: job}, clear=True))
+                    stack.enter_context(mock.patch.object(self.session, "is_alive", return_value=True))
+                    for method in ("_open_service_order_list", "_search_service_order", "_open_service_order_detail", "_open_store_order_list", "_search_store_order", "_open_store_order_detail"):
+                        stack.enter_context(mock.patch.object(self.session, method, return_value=(True, "")))
+                    app_module._run_order_product_job(job["job_id"], self.session)
+                self.assertFalse(job["success"], "one incomplete named row must invalidate the whole lookup")
+                self.assertTrue(job["error"])
+                self.assertEqual(filepath.read_bytes(), original)

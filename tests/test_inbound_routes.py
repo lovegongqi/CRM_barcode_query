@@ -345,6 +345,13 @@ class InboundRouteTest(unittest.TestCase):
             app_module.clear_gyj_inbound_history()
 
     def tearDown(self):
+        with app_module.priority_query_work_lock:
+            app_module.priority_query_waiters.clear()
+            app_module.priority_query_slot_reservations.clear()
+            timer = app_module.priority_query_wakeup_timer
+            app_module._schedule_priority_query_wakeup()
+        if timer is not None:
+            timer.join(timeout=2)
         if hasattr(app_module, "inbound_job_lock"):
             with app_module.inbound_job_lock:
                 app_module.inbound_jobs.clear()

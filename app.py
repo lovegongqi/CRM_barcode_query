@@ -1990,39 +1990,84 @@ class CRMSession:
     }""", str(order_no))
         if not clicked:
             return False, f"未找到可打开的订单：{order_no}"
+        stable_empty = 0
         for _ in range(20):
             time.sleep(0.5)
-            compact = re.sub(r"\s+", "", self.page.inner_text("body", timeout=3000) or "")
-            if str(order_no).replace(" ", "") in compact and "产品" in compact:
+            snapshot = self._store_order_product_table_snapshot(order_no)
+            if not snapshot.get("context") or snapshot.get("loading") or not snapshot.get("recognized"):
+                stable_empty = 0
+                continue
+            if snapshot.get("error"):
+                return False, snapshot["error"]
+            if snapshot.get("rows"):
+                return True, ""
+            stable_empty = stable_empty + 1 if snapshot.get("empty") else 0
+            if stable_empty >= 2:
                 return True, ""
         return False, f"点击订单后未进入订单详情：{order_no}"
 
-    def _store_order_detail_products(self):
-        rows = self.page.evaluate("""() => {
+    def _store_order_product_table_snapshot(self, order_no=""):
+        return self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+        const compact = value => clean(value).replace(/\\s+/g, '');
+        const cellText = cell => {
+            const values = Array.from(cell.querySelectorAll('input:not([type="hidden"]),textarea,select'))
+                .map(el => clean(el.value || el.innerText || '')).filter(Boolean);
+            return clean(values.join(' ') || cell.innerText || cell.textContent || '');
+        };
+        const context = !orderNo || Array.from(document.querySelectorAll('.el-form-item,.ivu-form-item,.ant-form-item,.form-group'))
+            .filter(visible).some(node => {
+                const label = node.querySelector('.el-form-item__label,.ivu-form-item-label,.ant-form-item-label,label');
+                if (!['订单号', '销售订单号', '关联订单号'].includes(compact(label?.textContent).replace(/[：:]+$/, ''))) return false;
+                const control = node.querySelector('input:not([type="hidden"]),textarea');
+                const content = node.querySelector('.el-form-item__content,.ivu-form-item-content,.ant-form-item-control');
+                return compact(control ? control.value : content?.innerText) === compact(orderNo);
+            });
+        const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]')).some(visible);
         const labels = {
             name: ['产品名称', '商品名称', '物料名称'],
             code: ['产品编码', '商品编码', '物料编码'],
             quantity: ['数量', '产品数量', '订单数量', '购买数量']
         };
-        for (const table of document.querySelectorAll('.el-table,.ant-table,table')) {
-            const headers = Array.from(table.querySelectorAll('thead th')).map(cell => clean(cell.innerText));
-            const index = key => headers.findIndex(text => labels[key].some(label => text === label || text.includes(label)));
-            const nameIndex = index('name');
-            const codeIndex = index('code');
-            const quantityIndex = index('quantity');
-            if (codeIndex < 0 || quantityIndex < 0) continue;
-            return Array.from(table.querySelectorAll('tbody tr')).map(tr => {
+        const tables = Array.from(document.querySelectorAll('.el-table,.ant-table,table')).filter(visible)
+            .filter((table, index, all) => !all.some((other, otherIndex) => otherIndex < index && other.contains(table)));
+        for (const table of tables) {
+            const headers = Array.from(table.querySelectorAll('thead th')).map(cell => compact(cell.innerText));
+            const indices = key => headers.flatMap((text, index) => labels[key].includes(text) ? [index] : []);
+            const nameIndex = indices('name')[0];
+            const codeIndices = indices('code');
+            const quantityIndices = indices('quantity');
+            if (!codeIndices.length || !quantityIndices.length) continue;
+            if (codeIndices.length !== 1 || quantityIndices.length !== 1) {
+                return {context, loading, recognized: true, error: '订单产品编码或数量表头不唯一'};
+            }
+            const codeIndex = codeIndices[0];
+            const quantityIndex = quantityIndices[0];
+            const emptyText = /^(暂无数据|无数据|暂无记录|没有数据)$/;
+            const rows = Array.from(table.querySelectorAll('tbody tr')).filter(visible).map(tr => {
                 const cells = Array.from(tr.querySelectorAll(':scope > td'));
+                const values = cells.map(cellText);
+                if (!values.some(Boolean)) return null;
+                if (cells.length === 1 && cells[0].colSpan > 1 && emptyText.test(compact(values[0]))) return null;
                 return {
-                    product_name: nameIndex >= 0 && cells[nameIndex] ? clean(cells[nameIndex].innerText) : '',
-                    product_code: cells[codeIndex] ? clean(cells[codeIndex].innerText) : '',
-                    quantity: cells[quantityIndex] ? clean(cells[quantityIndex].innerText) : ''
+                    product_name: values[nameIndex] || '',
+                    product_code: values[codeIndex] || '',
+                    quantity: values[quantityIndex] || ''
                 };
-            }).filter(row => row.product_code || row.quantity);
+            }).filter(Boolean);
+            const empty = Array.from((table.parentElement || table).querySelectorAll('*'))
+                .filter(visible).some(el => emptyText.test(compact(el.innerText)));
+            return {context, loading, recognized: true, rows, empty};
         }
-        return [];
-    }""")
+        return {context, loading, recognized: false, rows: [], empty: false};
+    }""", str(order_no))
+
+    def _store_order_detail_products(self):
+        snapshot = self._store_order_product_table_snapshot()
+        if snapshot.get("error"):
+            raise ValueError(snapshot["error"])
+        rows = snapshot.get("rows") or []
         products = []
         for row in rows or []:
             code = _normalize_comparison_product_code((row or {}).get("product_code"))
@@ -4709,6 +4754,8 @@ query_slot_reservation_lock = threading.RLock()
 priority_query_work_lock = threading.RLock()
 priority_query_waiters = []
 priority_query_slot_reservations = {}
+priority_query_wakeup_timer = None
+PRIORITY_QUERY_WAKEUP_SECONDS = 1.0
 PRIORITY_QUERY_WORK_ORDER = {
     'inbound': 1,
     'service_close': 2,
@@ -4759,6 +4806,8 @@ latest_service_close_job_by_slot = {}
 order_product_job_lock = threading.RLock()
 order_product_jobs = {}
 latest_order_product_job_by_service = {}
+service_order_cache_locks_guard = threading.Lock()
+service_order_cache_locks = {}
 
 summary_job_lock = threading.Lock()
 summary_jobs = {}
@@ -6077,30 +6126,30 @@ def _run_order_product_job(job_id, worker):
         if not isinstance(result, dict):
             raise ValueError('订单产品明细返回格式不正确')
 
-        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
-        with open(filepath, 'r', encoding='utf-8') as file:
-            detail = json.load(file)
-        if not isinstance(detail, dict):
-            raise ValueError('服务单详情格式不正确')
-
         order_no = _clean_export_value(result.get('order_no'))
         order_products = list(result.get('order_products') or [])
         service_fields = list(result.get('service_fields') or [])
-        comparison = _build_service_order_product_comparison(
-            detail.get('products') or [],
-            order_products,
-        )
-        queried_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        detail['fields'] = service_fields
-        detail['order_lookup'] = {
-            'order_no': order_no,
-            'products': order_products,
-            'comparison': comparison,
-            'queried_at': queried_at,
-        }
-        detail_url = _write_service_order_detail(service_no, detail)
-        if not detail_url:
-            raise RuntimeError('服务单详情保存失败')
+        with _service_order_cache_lock(service_no):
+            filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+            with open(filepath, 'r', encoding='utf-8') as file:
+                detail = json.load(file)
+            if not isinstance(detail, dict):
+                raise ValueError('服务单详情格式不正确')
+            comparison = _build_service_order_product_comparison(
+                detail.get('products') or [],
+                order_products,
+            )
+            queried_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            detail['fields'] = service_fields
+            detail['order_lookup'] = {
+                'order_no': order_no,
+                'products': order_products,
+                'comparison': comparison,
+                'queried_at': queried_at,
+            }
+            detail_url = _write_service_order_detail(service_no, detail)
+            if not detail_url:
+                raise RuntimeError('服务单详情保存失败')
 
         with order_product_job_lock:
             current = order_product_jobs.get(job_id)
@@ -7951,14 +8000,46 @@ def enqueue_priority_query_work(kind, job_id, launch):
     dispatch_priority_query_work()
 
 
+def _schedule_priority_query_wakeup():
+    global priority_query_wakeup_timer
+    with priority_query_work_lock:
+        if not priority_query_waiters:
+            if priority_query_wakeup_timer is not None:
+                priority_query_wakeup_timer.cancel()
+                priority_query_wakeup_timer = None
+        elif priority_query_wakeup_timer is None:
+            timer = threading.Timer(PRIORITY_QUERY_WAKEUP_SECONDS, _retry_priority_query_work)
+            timer.daemon = True
+            priority_query_wakeup_timer = timer
+            timer.start()
+
+
+def _retry_priority_query_work():
+    global priority_query_wakeup_timer
+    with priority_query_work_lock:
+        if priority_query_wakeup_timer is not threading.current_thread():
+            return
+    try:
+        dispatch_priority_query_work()
+    except Exception as error:
+        print(f"  [优先查询调度] 重试失败: {_brief_batch_error(error, 160)}")
+    finally:
+        with priority_query_work_lock:
+            if priority_query_wakeup_timer is threading.current_thread():
+                priority_query_wakeup_timer = None
+        _schedule_priority_query_wakeup()
+
+
 def dispatch_priority_query_work():
     with query_slot_reservation_lock:
         while True:
             with priority_query_work_lock:
                 if not priority_query_waiters:
+                    _schedule_priority_query_wakeup()
                     return
             worker, slot_id, slot_label, _error = _select_idle_query_worker_desc()
             if not worker:
+                _schedule_priority_query_wakeup()
                 return
             with priority_query_work_lock:
                 if not priority_query_waiters or slot_id in priority_query_slot_reservations:
@@ -8511,6 +8592,11 @@ def _normalize_service_order_detail(detail, service_no=""):
     else:
         payload["order_lookup"] = {}
     return payload
+
+def _service_order_cache_lock(service_no):
+    with service_order_cache_locks_guard:
+        return service_order_cache_locks.setdefault(service_no, threading.Lock())
+
 
 def _write_service_order_detail(service_no, detail):
     service_no = _clean_export_value(service_no)
@@ -10733,21 +10819,24 @@ def api_service_order_refresh_products(service_no):
     elif isinstance(result, list):
         products = list(result)
 
-    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
-    existing = {}
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing = json.load(f) or {}
-        except Exception:
-            existing = {}
+    with _service_order_cache_lock(service_no):
+        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+        existing = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or {}
+            except Exception:
+                existing = {}
 
-    if products:
         existing["products"] = products
-    else:
-        existing["products"] = []
-    existing["service_no"] = _clean_export_value(service_no)
-    _write_service_order_detail(service_no, existing)
+        order_lookup = existing.get("order_lookup")
+        if isinstance(order_lookup, dict) and order_lookup.get("order_no"):
+            order_lookup["comparison"] = _build_service_order_product_comparison(
+                products, order_lookup.get("products") or [],
+            )
+        existing["service_no"] = _clean_export_value(service_no)
+        _write_service_order_detail(service_no, existing)
 
     return jsonify({
         "success": True,
