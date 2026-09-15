@@ -2056,7 +2056,7 @@ class CRMSession:
                     quantity: values[quantityIndex] || ''
                 };
             }).filter(Boolean);
-            const empty = Array.from((table.parentElement || table).querySelectorAll('*'))
+            const empty = Array.from(table.querySelectorAll('*'))
                 .filter(visible).some(el => emptyText.test(compact(el.innerText)));
             return {context, loading, recognized: true, rows, empty};
         }

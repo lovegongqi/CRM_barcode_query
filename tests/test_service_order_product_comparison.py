@@ -217,19 +217,49 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         ])
 
     def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
+        detail = self.detail_html(["产品编码", "数量"], [])
+        table_empty = detail.replace('<tbody></tbody>', '<tbody><tr><td colspan="2">暂无数据</td></tr></tbody>')
+        wrapper_empty = detail.replace('<table>', '<div class="el-table"><table>').replace(
+            '</table>', '</table><div class="el-table__empty-block">暂无数据</div></div>',
+        )
+        for empty in (table_empty, wrapper_empty):
+            with self.subTest(empty=empty):
+                self.page.set_content('<table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>')
+                steps = []
+
+                def show_empty(_delay):
+                    steps.append(1)
+                    self.page.set_content(empty)
+
+                with mock.patch.object(app_module.time, "sleep", side_effect=show_empty):
+                    ok, message = self.session._open_store_order_detail("SO-100")
+                self.assertTrue(ok, message)
+                self.assertGreaterEqual(len(steps), 2)
+                self.assertEqual(self.session._store_order_detail_products(), [])
+
+    def test_unrelated_empty_sibling_cannot_finish_product_table_readiness(self):
         self.page.set_content('<table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>')
-        empty = self.detail_html(["产品编码", "数量"], [], extra="<div>暂无数据</div>")
+        sibling = '<section><h2>付款记录</h2><div>暂无数据</div></section>'
+        pending = self.detail_html(["产品编码", "数量"], [], extra=sibling)
+        snapshots = [
+            pending + '<div class="el-loading-mask">加载中</div>',
+            pending,
+            pending,
+            self.detail_html(["产品编码", "数量"], [["A", "2"]], extra=sibling),
+        ]
         steps = []
 
-        def show_empty(_delay):
+        def advance(_delay):
             steps.append(1)
-            self.page.set_content(empty)
+            self.page.set_content(snapshots[min(len(steps) - 1, 3)])
 
-        with mock.patch.object(app_module.time, "sleep", side_effect=show_empty):
+        with mock.patch.object(app_module.time, "sleep", side_effect=advance):
             ok, message = self.session._open_store_order_detail("SO-100")
         self.assertTrue(ok, message)
-        self.assertGreaterEqual(len(steps), 2)
-        self.assertEqual(self.session._store_order_detail_products(), [])
+        self.assertEqual(len(steps), 4, "unrelated empty text must not finish readiness before product rows load")
+        self.assertEqual(self.session._store_order_detail_products(), [
+            {"product_name": "", "product_code": "A", "quantity": 2},
+        ])
 
     def test_quantity_header_ignores_unrelated_preceding_quantity(self):
         self.page.set_content(self.detail_html(
