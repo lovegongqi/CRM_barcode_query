@@ -223,13 +223,13 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             <table><thead><tr>{''.join(f'<th>{cell}</th>' for cell in headers)}</tr></thead>
             <tbody>{''.join('<tr>' + ''.join(f'<td>{cell}</td>' for cell in row) + '</tr>' for row in rows)}</tbody></table>{extra}'''
 
-    def set_crm_page(self, path, html):
+    def set_crm_page(self, path, html, origin="http://crmportal.ecowaterchina.net.cn"):
         def fulfill(route):
             route.fulfill(body="<html><body></body></html>")
 
         self.page.route("**/*", fulfill)
         try:
-            self.page.goto(f"http://crmportal.ecowaterchina.net.cn/{path}")
+            self.page.goto(f"{origin}/{path}")
         finally:
             self.page.unroute("**/*", fulfill)
         self.page.set_content(html)
@@ -258,20 +258,34 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         ])
 
     def test_store_order_list_ready_requires_matching_route_visible_heading_and_order_header(self):
-        self.set_crm_page("#/ordertwoc/list", """
-            <nav>订单查询</nav><section>订单号</section><table><tbody><tr><td>详情</td></tr></tbody></table>
-        """)
-        self.assertFalse(self.session._store_order_list_ready())
+        with mock.patch.object(app_module, "load_crm_config", return_value={
+            "website": {"url": "http://crmportal.ecowaterchina.net.cn/"},
+        }):
+            self.set_crm_page("#/ordertwoc/list", """
+                <nav>订单查询</nav><section>订单号</section><table><tbody><tr><td>详情</td></tr></tbody></table>
+            """)
+            self.assertFalse(self.session._store_order_list_ready())
 
-        self.set_crm_page("#/workOrder/list", """
-            <h1>订单查询</h1><table><thead><tr><th>订单号</th></tr></thead><tbody></tbody></table>
-        """)
-        self.assertFalse(self.session._store_order_list_ready())
+            self.set_crm_page("#/workOrder/list", """
+                <h1>订单查询</h1><table><thead><tr><th>订单号</th></tr></thead><tbody></tbody></table>
+            """)
+            self.assertFalse(self.session._store_order_list_ready())
 
-        self.set_crm_page("#/ordertwoc/list", """
-            <h1>订单列表</h1><table><thead><tr><th>订 单 号</th></tr></thead><tbody></tbody></table>
-        """)
-        self.assertTrue(self.session._store_order_list_ready())
+            self.set_crm_page("#/ordertwoc/list", """
+                <h1>订单列表</h1><table><thead><tr><th>订 单 号</th></tr></thead><tbody></tbody></table>
+            """)
+            self.assertTrue(self.session._store_order_list_ready())
+
+    def test_store_order_list_ready_requires_configured_origin_and_exact_hash_path(self):
+        order_list = '<h1>订单查询</h1><table><thead><tr><th>订单号</th></tr></thead><tbody></tbody></table>'
+        with mock.patch.object(app_module, "load_crm_config", return_value={
+            "website": {"url": "http://crmportal.ecowaterchina.net.cn/"},
+        }):
+            self.set_crm_page("#/ordertwoc/list", order_list, origin="http://other-crm.example.test")
+            self.assertFalse(self.session._store_order_list_ready())
+
+            self.set_crm_page("#/ordertwoc/listOther", order_list)
+            self.assertFalse(self.session._store_order_list_ready())
 
     def test_store_order_search_waits_for_clickable_exact_anchor_and_opens_detail(self):
         order_no = "ORD2511110743"
@@ -283,22 +297,17 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             <div class="el-pagination"><input id="pager" type="text" style="width: 40px"></div>
         """)
 
-        self.assertTrue(self.session._set_store_order_search_keyword(order_no))
-        self.assertEqual(self.page.input_value("#order-search"), order_no)
-        self.assertEqual(self.page.input_value("#pager"), "")
-        self.assertFalse(self.session._store_order_search_snapshot(order_no)["found"])
-
-        self.page.eval_on_selector("#orders", "(orders, orderNo) => { orders.innerHTML = `<tr><td>${orderNo}</td></tr>`; }", order_no)
-        self.assertFalse(self.session._store_order_search_snapshot(order_no)["found"])
-
         detail = self.detail_html(["产品编码", "数量"], [["A", "1"]], order_no=order_no)
-        steps = []
+        observations = []
 
-        def show_exact_anchor(_delay):
-            steps.append(1)
+        def advance_results(_delay):
+            observations.append(self.session._store_order_search_snapshot(order_no)["found"])
+            if len(observations) == 1:
+                self.page.eval_on_selector("#orders", "(orders, orderNo) => { orders.innerHTML = `<tr><td>${orderNo}</td></tr>`; }", order_no)
+                return
             self.page.evaluate("""({ orderNo, detail }) => {
                 const orders = document.querySelector('#orders');
-                orders.innerHTML = `<tr><td><a id="order-link">${orderNo}</a></td></tr>`;
+                orders.innerHTML = `<tr><td>${orderNo}</td></tr><tr><td>关联信息 <a id="order-link">${orderNo}</a> 已审核</td></tr>`;
                 document.querySelector('#order-link').addEventListener('click', event => {
                     event.preventDefault();
                     document.body.innerHTML = detail;
@@ -306,10 +315,12 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             }""", {"orderNo": order_no, "detail": detail})
 
         with mock.patch.object(self.session, "_click_store_order_search_button", return_value=True), \
-             mock.patch.object(app_module.time, "sleep", side_effect=show_exact_anchor):
+             mock.patch.object(app_module.time, "sleep", side_effect=advance_results):
             ok, message = self.session._search_store_order(order_no)
         self.assertTrue(ok, message)
-        self.assertEqual(len(steps), 1)
+        self.assertEqual(observations, [False, False])
+        self.assertEqual(self.page.input_value("#order-search"), order_no)
+        self.assertEqual(self.page.input_value("#pager"), "")
 
         with mock.patch.object(app_module.time, "sleep"):
             ok, message = self.session._open_store_order_detail(order_no)

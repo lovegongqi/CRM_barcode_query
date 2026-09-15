@@ -24,6 +24,7 @@ from contextlib import closing, contextmanager
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
 from functools import wraps
+from urllib.parse import urlparse
 from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
 
@@ -1899,7 +1900,17 @@ class CRMSession:
 
     def _store_order_list_ready(self):
         try:
-            if "#/ordertwoc/list" not in (self.page.url or ""):
+            current_url = urlparse(self.page.url or "")
+            target_url = urlparse(self._store_order_list_url())
+            if (
+                current_url.scheme.lower(),
+                current_url.netloc.lower(),
+                current_url.fragment,
+            ) != (
+                target_url.scheme.lower(),
+                target_url.netloc.lower(),
+                target_url.fragment,
+            ):
                 return False
             return bool(self.page.evaluate("""() => {
                 const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
@@ -1926,7 +1937,7 @@ class CRMSession:
             if not self._ensure_browser():
                 return False, "浏览器未启动"
         target_url = self._store_order_list_url()
-        if "#/ordertwoc/list" not in (self.page.url or "") or not self._store_order_list_ready():
+        if not self._store_order_list_ready():
             ok, message = self._goto(target_url, timeout=60000)
             if not ok:
                 return False, message
@@ -2019,11 +2030,9 @@ class CRMSession:
         clicked = self.page.evaluate("""(orderNo) => {
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const clean = value => (value || '').replace(/\\s+/g, '').trim();
-        const row = Array.from(document.querySelectorAll('tbody tr')).filter(visible)
-            .find(tr => Array.from(tr.querySelectorAll('td'))
-                .some(td => clean(td.innerText || td.textContent || '') === clean(orderNo)));
-        const target = row && Array.from(row.querySelectorAll('a,button'))
-            .filter(visible).find(el => clean(el.innerText || el.textContent || '') === clean(orderNo));
+        const target = Array.from(document.querySelectorAll('tbody tr')).filter(visible)
+            .flatMap(row => Array.from(row.querySelectorAll('a,button')).filter(visible))
+            .find(el => clean(el.innerText || el.textContent || '') === clean(orderNo));
         if (!target) return false;
         target.click();
         return true;
