@@ -9997,7 +9997,7 @@ def account_has_permission(permission):
     return permission in (row.get('permissions') or [])
 
 def required_permission_for_path(path):
-    if path == "/" or path.startswith("/barcode/") or path.startswith("/service-order/"):
+    if path in {"/", "/service-close"} or path.startswith("/barcode/") or path.startswith("/service-order/"):
         return "results"
     if path == "/crm":
         return "crm"
@@ -10237,6 +10237,16 @@ def scan_archived():
 @app.route("/")
 def index():
     return render_template("index.html", nav_links=visible_page_links(), business_config=business_config())
+
+
+@app.route("/service-close")
+def service_close():
+    return render_template(
+        "service_close.html",
+        nav_links=visible_page_links(),
+        business_config=business_config(),
+        can_manage_history=is_admin_account(),
+    )
 
 @app.route("/favicon.ico")
 def favicon():

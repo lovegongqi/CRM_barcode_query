@@ -15,6 +15,7 @@ class FrontendContractTest(unittest.TestCase):
     page_templates = {
         "query": "crm.html",
         "results": "index.html",
+        "service-close": "service_close.html",
         "transfer": "transfer.html",
         "inbound": "inbound.html",
         "inventory": "inventory.html",
@@ -229,6 +230,21 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertIn("fetch('/api/service-orders/export/xlsx'", results)
         self.assertIn("getSelectedBarcodeArray()", results)
 
+    def test_results_and_close_management_expose_the_two_workspace_links(self):
+        results = self.source("index.html")
+        close_management = self.source("service_close.html")
+        for source in (results, close_management):
+            self.assertIn('href="/">条码列表</a>', source)
+            self.assertIn('href="/service-close">结单管理</a>', source)
+        self.assertNotIn('id="serviceCloseBtn"', results)
+        self.assertIn('id="serviceCloseBtn"', close_management)
+
+    def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
+        results = self.source("index.html")
+        self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)
+        self.assertIn('input type="date" id="dateStart"', results)
+        self.assertIn('input type="date" id="dateEnd"', results)
+
     def test_service_order_detail_matches_the_dark_workspace_theme(self):
         results = self.source("index.html")
         content_rule = re.search(r"\.service-detail-content\s*\{([^}]*)\}", results, re.S)
@@ -292,7 +308,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertEqual(results.count('<div class="action-groups">'), 1)
         self.assertEqual(
             len(re.findall(r'<div class="action-groups">(.*?)</div>', results, re.S)[0].split('<button')) - 1,
-            10,
+            9,
         )
         for selector in (
             'body[data-aurora-page="results"] .action-groups {',

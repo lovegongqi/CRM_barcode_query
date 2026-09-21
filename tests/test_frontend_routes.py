@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/inbound", "/inventory", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/inventory", "/service-close", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
@@ -112,11 +112,39 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         # user on the page through long GYJ login flows, so a logout link
         # competing for the same screen real estate is hidden there. Every
         # other work page still surfaces the logout button.
-        for route in ("/", "/crm", "/transfer", "/inventory", "/product-library", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inventory", "/service-close", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b'href="/logout"', response.data)
+
+    def test_service_close_page_requires_results_permission(self):
+        accounts = app_module.load_accounts()
+        accounts.append({
+            "id": "service-close-viewer",
+            "username": "service-close-viewer",
+            "display_name": "结单查看者",
+            "password": "viewer-pass",
+            "permissions": ["results"],
+            "updated_at": "",
+        })
+        accounts.append({
+            "id": "service-close-denied",
+            "username": "service-close-denied",
+            "display_name": "无结果权限",
+            "password": "denied-pass",
+            "permissions": ["crm"],
+            "updated_at": "",
+        })
+        app_module.save_accounts(accounts)
+
+        viewer = app_module.app.test_client()
+        viewer.post("/api/app-auth/login", json={"username": "service-close-viewer", "password": "viewer-pass"})
+        self.assertEqual(viewer.get("/service-close").status_code, 200)
+
+        denied = app_module.app.test_client()
+        denied.post("/api/app-auth/login", json={"username": "service-close-denied", "password": "denied-pass"})
+        self.assertEqual(denied.get("/service-close").status_code, 403)
 
     def test_inbound_does_not_render_the_tool_account_logout_link(self):
         response = self.client.get("/inbound")

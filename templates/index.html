@@ -1151,7 +1151,7 @@
         }
         .filter-area {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 12px;
             padding-top: 0;
             margin: 0;
@@ -1265,6 +1265,7 @@
             .action-groups { justify-content: flex-start; }
             .barcode-item { grid-template-columns: 1fr; }
             .bc-right { justify-content: flex-start; margin-left: 0; }
+            .filter-area { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 640px) {
             .workspace-head { flex-direction: column; }
@@ -1272,6 +1273,7 @@
             .field-grid, .stats-grid, .date-filter-row, .search-row { grid-template-columns: 1fr; }
             .button-col { min-width: 0; }
             .tabs-wrap { align-items: flex-start; flex-direction: column; }
+            .filter-area { grid-template-columns: 1fr; }
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
@@ -1295,6 +1297,10 @@
 
         {% if not is_desktop_app %}
         <div class="status-bar aurora-account-status">
+            <div class="aurora-workspace-links">
+                <a class="active" href="/">条码列表</a>
+                <a href="/service-close">结单管理</a>
+            </div>
             <div class="aurora-account-session">
                 <span class="aurora-account-name" id="appAccountStatus">检测中</span>
                 <a class="aurora-account-logout" href="/logout">退出工具账号</a>
@@ -1392,12 +1398,9 @@
                     <button class="btn btn-export" onclick="exportXlsx()">导出 XLSX</button>
                     <button class="btn btn-export" id="serviceOrderExportBtn" onclick="exportServiceOrdersXlsx()">导出安装表</button>
                     <button class="btn btn-transfer" onclick="goSelectedTransfer()">选中条码移库</button>
-                    <button class="btn btn-service-close" id="serviceCloseBtn" onclick="batchCloseServiceOrders()">批量结单</button>
                     <button class="btn btn-secondary-soft" onclick="clearAllFilters()">清空筛选</button>
                 </div>
             </div>
-            <div class="query-log transfer-log transfer-log-box" id="transferLogMain"></div>
-
             <div class="filter-shell">
                 <div class="section-label">
                     <span>条件筛选</span>
