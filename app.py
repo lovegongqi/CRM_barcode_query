@@ -1955,7 +1955,7 @@ class CRMSession:
         return False, f"未进入门店管理订单列表，当前页面：{body or self.page.url}"
 
     def _set_store_order_search_keyword(self, order_no):
-        return bool(self.page.evaluate("""(orderNo) => {
+        selected = bool(self.page.evaluate("""(orderNo) => {
         const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         const clean = value => (value || '').replace(/\\s+/g, '').trim();
         const eligible = input => {
@@ -1979,15 +1979,18 @@ class CRMSession:
                 .sort((a, b) => b.rect.width - a.rect.width || a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0]?.el;
         }
         if (!input) return false;
-        const proto = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
         input.focus();
-        if (setter) setter.call(input, orderNo); else input.value = orderNo;
-        input.dispatchEvent(new Event('input', {bubbles: true}));
-        input.dispatchEvent(new Event('change', {bubbles: true}));
         input.setAttribute('data-codex-service-search', '1');
         return true;
     }""", str(order_no)))
+        if not selected:
+            return False
+        try:
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.type(str(order_no))
+            return True
+        except Exception:
+            return False
 
     def _click_store_order_search_button(self):
         return self._click_service_search_button()

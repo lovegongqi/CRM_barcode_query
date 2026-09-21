@@ -337,6 +337,23 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             ok, message = self.session._open_store_order_detail(order_no)
         self.assertTrue(ok, message)
 
+    def test_store_order_search_keyword_uses_user_input_events(self):
+        order_no = "ORD2511110743"
+        self.page.set_content("""
+            <h1>订单查询</h1>
+            <input id="order-search" type="search" style="width: 520px">
+            <output id="bound-keyword"></output>
+            <script>
+                document.querySelector('#order-search').addEventListener('input', event => {
+                    if (event.isTrusted) {
+                        document.querySelector('#bound-keyword').textContent = event.target.value;
+                    }
+                });
+            </script>
+        """)
+        self.assertTrue(self.session._set_store_order_search_keyword(order_no))
+        self.assertEqual(self.page.locator('#bound-keyword').inner_text(), order_no)
+
     def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
         detail = self.detail_html(["产品编码", "数量"], [])
         table_empty = detail.replace('<tbody></tbody>', '<tbody><tr><td colspan="2">暂无数据</td></tr></tbody>')
