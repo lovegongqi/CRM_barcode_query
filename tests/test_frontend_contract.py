@@ -248,6 +248,13 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertIn('onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)"', close_management)
         self.assertNotIn('target="_blank"', close_management)
 
+    def test_results_redirect_to_close_management_after_starting_a_close_job(self):
+        results = self.source("index.html")
+        start_index = results.index("async function batchCloseServiceOrders()")
+        close_index = results.index("function openDetailDocument", start_index)
+        batch_close = results[start_index:close_index]
+        self.assertIn("window.location.assign('/service-close')", batch_close)
+
     def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
         results = self.source("index.html")
         self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)

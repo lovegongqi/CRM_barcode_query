@@ -2467,22 +2467,8 @@
                     }
                     return;
                 }
-                serviceCloseJobId = data.job_id || '';
-                serviceCloseSlotId = data.slot_id || '';
-                saveServiceCloseJob();
-                serviceCloseLog(`${data.message || '批量结单已开始'}，使用 ${data.slot_label || '查询通道'}`, 'success');
-                renderServiceCloseStatuses(data.service_rows || []);
-                if ((data.no_service || []).length) {
-                    serviceCloseLog(`已跳过无服务单条码 ${data.no_service.length} 个`, 'warn');
-                }
-                if ((data.missing || []).length) {
-                    serviceCloseLog(`已跳过未找到结果条码 ${data.missing.length} 个`, 'warn');
-                }
-                if (serviceCloseTimer) clearInterval(serviceCloseTimer);
-                serviceCloseTimer = setInterval(() => {
-                    pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-                }, 1200);
-                pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
+                window.location.assign('/service-close');
+                return;
             } catch (e) {
                 serviceCloseLog(`批量结单出错：${e.message || e}`, 'error');
                 showToast('批量结单出错');
