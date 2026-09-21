@@ -12875,6 +12875,11 @@ def api_crm_bulk_login_start():
     scope = str(data.get('scope') or data.get('kind') or 'query').strip() or 'query'
     username = str(data.get('username') or '').strip()
     password = str(data.get('password') or '')
+    if not username and not password:
+        remembered = get_remembered_crm_credentials()
+        if remembered.get('remember'):
+            username = str(remembered.get('username') or '').strip()
+            password = str(remembered.get('password') or '')
     if not username or not password:
         return jsonify({'success': False, 'error': '请输入 CRM 账号和密码'})
     scope, slots = _bulk_login_slots_for_scope(scope)

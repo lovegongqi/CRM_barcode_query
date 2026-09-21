@@ -146,6 +146,24 @@ class BulkLoginCaptchaTest(unittest.TestCase):
         self.assertEqual(late_worker.captchas, ["2468"])
         self.assertEqual(late_slot["status"], "logged_in")
 
+    def test_bulk_login_uses_remembered_credentials_when_form_is_blank(self):
+        slots = [{"id": "query-1", "kind": "query", "label": "查询1"}]
+        with (
+            mock.patch.object(
+                app_module,
+                "get_remembered_crm_credentials",
+                return_value={"remember": True, "username": "crm-user", "password": "crm-password"},
+            ),
+            mock.patch.object(app_module, "_bulk_login_slots_for_scope", return_value=("all", slots)),
+            mock.patch.object(app_module.threading, "Thread") as thread_class,
+        ):
+            response = self.client.post("/api/crm/bulk-login/start", json={"scope": "all"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["running"])
+        thread_class.assert_called_once()
+        self.assertEqual(thread_class.call_args.kwargs["args"][1:], ("crm-user", "crm-password"))
+
 
 if __name__ == "__main__":
     unittest.main()
