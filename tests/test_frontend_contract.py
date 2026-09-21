@@ -254,6 +254,14 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         close_index = results.index("function openDetailDocument", start_index)
         batch_close = results[start_index:close_index]
         self.assertIn("window.location.assign('/service-close')", batch_close)
+        self.assertNotIn("btn.disabled = true", batch_close)
+        self.assertNotIn("renderServiceCloseStatuses", batch_close)
+
+    def test_results_does_not_restore_an_old_close_job_and_disable_new_submissions(self):
+        """Close progress belongs to the management page, not a stale list-page session."""
+        results = self.source("index.html")
+        self.assertNotIn("function restoreServiceCloseJob()", results)
+        self.assertIn("clearSavedServiceCloseJob();\n        setInterval(() => loadAllData(false)", results)
 
     def test_close_management_uses_one_expanded_newest_first_record_panel(self):
         close_management = self.source("service_close.html")
@@ -300,6 +308,15 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertRegex(
             mobile_css,
             r"\.aurora-logo\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px",
+        )
+
+    def test_close_management_title_reserves_space_for_the_logo(self):
+        """The close-management title must not render underneath the shared logo."""
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertIn('body[data-aurora-page="service-close"] .app-header > .app-title', css)
+        self.assertRegex(
+            css,
+            r'body\[data-aurora-page="service-close"\] \.app-header > \.app-title\s*\{[^}]*padding-left:\s*76px',
         )
 
     def test_settings_query_channel_options_wrap(self):
@@ -1566,19 +1583,17 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertIn("document.hidden && !clearSelection", source)
         self.assertNotIn("fetch('/api/filter-options')", source)
 
-    def test_results_page_restores_service_close_job_from_session(self):
+    def test_results_page_clears_legacy_service_close_session(self):
         source = self.source("index.html")
         for token in (
             "const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1'",
-            "function saveServiceCloseJob()",
             "function clearSavedServiceCloseJob()",
-            "function restoreServiceCloseJob()",
-            "sessionStorage.setItem(SERVICE_CLOSE_SESSION_KEY",
             "sessionStorage.removeItem(SERVICE_CLOSE_SESSION_KEY)",
-            "restoreServiceCloseJob();",
+            "clearSavedServiceCloseJob();\n        setInterval(() => loadAllData(false)",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, source)
+        self.assertNotIn("function restoreServiceCloseJob()", source)
 
     def test_results_page_groups_barcodes_by_latest_installation_order(self):
         source = self.source("index.html")

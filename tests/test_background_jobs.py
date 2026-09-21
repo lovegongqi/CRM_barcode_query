@@ -995,6 +995,37 @@ class BackgroundJobTests(unittest.TestCase):
                 for slot_id in ["query-1", "query-2", "query-3"]:
                     app_module.priority_query_slot_reservations.pop(slot_id, None)
 
+    def test_service_close_start_returns_before_the_scheduler_finds_a_channel(self):
+        """A queued close job must let the browser enter the management page immediately."""
+        scheduler_started = threading.Event()
+        release_scheduler = threading.Event()
+
+        def wait_for_scheduler(_kind, _job_id, _launch):
+            scheduler_started.set()
+            release_scheduler.wait(timeout=2)
+
+        with mock.patch.object(
+            app_module,
+            "selected_latest_service_orders",
+            return_value={
+                "orders": [{"service_no": "FWD202609220001", "barcodes": ["890000000001"]}],
+                "missing": [],
+                "no_service": [],
+            },
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=wait_for_scheduler,
+        ):
+            started_at = time.monotonic()
+            response = self.client.post("/api/service-close/start", json={"barcodes": ["890000000001"]})
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["success"])
+            self.assertTrue(scheduler_started.wait(timeout=1))
+
+        release_scheduler.set()
+
     def test_service_close_merges_selected_and_detail_product_barcodes(self):
         row = {
             "service_no": "FWD202608050003",

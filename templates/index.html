@@ -2219,34 +2219,6 @@
             } catch (e) {}
         }
 
-        function restoreServiceCloseJob() {
-            let saved;
-            try {
-                saved = JSON.parse(sessionStorage.getItem(SERVICE_CLOSE_SESSION_KEY) || 'null');
-            } catch (e) {
-                clearSavedServiceCloseJob();
-                return;
-            }
-            if (!saved || !saved.jobId) return;
-            serviceCloseJobId = String(saved.jobId);
-            serviceCloseSlotId = String(saved.slotId || '');
-            serviceCloseStartAtMs = Number(saved.startedAtMs) || Date.now();
-            lastServiceCloseLogSeq = 0;
-            const area = document.getElementById('transferLogMain');
-            area.style.display = 'block';
-            area.innerHTML = '';
-            const btn = document.getElementById('serviceCloseBtn');
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '结单中...';
-            }
-            if (serviceCloseTimer) clearInterval(serviceCloseTimer);
-            serviceCloseTimer = setInterval(() => {
-                pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-            }, 1200);
-            pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-        }
-
         function appendServiceCloseLogs(logs) {
             if (!logs || logs.length === 0) return;
             logs.forEach(row => {
@@ -2424,58 +2396,21 @@
             const barcodes = getSelectedBarcodeArray();
             if (barcodes.length === 0) { showToast('请先选择要结单的条码'); return; }
             if (!confirm(`确定对选中的 ${barcodes.length} 个条码执行批量结单？\n同一个服务单号只会结单一次。`)) return;
-            const btn = document.getElementById('serviceCloseBtn');
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '结单中...';
-            }
-            const area = document.getElementById('transferLogMain');
-            area.style.display = 'block';
-            area.innerHTML = '';
-            lastServiceCloseLogSeq = 0;
-            clearSavedServiceCloseJob();
-            serviceCloseJobId = '';
-            serviceCloseSlotId = '';
-            serviceCloseStartAtMs = Date.now();
-            serviceCloseLog(`提交批量结单任务：${barcodes.length} 个条码`, 'info');
-            // 立即用已选条码渲染占位行，避免启动期间面板空白
-            renderServiceCloseStatuses(barcodes.map((bc, idx) => ({
-                service_no: '',
-                barcodes: [bc],
-                selected_barcodes: [bc],
-                related_barcodes: [],
-                customer_names: [],
-                state: 'waiting',
-                message: '启动中，正在加载服务单…',
-                slot_label: '待分配',
-                elapsed: 0,
-            })));
             try {
-                const data = await fetch('/api/service-close/start', {
+                const response = await fetch('/api/service-close/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({barcodes})
-                }).then(r => r.json());
-                if (!data.success) {
-                    serviceCloseLog(data.error || '批量结单启动失败', 'error');
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
                     showToast(data.error || '批量结单启动失败');
-                    const list = area.querySelector('.service-close-status-list');
-                    if (list) list.innerHTML = '';
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.textContent = '批量结单';
-                    }
                     return;
                 }
                 window.location.assign('/service-close');
                 return;
             } catch (e) {
-                serviceCloseLog(`批量结单出错：${e.message || e}`, 'error');
                 showToast('批量结单出错');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = '批量结单';
-                }
             }
         }
 
@@ -3061,7 +2996,7 @@ ${section(9, '移机单', 'moveid1', [
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetailModal(); });
 
         loadAllData();
-        restoreServiceCloseJob();
+        clearSavedServiceCloseJob();
         setInterval(() => loadAllData(false), 30000);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) loadAllData(false);

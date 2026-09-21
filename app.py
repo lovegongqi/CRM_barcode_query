@@ -10494,7 +10494,11 @@ def api_service_close_start():
                     _release_priority_query_slot(selected_slot_id)
         threading.Thread(target=run, daemon=True).start()
 
-    enqueue_priority_query_work('service_close', job['job_id'], launch)
+    threading.Thread(
+        target=enqueue_priority_query_work,
+        args=('service_close', job['job_id'], launch),
+        daemon=True,
+    ).start()
     return jsonify({
         'success': True,
         'job_id': job['job_id'],
