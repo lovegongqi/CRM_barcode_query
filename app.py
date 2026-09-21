@@ -5102,8 +5102,10 @@ def _empty_order_product_job(service_no):
         'done': False,
         'success': False,
         'stage': 'waiting',
+        'message': '',
         'error': '',
         'started_at': '',
+        '_started_ts': 0,
         'finished_at': '',
     }
 
@@ -6176,7 +6178,13 @@ def _run_order_product_job(job_id, worker):
         service_no = job['service_no']
 
     try:
-        ok, result = worker.query_related_order_products(service_no, log=lambda *_args: None)
+        def log(message, _level='info'):
+            with order_product_job_lock:
+                current = order_product_jobs.get(job_id)
+                if current and current.get('running'):
+                    current['message'] = _brief_batch_error(message, 800) or '正在查询订单产品明细'
+
+        ok, result = worker.query_related_order_products(service_no, log=log)
         if not ok:
             error = result.get('error') if isinstance(result, dict) else result
             raise RuntimeError(_brief_batch_error(error, 800) or '订单产品明细查询失败')
@@ -6217,10 +6225,12 @@ def _run_order_product_job(job_id, worker):
                     'done': True,
                     'success': True,
                     'stage': 'success',
+                    'message': '订单产品明细查询完成',
                     'error': '',
                     'finished_at': queried_at,
                 })
     except Exception as error:
+        message = _brief_batch_error(error, 800) or '订单产品明细查询失败'
         with order_product_job_lock:
             current = order_product_jobs.get(job_id)
             if current:
@@ -6229,7 +6239,8 @@ def _run_order_product_job(job_id, worker):
                     'done': True,
                     'success': False,
                     'stage': 'failed',
-                    'error': _brief_batch_error(error, 800) or '订单产品明细查询失败',
+                    'message': message,
+                    'error': message,
                     'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
 
@@ -10940,6 +10951,7 @@ def api_service_order_detail(service_no):
 def _order_product_job_status_payload(job, service_no):
     current = job or {}
     successful = bool(current.get('success'))
+    started_ts = float(current.get('_started_ts') or 0)
     return {
         'job_id': current.get('job_id') or '',
         'service_no': current.get('service_no') or _clean_export_value(service_no),
@@ -10950,8 +10962,10 @@ def _order_product_job_status_payload(job, service_no):
         'done': bool(current.get('done')),
         'success': successful,
         'stage': current.get('stage') or 'idle',
+        'message': current.get('message') or '',
         'error': current.get('error') or '',
         'started_at': current.get('started_at') or '',
+        'elapsed': max(0, int(time.time() - started_ts)) if started_ts else 0,
         'finished_at': current.get('finished_at') or '',
         'detail_url': f"/api/service-orders/{service_no}" if successful else '',
     }
@@ -10971,7 +10985,9 @@ def api_service_order_products_start(service_no):
         job = _empty_order_product_job(service_no)
         job.update({
             'running': True,
+            'message': '正在等待可用查询通道',
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            '_started_ts': time.time(),
         })
         job_id = job['job_id']
         order_product_jobs[job_id] = job
@@ -10984,6 +11000,7 @@ def api_service_order_products_start(service_no):
                 'slot_id': slot_id,
                 'slot_label': slot_label,
                 'stage': 'querying_service_order',
+                'message': f'已分配 {slot_label}，正在打开服务单',
             })
 
         def run():

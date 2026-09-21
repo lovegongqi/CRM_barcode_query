@@ -271,6 +271,18 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertNotIn('<details>', close_management)
         self.assertIn('records.unshift(currentRecord)', close_management)
 
+    def test_close_management_shows_live_order_product_query_progress(self):
+        close_management = self.source("service_close.html")
+        for token in (
+            "function setOrderProductQueryStatus",
+            "data.message",
+            "data.elapsed",
+            "等待通道…",
+            "service-detail-order-attempt is-live",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, close_management)
+
     def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
         results = self.source("index.html")
         self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)

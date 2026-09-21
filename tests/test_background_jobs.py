@@ -271,6 +271,32 @@ class BackgroundJobTests(unittest.TestCase):
             self.assertEqual(status["stage"], "failed")
             self.assertNotIn(worker.slot_id, app_module.priority_query_slot_reservations)
 
+    def test_order_product_status_exposes_live_stage_message_and_elapsed_time(self):
+        """The detail modal needs a human-readable update while CRM work is running."""
+        service_no = "FWD202609220002"
+        job = app_module._empty_order_product_job(service_no)
+        job.update({
+            "running": True,
+            "stage": "querying_service_order",
+            "message": "正在打开门店管理订单列表",
+            "started_at": "2026-09-22 10:00:00",
+            "_started_ts": time.time() - 3,
+        })
+        with app_module.order_product_job_lock:
+            app_module.order_product_jobs[job["job_id"]] = job
+            app_module.latest_order_product_job_by_service[service_no] = job["job_id"]
+        try:
+            status = self.client.get(
+                f"/api/service-orders/{service_no}/order-products/status",
+                query_string={"job_id": job["job_id"]},
+            ).get_json()
+            self.assertEqual(status["message"], "正在打开门店管理订单列表")
+            self.assertGreaterEqual(status["elapsed"], 3)
+        finally:
+            with app_module.order_product_job_lock:
+                app_module.order_product_jobs.pop(job["job_id"], None)
+                app_module.latest_order_product_job_by_service.pop(service_no, None)
+
     def test_failed_order_product_refresh_preserves_successful_cache_bytes(self):
         service_no = "FWD20260914001"
         old_detail = {
