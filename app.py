@@ -2075,8 +2075,8 @@ class CRMSession:
             });
         const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]')).some(visible);
         const labels = {
-            name: ['产品名称', '商品名称', '物料名称'],
-            code: ['产品编码', '商品编码', '物料编码'],
+            name: ['产品名称', '商品名称', '物料名称', '怡口产品名称'],
+            code: ['产品编码', '商品编码', '物料编码', '怡口产品编码'],
             quantity: ['数量', '产品数量', '订单数量', '购买数量']
         };
         const tables = Array.from(document.querySelectorAll('.el-table,.ant-table,table')).filter(visible)

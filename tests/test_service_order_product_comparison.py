@@ -391,6 +391,21 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             {"product_name": "净水器", "product_code": "00AB", "quantity": 2},
         ])
 
+    def test_store_order_detail_accepts_live_ecowater_product_headers(self):
+        self.page.set_content(self.detail_html(
+            [
+                "行号", "类型", "怡口产品编码", "怡口产品名称",
+                "非怡口产品编码", "非怡口产品名称", "单价", "订单数量",
+            ],
+            [["10", "怡口产品", "916046216", "前置过滤器 ESF100-M", "", "", "1000", "1"]],
+            order_no="ORD2511110743",
+        ))
+        snapshot = self.session._store_order_product_table_snapshot("ORD2511110743")
+        self.assertTrue(snapshot["recognized"])
+        self.assertEqual(self.session._store_order_detail_products(), [
+            {"product_name": "前置过滤器 ESF100-M", "product_code": "916046216", "quantity": 1},
+        ])
+
     def test_ambiguous_supported_quantity_headers_fail(self):
         for headers in (["产品编码", "数量", "订单数量"], ["产品编码", "数量", "数量"]):
             with self.subTest(headers=headers):
