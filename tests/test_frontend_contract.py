@@ -236,8 +236,17 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         for source in (results, close_management):
             self.assertIn('href="/">条码列表</a>', source)
             self.assertIn('href="/service-close">结单管理</a>', source)
-        self.assertNotIn('id="serviceCloseBtn"', results)
-        self.assertIn('id="serviceCloseBtn"', close_management)
+        self.assertIn('id="serviceCloseBtn"', results)
+        self.assertIn('onclick="batchCloseServiceOrders()"', results)
+        self.assertNotIn('id="serviceCloseBtn"', close_management)
+        self.assertNotIn('id="serviceCloseBarcodeList"', close_management)
+
+    def test_close_management_uses_the_service_detail_modal_instead_of_new_tabs(self):
+        close_management = self.source("service_close.html")
+        self.assertIn('id="detailModal"', close_management)
+        self.assertIn('function showServiceOrderDetail(serviceNo, detailUrl)', close_management)
+        self.assertIn('onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)"', close_management)
+        self.assertNotIn('target="_blank"', close_management)
 
     def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
         results = self.source("index.html")
@@ -308,7 +317,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertEqual(results.count('<div class="action-groups">'), 1)
         self.assertEqual(
             len(re.findall(r'<div class="action-groups">(.*?)</div>', results, re.S)[0].split('<button')) - 1,
-            9,
+            10,
         )
         for selector in (
             'body[data-aurora-page="results"] .action-groups {',
