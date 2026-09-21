@@ -4854,6 +4854,7 @@ latest_inbound_gyj_job_by_owner = {}
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
 latest_service_close_job_by_slot = {}
+latest_service_close_job_id = ''
 service_close_history_lock = threading.RLock()
 
 order_product_job_lock = threading.RLock()
@@ -10432,6 +10433,7 @@ def api_service_close_start():
             reason += f"，未找到结果 {len(missing)} 个"
         return jsonify({'success': False, 'error': reason, **prepared})
 
+    global latest_service_close_job_id
     with service_close_job_lock:
         job = _empty_service_close_job('', orders)
         job.update({
@@ -10453,6 +10455,7 @@ def api_service_close_start():
         job['slot_ids'] = []
         _append_job_log_unlocked(job, '等待查询通道', "info", 1000)
         service_close_jobs[job['job_id']] = job
+        latest_service_close_job_id = job['job_id']
 
     def launch(worker, slot_id, slot_label):
         worker_entries = [(worker, slot_id, slot_label)]
@@ -10533,8 +10536,12 @@ def api_service_close_status():
     except (TypeError, ValueError):
         since = 0
     slot_id = crm_pool.normalize_slot(request.args.get("slot_id"), "query")
-    job_id = request.args.get("job_id") or _latest_job_id(latest_service_close_job_by_slot, slot_id)
+    requested_job_id = request.args.get("job_id")
+    latest_requested = request.args.get("latest") in {"1", "true", "yes"}
     with service_close_job_lock:
+        job_id = requested_job_id or (
+            latest_service_close_job_id if latest_requested else _latest_job_id(latest_service_close_job_by_slot, slot_id)
+        )
         job = service_close_jobs.get(job_id) or _empty_service_close_job(slot_id)
         return jsonify({
             'success': True,

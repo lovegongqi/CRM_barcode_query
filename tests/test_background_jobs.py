@@ -825,6 +825,8 @@ class BackgroundJobTests(unittest.TestCase):
         })
         with app_module.service_close_job_lock:
             app_module.service_close_jobs[job["job_id"]] = job
+            app_module.latest_service_close_job_id = job["job_id"]
+            app_module.latest_service_close_job_id = job["job_id"]
 
         thread = threading.Thread(
             target=app_module._run_service_close_job,
@@ -875,6 +877,48 @@ class BackgroundJobTests(unittest.TestCase):
             thread.join(timeout=2)
             with app_module.service_close_job_lock:
                 app_module.service_close_jobs.pop(job["job_id"], None)
+                if getattr(app_module, "latest_service_close_job_id", "") == job["job_id"]:
+                    app_module.latest_service_close_job_id = ""
+
+    def test_service_close_latest_status_is_shared_between_clients(self):
+        """Removing the shared latest job ID would make another browser see an empty job."""
+        job = app_module._empty_service_close_job("query-1", [{
+            "service_no": "FWD202609210001",
+            "barcodes": ["870000000001"],
+        }])
+        job.update({
+            "running": True,
+            "started_at": "2026-09-21 12:00:00",
+            "logs": [{"id": 1, "message": "正在处理", "level": "info", "time": "12:00:01"}],
+            "log_seq": 1,
+        })
+        with app_module.service_close_job_lock:
+            app_module.service_close_jobs[job["job_id"]] = job
+            app_module.latest_service_close_job_id = job["job_id"]
+
+        second_client = app_module.app.test_client()
+        second_client.post("/api/app-auth/login", json={"username": "admin", "password": "88293529"})
+        try:
+            response = second_client.get("/api/service-close/status?latest=1")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["job_id"], job["job_id"])
+            self.assertTrue(payload["running"])
+            self.assertEqual(payload["service_rows"][0]["service_no"], "FWD202609210001")
+            self.assertEqual(payload["logs"][0]["message"], "正在处理")
+
+            with app_module.service_close_job_lock:
+                job["running"] = False
+                job["done"] = True
+                job["finished_at"] = "2026-09-21 12:01:00"
+            finished = second_client.get("/api/service-close/status?latest=1").get_json()
+            self.assertTrue(finished["done"])
+            self.assertFalse(finished["running"])
+        finally:
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job["job_id"], None)
+                if app_module.latest_service_close_job_id == job["job_id"]:
+                    app_module.latest_service_close_job_id = ""
 
     def test_service_close_start_uses_all_available_query_channels(self):
         orders = [
