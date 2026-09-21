@@ -4854,6 +4854,7 @@ latest_inbound_gyj_job_by_owner = {}
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
 latest_service_close_job_by_slot = {}
+service_close_history_lock = threading.RLock()
 
 order_product_job_lock = threading.RLock()
 order_product_jobs = {}
@@ -5078,8 +5079,11 @@ def _empty_service_close_job(slot_id=None, orders=None):
             for index, row in enumerate(orders, 1)
         ],
         'results': [],
+        'actor': '',
+        'selected_barcodes': [],
         'missing': [],
         'no_service': [],
+        'history_saved': False,
         'log_seq': 0,
         'logs': [],
         'started_at': '',
@@ -6425,6 +6429,14 @@ def _run_service_close_job(job_id, workers, orders):
             log(f"批量结单完成：新结单 {closed_count} 个，原本已结单 {already_closed_count} 个，失败 {failed_count} 个，总耗时 {elapsed}", "warn")
         else:
             log(f"批量结单完成：新结单 {closed_count} 个，原本已结单 {already_closed_count} 个，总耗时 {elapsed}", "success")
+        with service_close_job_lock:
+            job = service_close_jobs.get(job_id)
+            history_record = None
+            if job and not job.get('history_saved'):
+                job['history_saved'] = True
+                history_record = _service_close_history_record(job)
+        if history_record:
+            _append_service_close_history(history_record)
     except Exception as e:
         error = _brief_batch_error(e, 800)
         with service_close_job_lock:
@@ -6436,6 +6448,14 @@ def _run_service_close_job(job_id, workers, orders):
                 job['error'] = error
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"批量结单出错：{error}", "error")
+        with service_close_job_lock:
+            job = service_close_jobs.get(job_id)
+            history_record = None
+            if job and not job.get('history_saved'):
+                job['history_saved'] = True
+                history_record = _service_close_history_record(job)
+        if history_record:
+            _append_service_close_history(history_record)
 
 def _run_background_query_job(job_id, workers):
     with background_query_job_lock:
@@ -6854,6 +6874,8 @@ BARCODE_DIR = os.path.join(DATA_BASE_DIR, "barcode")
 ARCHIVE_DIR = os.path.join(BARCODE_DIR, "archived")
 SERVICE_ORDER_DIR = os.path.join(DATA_BASE_DIR, "service_orders")
 DATA_FILE = os.path.join(CONFIG_DIR, "barcode_data.json")
+SERVICE_CLOSE_HISTORY_FILE = os.path.join(CONFIG_DIR, "service_close_history.json")
+SERVICE_CLOSE_HISTORY_LIMIT = 500
 PRODUCT_LIBRARY_FILE = os.path.join(CONFIG_DIR, "product_library.json")
 ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
@@ -9666,6 +9688,116 @@ def current_account_public():
     row = current_account()
     return account_public(row) if row else None
 
+
+def _service_close_history_record(job):
+    job = job if isinstance(job, dict) else {}
+    job_id = _clean_export_value(job.get('job_id') or job.get('id'))
+    if not job_id:
+        return None
+    record = {
+        'id': job_id,
+        'job_id': job_id,
+        'actor': _clean_export_value(job.get('actor')),
+        'running': False,
+        'done': bool(job.get('done')),
+        'success': bool(job.get('success')),
+        'error': _clean_export_value(job.get('error')),
+        'total': int(job.get('total') or 0),
+        'current': int(job.get('current') or 0),
+        'closed_count': int(job.get('closed_count') or 0),
+        'already_closed_count': int(job.get('already_closed_count') or 0),
+        'failed_count': int(job.get('failed_count') or 0),
+        'selected_barcodes': list(job.get('selected_barcodes') or []),
+        'missing': list(job.get('missing') or []),
+        'no_service': list(job.get('no_service') or []),
+        'started_at': _clean_export_value(job.get('started_at')),
+        'finished_at': _clean_export_value(job.get('finished_at')),
+        'logs': list(job.get('logs') or []),
+        'service_rows': _service_close_rows_payload(job),
+        'results': list(job.get('results') or []),
+    }
+    try:
+        return json.loads(json.dumps(record, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+
+
+def load_service_close_history():
+    with service_close_history_lock:
+        try:
+            with open(SERVICE_CLOSE_HISTORY_FILE, encoding='utf-8') as history_file:
+                rows = json.load(history_file)
+        except (OSError, ValueError, TypeError):
+            return []
+        if not isinstance(rows, list):
+            return []
+        records = [
+            record for record in (_service_close_history_record(row) for row in rows)
+            if record
+        ]
+        return sorted(
+            records,
+            key=lambda record: record.get('finished_at') or record.get('started_at') or '',
+            reverse=True,
+        )
+
+
+def _save_service_close_history(records):
+    normalized = []
+    seen = set()
+    for row in sorted(
+        list(records or []),
+        key=lambda record: (record or {}).get('finished_at') or (record or {}).get('started_at') or '',
+        reverse=True,
+    ):
+        record = _service_close_history_record(row)
+        if not record or record['id'] in seen:
+            continue
+        normalized.append(record)
+        seen.add(record['id'])
+        if len(normalized) >= SERVICE_CLOSE_HISTORY_LIMIT:
+            break
+    with service_close_history_lock:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        temporary_file = f"{SERVICE_CLOSE_HISTORY_FILE}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary_file, 'w', encoding='utf-8') as history_file:
+                json.dump(normalized, history_file, ensure_ascii=False, indent=2)
+                history_file.flush()
+                os.fsync(history_file.fileno())
+            os.replace(temporary_file, SERVICE_CLOSE_HISTORY_FILE)
+            return True
+        except OSError:
+            try:
+                os.unlink(temporary_file)
+            except OSError:
+                pass
+            return False
+
+
+def _append_service_close_history(job):
+    record = _service_close_history_record(job)
+    if not record:
+        return False
+    with service_close_history_lock:
+        records = load_service_close_history()
+        records = [row for row in records if row.get('id') != record['id']]
+        return _save_service_close_history([record, *records])
+
+
+def delete_service_close_history(job_id):
+    job_id = _clean_export_value(job_id)
+    with service_close_history_lock:
+        records = load_service_close_history()
+        remaining = [row for row in records if row.get('id') != job_id]
+        if len(remaining) == len(records):
+            return False
+        return _save_service_close_history(remaining)
+
+
+def clear_service_close_history():
+    return _save_service_close_history([])
+
 def crm_credentials_owner_key():
     row = current_account()
     if row and row.get("username"):
@@ -10299,6 +10431,8 @@ def api_service_close_start():
             'error': '',
             'missing': prepared.get("missing") or [],
             'no_service': prepared.get("no_service") or [],
+            'selected_barcodes': barcodes,
+            'actor': _clean_export_value((current_account() or {}).get('username')),
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'finished_at': '',
         })
@@ -10361,6 +10495,26 @@ def api_service_close_start():
         'no_service': prepared.get("no_service") or [],
         'message': f'批量结单已排队，共 {len(orders)} 个服务单',
     })
+
+@app.route("/api/service-close/history", methods=["GET"])
+def api_service_close_history():
+    return jsonify({'success': True, 'records': load_service_close_history()})
+
+@app.route("/api/service-close/history/<job_id>", methods=["DELETE"])
+def api_service_close_history_delete(job_id):
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可以删除结单记录'}), 403
+    if not delete_service_close_history(job_id):
+        return jsonify({'success': False, 'error': '未找到结单记录'}), 404
+    return jsonify({'success': True, 'message': '已删除结单记录'})
+
+@app.route("/api/service-close/history", methods=["DELETE"])
+def api_service_close_history_clear():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可以清空结单记录'}), 403
+    if not clear_service_close_history():
+        return jsonify({'success': False, 'error': '清空结单记录失败'}), 500
+    return jsonify({'success': True, 'message': '已清空结单记录'})
 
 @app.route("/api/service-close/status", methods=["GET"])
 def api_service_close_status():
