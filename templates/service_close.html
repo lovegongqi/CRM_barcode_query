@@ -13,6 +13,12 @@
         .close-card h2 { margin:0; font-size:16px; } .close-card p { margin:5px 0 0; color:var(--aurora-muted); font-size:12px; }
         .close-placeholder { min-height:90px; padding:18px; border:1px dashed var(--aurora-line-strong); border-radius:12px; color:var(--aurora-muted); font-size:13px; }
         .close-history-actions button { min-height:32px; padding:6px 10px; border:1px solid rgba(255,124,148,.3); border-radius:9px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
+        .service-close-record { padding:14px; border:1px solid #1e3a52; border-radius:10px; background:rgba(7,20,38,.72); }
+        .service-close-record + .service-close-record { margin-top:10px; }
+        .service-close-record.is-current { border-color:rgba(56,189,248,.5); }
+        .service-close-record-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#cbd5e1; font-size:12px; }
+        .service-close-record-head strong { color:#e2e8f0; }
+        .service-close-record-head button { min-height:30px; padding:5px 9px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
         .service-close-status-list { display:grid; gap:6px; margin-top:10px; }
         .service-close-status-row { display:grid; grid-template-columns:minmax(260px,2fr) 88px minmax(180px,1.2fr) 70px; gap:10px; align-items:center; padding:10px; border:1px solid #1e3a52; border-radius:9px; background:rgba(15,23,42,.72); color:#cbd5e1; }
         .service-close-order-link { padding:0; border:0; background:transparent; color:#7dd3fc; cursor:pointer; font:inherit; font-weight:800; text-align:left; text-decoration:underline; text-underline-offset:3px; }
@@ -54,13 +60,12 @@
     <div class="container">
         <div class="app-header"><div class="app-title"><h1>怡口 CRM 结单管理</h1><div class="app-subtitle">批量结单进度与历史记录</div></div><div class="page-nav">{% for link in nav_links %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</div></div>
         {% if not is_desktop_app %}<div class="status-bar aurora-account-status"><div class="aurora-workspace-links"><a href="/">条码列表</a><a class="active" href="/service-close">结单管理</a></div><div class="aurora-account-session"><span class="aurora-account-name" id="appAccountStatus">检测中</span><a class="aurora-account-logout" href="/logout">退出工具账号</a></div></div>{% endif %}
-        <section class="card close-card"><div class="close-card-head"><div><h2>本次结单</h2><p>批量结单请在条码列表页发起；所有已登录设备将看到相同的实时进度。</p></div></div><div class="close-placeholder" id="serviceCloseCurrentJob">当前没有进行中的结单任务。</div></section>
-        <section class="card close-card"><div class="close-card-head"><div><h2>结单历史</h2><p>完成后的结单记录会保存在服务端。</p></div>{% if can_manage_history %}<div class="close-history-actions"><button id="clearServiceCloseHistory" type="button">清空记录</button></div>{% endif %}</div><div class="close-placeholder" id="serviceCloseHistory">正在加载结单历史…</div></section>
+        <section class="card close-card"><div class="close-card-head"><div><h2>结单记录</h2><p>批量结单请在条码列表页发起；最新任务与历史记录均直接显示在这里。</p></div>{% if can_manage_history %}<div class="close-history-actions"><button id="clearServiceCloseHistory" type="button">清空记录</button></div>{% endif %}</div><div class="close-placeholder" id="serviceCloseRecords">正在加载结单记录…</div></section>
     </div>
     <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><span class="modal-title-text" id="modalTitle">服务单详情</span><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
     <script>
         const canManageHistory = {{ 'true' if can_manage_history else 'false' }};
-        let closeLogSequence = 0, closeTimer = null, detailRequestId = 0, currentDetailServiceNo = '';
+        let closeLogSequence = 0, closeTimer = null, detailRequestId = 0, currentDetailServiceNo = '', historyRecords = [], currentCloseRecord = null;
         const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
         const closeState = state => ({waiting:['等待','is-waiting'],running:['处理中','is-running'],closed:['新结单','is-closed'],already_closed:['原已结单','is-already-closed'],failed:['失败','is-failed']}[state] || [state || '等待','is-waiting']);
         const duration = value => { const seconds = Math.max(0, Number(value || 0)); return seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`; };
@@ -99,9 +104,38 @@
         async function startOrderProductQuery(serviceNo) { const button = document.querySelector('.service-detail-order-query'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '查询中…'; } try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`,{method:'POST'}), data = await response.json(); if (response.status !== 409 && (!response.ok || !data.success)) throw new Error(data.error || '订单产品明细查询失败'); await pollOrderProductQuery(serviceNo,data.job_id); } catch (error) { if (button) { button.disabled = false; button.textContent = '查询订单产品明细'; } alert(error.message || '订单产品明细查询失败'); } }
         async function pollOrderProductQuery(serviceNo,jobId) { if (!serviceNo || serviceNo !== currentDetailServiceNo || !jobId) return; const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`), data = await response.json(); if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败'); if (data.running) { setTimeout(() => pollOrderProductQuery(serviceNo,jobId).catch(() => {}),1000); return; } if (!data.success) throw new Error(data.error || '订单产品明细查询失败'); await showServiceOrderDetail(serviceNo,`/api/service-orders/${encodeURIComponent(serviceNo)}`); }
         function closeDetailModal() { detailRequestId += 1; currentDetailServiceNo = ''; document.getElementById('detailModal').classList.remove('overlay-show'); document.getElementById('serviceDetailContent').innerHTML = ''; }
-        async function loadHistory() { const data = await fetch('/api/service-close/history').then(response => response.json()), root = document.getElementById('serviceCloseHistory'), records = data.records || []; root.innerHTML = records.length ? records.map(record => `<details><summary>${escapeHtml(record.finished_at || record.started_at || '—')} · ${escapeHtml(record.actor || '—')} · 新结单 ${record.closed_count || 0} / 失败 ${record.failed_count || 0}</summary>${renderRows(record.service_rows)}${canManageHistory ? `<button type="button" data-history-id="${escapeHtml(record.id)}">删除记录</button>` : ''}</details>`).join('') : '暂无结单历史。'; root.querySelectorAll('[data-history-id]').forEach(button => button.addEventListener('click',async () => { if (!confirm('确定删除这条结单记录？')) return; await fetch(`/api/service-close/history/${encodeURIComponent(button.dataset.historyId)}`,{method:'DELETE'}); loadHistory(); })); }
-        async function pollCurrentJob() { const data = await fetch(`/api/service-close/status?latest=1&since=${closeLogSequence}`).then(response => response.json()); closeLogSequence = Math.max(closeLogSequence,Number(data.log_seq || 0)); const root = document.getElementById('serviceCloseCurrentJob'); if (!data.job_id) { root.textContent = '当前没有进行中的结单任务。'; return; } root.innerHTML = `<strong>${data.running ? '结单中' : '最近任务已完成'} ${data.current || 0}/${data.total || 0}</strong>${renderRows(data.service_rows)}`; if (data.running) { if (!closeTimer) closeTimer = setInterval(() => pollCurrentJob().catch(() => {}),1200); } else { if (closeTimer) clearInterval(closeTimer); closeTimer = null; loadHistory(); } }
-        const clearButton = document.getElementById('clearServiceCloseHistory'); if (clearButton) clearButton.addEventListener('click',async () => { if (!confirm('确定清空全部结单历史？')) return; await fetch('/api/service-close/history',{method:'DELETE'}); loadHistory(); });
+        function renderRecord(record, isCurrent = false) {
+            const time = record.finished_at || record.started_at || '—';
+            const title = isCurrent ? `本次结单 · ${record.current || 0}/${record.total || 0}` : `${time} · ${record.actor || '—'} · 新结单 ${record.closed_count || 0} / 失败 ${record.failed_count || 0}`;
+            const deleteButton = canManageHistory && !isCurrent ? `<button type="button" data-history-id="${escapeHtml(record.id)}">删除记录</button>` : '';
+            return `<article class="service-close-record ${isCurrent ? 'is-current' : ''}"><div class="service-close-record-head"><strong>${escapeHtml(title)}</strong>${deleteButton}</div>${renderRows(record.service_rows)}</article>`;
+        }
+        function renderRecords() {
+            const root = document.getElementById('serviceCloseRecords');
+            const records = historyRecords.slice();
+            if (currentCloseRecord) { const currentRecord = currentCloseRecord; records.unshift(currentRecord); }
+            root.innerHTML = records.length ? records.map(record => renderRecord(record, record === currentCloseRecord)).join('') : '暂无结单记录。';
+            root.querySelectorAll('[data-history-id]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条结单记录？')) return; await fetch(`/api/service-close/history/${encodeURIComponent(button.dataset.historyId)}`, {method:'DELETE'}); loadHistory(); }));
+        }
+        async function loadHistory() {
+            const data = await fetch('/api/service-close/history').then(response => response.json());
+            historyRecords = (data.records || []).slice().sort((a, b) => String(b.finished_at || b.started_at || '').localeCompare(String(a.finished_at || a.started_at || '')));
+            renderRecords();
+        }
+        async function pollCurrentJob() {
+            const data = await fetch(`/api/service-close/status?latest=1&since=${closeLogSequence}`).then(response => response.json());
+            closeLogSequence = Math.max(closeLogSequence, Number(data.log_seq || 0));
+            currentCloseRecord = data.job_id && data.running ? data : null;
+            renderRecords();
+            if (data.running) {
+                if (!closeTimer) closeTimer = setInterval(() => pollCurrentJob().catch(() => {}), 1200);
+            } else {
+                if (closeTimer) clearInterval(closeTimer);
+                closeTimer = null;
+                loadHistory();
+            }
+        }
+        const clearButton = document.getElementById('clearServiceCloseHistory'); if (clearButton) clearButton.addEventListener('click',async () => { if (!confirm('确定清空全部结单记录？')) return; await fetch('/api/service-close/history',{method:'DELETE'}); loadHistory(); });
         fetch('/api/app-auth/status').then(response => response.json()).then(data => { document.getElementById('appAccountStatus').textContent = data.account ? data.account.username : '未登录'; }); loadHistory(); pollCurrentJob();
     </script>
 </body>

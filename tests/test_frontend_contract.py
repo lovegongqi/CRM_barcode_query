@@ -255,6 +255,14 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         batch_close = results[start_index:close_index]
         self.assertIn("window.location.assign('/service-close')", batch_close)
 
+    def test_close_management_uses_one_expanded_newest_first_record_panel(self):
+        close_management = self.source("service_close.html")
+        self.assertIn('<h2>结单记录</h2>', close_management)
+        self.assertNotIn('<h2>本次结单</h2>', close_management)
+        self.assertNotIn('<h2>结单历史</h2>', close_management)
+        self.assertNotIn('<details>', close_management)
+        self.assertIn('records.unshift(currentRecord)', close_management)
+
     def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
         results = self.source("index.html")
         self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)
