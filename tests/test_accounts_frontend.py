@@ -145,6 +145,68 @@ class AccountsFrontendTest(unittest.TestCase):
         self.assertIn('id="gyjCaptcha" inputmode="text"', self.source)
         self.assertIn('autocapitalize="off"', self.source)
 
+    def test_gyj_captcha_uses_a_placeholder_instead_of_a_broken_image(self):
+        self.assertIn('id="gyjCaptchaPlaceholder"', self.source)
+        self.assertRegex(
+            self.source,
+            r'id="gyjCaptchaImage"[^>]+hidden',
+        )
+
+    def test_switching_gyj_channel_resets_captcha_immediately_without_status_wait(self):
+        self.run_node(
+            r"""
+            const calls = [];
+            const context = {
+                console,
+                GYJ_CHANNEL_IDS: ['gyj-1', 'gyj-2', 'gyj-3', 'gyj-4', 'gyj-5'],
+                selectedGyjSlotId: 'gyj-1',
+                gyjChannels: [{id: 'gyj-2', waiting_captcha: false}],
+                renderGyjManagementState() { calls.push('render'); },
+                showGyjCaptchaPlaceholder(message) { calls.push(message); },
+                refreshGyjCaptcha() { calls.push('captcha'); },
+                refreshSelectedGyjChannel() { throw new Error('channel switch must not wait for a live status check'); },
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext("selectGyjChannel('gyj-2')", context);
+                assert.equal(context.selectedGyjSlotId, 'gyj-2');
+                assert.deepEqual(calls, ['render', '正在读取验证码…']);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["selectGyjChannel"],
+        )
+
+    def test_stale_gyj_captcha_response_cannot_replace_new_channel_preview(self):
+        self.run_node(
+            r"""
+            let resolveFetch;
+            const image = {hidden: true, removeAttribute() {}, src: ''};
+            const placeholder = {hidden: false, textContent: ''};
+            const context = {
+                console,
+                selectedGyjSlotId: 'gyj-1',
+                URLSearchParams,
+                document: {getElementById(id) {
+                    return id === 'gyjCaptchaImage' ? image : placeholder;
+                }},
+                fetch: () => new Promise(resolve => { resolveFetch = resolve; }),
+                setGyjMessage() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                const pending = vm.runInContext("refreshGyjCaptcha(false, 'gyj-1')", context);
+                context.selectedGyjSlotId = 'gyj-2';
+                resolveFetch({json: async () => ({success: true, captcha_image: 'data:image/png;base64,OLD'})});
+                await pending;
+                assert.equal(image.src, '');
+                assert.equal(image.hidden, true);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["showGyjCaptchaPlaceholder", "refreshGyjCaptcha"],
+        )
+
     def test_settings_login_submits_the_selected_gyj_slot(self):
         self.run_node(
             r"""

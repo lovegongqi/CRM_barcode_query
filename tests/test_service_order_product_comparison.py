@@ -127,6 +127,26 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "",
         )
 
+    def test_refresh_service_order_products_also_returns_fresh_service_fields(self):
+        session = make_crm_session()
+        fields = [{"label": "关联订单", "value": "ORD2609140231"}]
+        products = [{
+            "product_name": "反渗透净水机",
+            "product_code": "906042840",
+            "barcode": "8452505260058",
+        }]
+        with mock.patch.object(session, "is_alive", return_value=True), \
+                mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
+                mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                mock.patch.object(session, "_service_detail_fields", return_value=fields), \
+                mock.patch.object(session, "_service_detail_products", return_value=products):
+            ok, result = session.refresh_service_order_products("FWD202609201457")
+
+        self.assertTrue(ok, result)
+        self.assertEqual(result, {"fields": fields, "products": products})
+
     def test_store_order_list_uses_live_crm_route_and_accepts_live_or_legacy_heading(self):
         session = make_crm_session()
         session.page.url = "http://crmportal.ecowaterchina.net.cn/#/workOrder/list"
@@ -234,6 +254,99 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "order_products": order_products,
         })
 
+    def test_query_related_order_products_refreshes_invalid_cached_order_then_continues(self):
+        session = make_crm_session()
+        service_no = "FWD202609201457"
+        order_no = "ORD2609140231"
+        service_products = [{
+            "product_name": "反渗透净水机",
+            "product_code": "906042840",
+            "barcode": "8452505260058",
+        }]
+        order_products = [{
+            "product_name": "反渗透净水机",
+            "product_code": "906042840",
+            "quantity": 1,
+        }]
+        fresh_fields = [{"label": "关联订单", "value": order_no}]
+
+        with tempfile.TemporaryDirectory() as tempdir, \
+                mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir):
+            app_module._write_service_order_detail(service_no, {
+                "fields": [{"label": "关联订单", "value": "查找移除值确定"}],
+                "products": service_products,
+                "order_lookup": {"order_no": "查找移除值确定"},
+            })
+            with mock.patch.object(session, "is_alive", return_value=True), \
+                    mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
+                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")) as open_service, \
+                    mock.patch.object(session, "_search_service_order", return_value=(True, "")) as search_service, \
+                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")) as open_detail, \
+                    mock.patch.object(session, "_service_detail_fields", return_value=fresh_fields), \
+                    mock.patch.object(session, "_service_detail_products", return_value=service_products), \
+                    mock.patch.object(session, "_open_store_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_store_order", return_value=(True, "")) as search_order, \
+                    mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_store_order_detail_products", return_value=order_products):
+                ok, result = session.query_related_order_products(service_no)
+
+            saved = app_module._cached_service_order_detail(service_no)
+
+        self.assertTrue(ok, result)
+        self.assertEqual(result["order_no"], order_no)
+        self.assertEqual(saved["fields"], fresh_fields)
+        self.assertFalse(saved["order_lookup"].get("order_no"))
+        open_service.assert_called_once()
+        search_service.assert_called_once_with(service_no)
+        open_detail.assert_called_once_with(service_no)
+        search_order.assert_called_once_with(order_no)
+
+    def test_query_related_order_products_retries_after_cached_order_search_fails(self):
+        session = make_crm_session()
+        service_no = "FWD202609201457"
+        stale_order_no = "ORD2609140000"
+        fresh_order_no = "ORD2609140231"
+        service_products = [{
+            "product_name": "反渗透净水机",
+            "product_code": "906042840",
+            "barcode": "8452505260058",
+        }]
+        order_products = [{
+            "product_name": "反渗透净水机",
+            "product_code": "906042840",
+            "quantity": 1,
+        }]
+
+        with tempfile.TemporaryDirectory() as tempdir, \
+                mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir):
+            app_module._write_service_order_detail(service_no, {
+                "fields": [{"label": "关联订单", "value": stale_order_no}],
+                "products": service_products,
+                "order_lookup": {"order_no": stale_order_no},
+            })
+            with mock.patch.object(session, "is_alive", return_value=True), \
+                    mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
+                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_service_detail_fields", return_value=[{"label": "关联订单", "value": fresh_order_no}]), \
+                    mock.patch.object(session, "_service_detail_products", return_value=service_products), \
+                    mock.patch.object(session, "_open_store_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_store_order", side_effect=[
+                        (False, f"订单列表未找到订单号：{stale_order_no}"),
+                        (True, ""),
+                    ]) as search_order, \
+                    mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_store_order_detail_products", return_value=order_products):
+                ok, result = session.query_related_order_products(service_no)
+
+        self.assertTrue(ok, result)
+        self.assertEqual(result["order_no"], fresh_order_no)
+        self.assertEqual(
+            [call.args[0] for call in search_order.call_args_list],
+            [stale_order_no, fresh_order_no],
+        )
+
     def test_query_related_order_products_names_missing_related_order_stage(self):
         session = make_crm_session()
         with tempfile.TemporaryDirectory() as tempdir, \
@@ -242,9 +355,16 @@ class CRMRelatedOrderTests(unittest.TestCase):
                 "fields": [{"label": "备注", "value": "无关联"}],
                 "products": [{"product_name": "前置过滤器", "product_code": "916046216"}],
             })
-            ok, result = session.query_related_order_products("FWD20260914001")
+            with mock.patch.object(session, "is_alive", return_value=True), \
+                    mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
+                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_service_detail_fields", return_value=[{"label": "关联订单", "value": "查找移除值确定"}]), \
+                    mock.patch.object(session, "_service_detail_products", return_value=[]):
+                ok, result = session.query_related_order_products("FWD20260914001")
         self.assertFalse(ok)
-        self.assertIn("本地服务单详情缺少关联订单号，请先重查产品明细", result["error"])
+        self.assertIn("自动重查后仍未获取到有效关联订单号", result["error"])
 
     def test_query_related_order_products_requires_cached_service_products(self):
         session = make_crm_session()
@@ -270,11 +390,13 @@ class CRMRelatedOrderTests(unittest.TestCase):
                 "products": [{"product_name": "前置过滤器", "product_code": "916046216"}],
                 "order_lookup": {"order_no": "SO20260914001"},
             })
-            with self._success_patches(session), mock.patch.object(
-                session,
-                "_search_store_order",
-                return_value=(False, "订单搜索后未找到精确订单号：SO20260914001"),
-            ):
+            with self._success_patches(session), \
+                    mock.patch.object(session, "_search_store_order", return_value=(False, "订单搜索后未找到精确订单号：SO20260914001")), \
+                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_service_detail_fields", return_value=fields), \
+                    mock.patch.object(session, "_service_detail_products", return_value=[]):
                 ok, result = session.query_related_order_products("FWD20260914001")
         self.assertFalse(ok)
         self.assertIn("订单搜索后未找到精确订单号", result["error"])
@@ -566,7 +688,7 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             with self.subTest(incomplete=incomplete), tempfile.TemporaryDirectory() as tempdir:
                 self.page.set_content(self.detail_html(["产品名称", "产品编码", "数量"], [["A", "A", "1"], incomplete]))
                 filepath = Path(tempdir) / "FWD20260914001.json"
-                original = json.dumps({"products": [], "order_lookup": {"order_no": "SO-OLD", "queried_at": "yesterday"}}).encode()
+                original = json.dumps({"products": [], "order_lookup": {"order_no": "SO20260914001", "queried_at": "yesterday"}}).encode()
                 filepath.write_bytes(original)
                 job = app_module._empty_order_product_job("FWD20260914001")
                 with contextlib.ExitStack() as stack:

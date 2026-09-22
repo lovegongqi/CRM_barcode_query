@@ -126,6 +126,7 @@ RESOURCE_BASE_DIR = getattr(sys, "_MEIPASS", RUNTIME_BASE_DIR)
 CRM_CONFIG_PATH = os.path.join(RUNTIME_BASE_DIR, "config.json")
 IS_DESKTOP_APP = os.environ.get("CRM_DESKTOP_APP") == "1"
 STARTUP_LOGIN_AUTO_CHECK = os.environ.get("CRM_STARTUP_LOGIN_AUTO_CHECK", "1") != "0"
+GYJ_STARTUP_LOGIN_AUTO_CHECK = os.environ.get("CRM_GYJ_STARTUP_LOGIN_AUTO_CHECK", "0") == "1"
 try:
     STARTUP_LOGIN_CHECK_DELAY_SECONDS = max(0, int(os.environ.get("CRM_STARTUP_LOGIN_CHECK_DELAY_SECONDS", "2")))
 except (TypeError, ValueError):
@@ -2543,8 +2544,9 @@ class CRMSession:
                 ok, message = self._open_service_order_detail(service_no)
                 if not ok:
                     return False, {"error": message or "无法打开服务单详情"}
+                fields = self._service_detail_fields()
                 products = self._service_detail_products()
-                return True, {"products": products}
+                return True, {"fields": fields, "products": products}
         except Exception as e:
             return False, {"error": str(e)}
 
@@ -2552,6 +2554,53 @@ class CRMSession:
         def emit(message, level="info"):
             if log:
                 log(message, level)
+
+        def refresh_related_order():
+            nonlocal fields, service_products
+            emit("关联订单号无效，正在自动重查服务单详情", "info")
+            for operation in (
+                lambda: self._open_service_order_list(emit),
+                lambda: self._search_service_order(service_no),
+                lambda: self._open_service_order_detail(service_no),
+            ):
+                ok, message = operation()
+                if not ok:
+                    return "", message or "自动重查服务单失败"
+
+            fresh_fields = list(self._service_detail_fields() or [])
+            fresh_products = list(self._service_detail_products() or [])
+            fresh_order_no = _related_order_no_from_service_fields(fresh_fields)
+            if not fresh_order_no:
+                return "", "自动重查后仍未获取到有效关联订单号"
+
+            fields = fresh_fields
+            if fresh_products:
+                service_products = fresh_products
+            with _service_order_cache_lock(service_no):
+                filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+                latest = {}
+                if os.path.exists(filepath):
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as file:
+                            latest = json.load(file) or {}
+                    except (OSError, ValueError, TypeError):
+                        latest = {}
+                if not isinstance(latest, dict):
+                    latest = {}
+                latest["service_no"] = service_no
+                latest["fields"] = fresh_fields
+                if fresh_products:
+                    latest["products"] = fresh_products
+                old_lookup = latest.get("order_lookup")
+                old_order_no = (
+                    _valid_related_order_no(old_lookup.get("order_no"))
+                    if isinstance(old_lookup, dict) else ""
+                )
+                if isinstance(old_lookup, dict) and old_lookup and old_order_no != fresh_order_no:
+                    latest["order_lookup"] = {}
+                _write_service_order_detail(service_no, latest)
+            return fresh_order_no, ""
+
         try:
             service_no = _clean_export_value(service_no)
             if not service_no:
@@ -2560,23 +2609,42 @@ class CRMSession:
             fields = list(cached_detail.get("fields") or [])
             service_products = list(cached_detail.get("products") or [])
             order_no = _related_order_no_from_cached_detail(cached_detail)
-            if not order_no:
-                return False, {"error": "本地服务单详情缺少关联订单号，请先重查产品明细"}
-            if not service_products:
+            if order_no and not service_products:
                 return False, {"error": "本地服务单详情缺少产品明细，请先重查产品明细"}
             with self.lock:
                 if not self.is_alive() and not self._ensure_browser():
                     return False, {"error": "浏览器未启动，请先登录 CRM"}
                 if not self.logged_in and not self._is_current_page_logged_in():
                     return False, {"error": "CRM 当前未登录，请先登录 CRM"}
-                for operation in (
-                    lambda: self._open_store_order_list(emit),
-                    lambda: self._search_store_order(order_no),
-                    lambda: self._open_store_order_detail(order_no),
-                ):
-                    ok, message = operation()
+
+                if not order_no:
+                    order_no, message = refresh_related_order()
+                    if not order_no:
+                        return False, {"error": message}
+                if not service_products:
+                    return False, {"error": "本地服务单详情缺少产品明细，请先重查产品明细"}
+
+                ok, message = self._open_store_order_list(emit)
+                if not ok:
+                    return False, {"error": message}
+                ok, message = self._search_store_order(order_no)
+                if not ok:
+                    original_message = message
+                    fresh_order_no, refresh_message = refresh_related_order()
+                    if not fresh_order_no:
+                        return False, {"error": refresh_message or original_message}
+                    if fresh_order_no == order_no:
+                        return False, {"error": original_message}
+                    order_no = fresh_order_no
+                    ok, message = self._open_store_order_list(emit)
                     if not ok:
                         return False, {"error": message}
+                    ok, message = self._search_store_order(order_no)
+                    if not ok:
+                        return False, {"error": message}
+                ok, message = self._open_store_order_detail(order_no)
+                if not ok:
+                    return False, {"error": message}
                 order_products = self._store_order_detail_products()
                 if not order_products:
                     return False, {"error": "订单详情未读取到产品明细"}
@@ -4775,6 +4843,27 @@ def _desktop_startup_login_check_loop():
     except Exception as e:
         print(f"  [启动检测] CRM 启动检测失败: {e}")
 
+
+def _gyj_startup_login_check_loop():
+    """NAS 启动后依次恢复五个 GYJ 会话并验证登录状态。"""
+    if not GYJ_STARTUP_LOGIN_AUTO_CHECK or not HAS_PLAYWRIGHT:
+        return
+    if STARTUP_LOGIN_CHECK_DELAY_SECONDS:
+        time.sleep(STARTUP_LOGIN_CHECK_DELAY_SECONDS)
+
+    for index, slot_id in enumerate(gyj_worker.slot_ids):
+        try:
+            print(f"  [启动检测] 正在验证 {slot_id} GYJ 登录状态")
+            success, message = gyj_worker.get(slot_id).check_login_status()
+            if success:
+                print(f"  [启动检测] {slot_id} GYJ 会话有效")
+            else:
+                print(f"  [启动检测] {slot_id} GYJ 会话无效: {message}")
+        except Exception as error:
+            print(f"  [启动检测] {slot_id} GYJ 会话检测失败: {error}")
+        if index < len(gyj_worker.slot_ids) - 1 and STARTUP_LOGIN_CHECK_STAGGER_SECONDS:
+            time.sleep(STARTUP_LOGIN_CHECK_STAGGER_SECONDS)
+
 def _idle_report_cleanup_loop():
     while True:
         time.sleep(REPORT_IDLE_CLEANUP_INTERVAL_SECONDS)
@@ -4793,6 +4882,7 @@ def _idle_report_cleanup_loop():
 
 threading.Thread(target=_idle_report_cleanup_loop, daemon=True).start()
 threading.Thread(target=_desktop_startup_login_check_loop, daemon=True).start()
+threading.Thread(target=_gyj_startup_login_check_loop, daemon=True).start()
 crm_session = crm_pool.get(kind="query")
 
 DEFAULT_BATCH_RETRY_LIMIT = 5
@@ -11219,8 +11309,10 @@ def api_service_order_refresh_products(service_no):
         return jsonify({"success": False, "error": (result if isinstance(result, str) else str(result)) or "重查失败"})
 
     products = []
+    fields = []
     if isinstance(result, dict):
         products = list(result.get("products") or [])
+        fields = list(result.get("fields") or [])
     elif isinstance(result, list):
         products = list(result)
 
@@ -11235,6 +11327,8 @@ def api_service_order_refresh_products(service_no):
                 existing = {}
 
         existing["products"] = products
+        if fields:
+            existing["fields"] = fields
         order_lookup = existing.get("order_lookup")
         if isinstance(order_lookup, dict) and order_lookup.get("order_no"):
             order_lookup["comparison"] = _build_service_order_product_comparison(

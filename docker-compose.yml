@@ -11,6 +11,7 @@ services:
       CRM_DATA_DIR: /app/data
       CRM_SESSION_BASE: /app/session
       CRM_DISABLE_DATA_MIGRATION: "1"
+      CRM_GYJ_STARTUP_LOGIN_AUTO_CHECK: "1"
     ports:
       - "5002:5001"
     volumes:

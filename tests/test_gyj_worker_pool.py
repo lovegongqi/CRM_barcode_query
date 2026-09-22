@@ -50,6 +50,39 @@ class GYJWorkerPoolTest(unittest.TestCase):
         )
         self.assertEqual(set(workers), set(pool.slot_ids))
 
+    def test_startup_login_check_verifies_all_channels_in_order(self):
+        calls = []
+
+        class StartupWorker:
+            def __init__(self, slot_id):
+                self.slot_id = slot_id
+
+            def check_login_status(self):
+                calls.append(self.slot_id)
+                return False, "未登录"
+
+        class StartupPool:
+            slot_ids = app_module.GYJ_SLOT_IDS
+
+            def get(self, slot_id):
+                return StartupWorker(slot_id)
+
+        with mock.patch.object(app_module, "gyj_worker", StartupPool()), \
+                mock.patch.object(app_module, "HAS_PLAYWRIGHT", True), \
+                mock.patch.object(app_module, "GYJ_STARTUP_LOGIN_AUTO_CHECK", True), \
+                mock.patch.object(app_module, "STARTUP_LOGIN_CHECK_DELAY_SECONDS", 0), \
+                mock.patch.object(app_module, "STARTUP_LOGIN_CHECK_STAGGER_SECONDS", 0):
+            app_module._gyj_startup_login_check_loop()
+
+        self.assertEqual(calls, list(app_module.GYJ_SLOT_IDS))
+
+    def test_docker_enables_gyj_startup_login_check(self):
+        compose = (app_module.RUNTIME_BASE_DIR and os.path.join(
+            os.path.dirname(__file__), "..", "docker-compose.yml"
+        ))
+        with open(compose, encoding="utf-8") as file:
+            self.assertIn('CRM_GYJ_STARTUP_LOGIN_AUTO_CHECK: "1"', file.read())
+
     def test_channel_one_preserves_admin_profile_and_others_are_distinct(self):
         with tempfile.TemporaryDirectory() as runtime_dir:
             with mock.patch.dict(os.environ, {"CRM_DATA_DIR": runtime_dir}):

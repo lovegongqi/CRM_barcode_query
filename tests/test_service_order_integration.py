@@ -83,6 +83,20 @@ def test_refresh_recomputes_cached_order_comparison(detail_cache, refresh_worker
     assert saved["legacy_note"] == "preserved"
 
 
+def test_refresh_replaces_polluted_fields_with_fresh_related_order(detail_cache, refresh_worker):
+    fresh_fields = [{"label": "关联订单", "value": "ORD2609140231"}]
+    refresh_worker.refresh_service_order_products.return_value = (True, {
+        "fields": fresh_fields,
+        "products": REFRESHED_PRODUCTS,
+    })
+
+    refresh_products()
+
+    saved = json.loads(detail_cache.read_text())
+    assert saved["fields"] == fresh_fields
+    assert app_module._related_order_no_from_cached_detail(saved) == "ORD2609140231"
+
+
 @pytest.mark.parametrize("kinds,expected", [
     (["order_products"], ["order_products"]),
     (["order_products", "service_close", "inbound", "library"],

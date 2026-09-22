@@ -62,7 +62,8 @@
         .gyj-login-grid .remember-inline { display:flex; align-items:center; gap:8px; margin:0 0 8px; white-space:nowrap; color:#334155; }
         .gyj-login-grid .remember-inline input { width:auto; }
         .gyj-captcha-row { display:grid; grid-template-columns:140px minmax(140px,1fr) auto; gap:12px; align-items:end; margin-top:12px; }
-        .gyj-captcha-image { width:140px; height:48px; object-fit:contain; border:1px solid #cfd8e3; border-radius:6px; background:#fff; }
+        .gyj-captcha-preview { width:140px; height:48px; display:flex; align-items:center; justify-content:center; overflow:hidden; border:1px solid #cfd8e3; border-radius:6px; background:#f8fafc; color:#94a3b8; font-size:11px; text-align:center; }
+        .gyj-captcha-image { width:100%; height:100%; object-fit:contain; background:#fff; }
         .gyj-message { min-height:20px; margin-top:10px; color:#667085; font-size:12px; }
         .log-box { background:#0f172a; color:#d4d4d4; border-radius:8px; padding:12px; font-family:"Courier New",monospace; font-size:12px; line-height:1.7; max-height:220px; overflow:auto; }
         .log-box .info { color:#4fc3f7; } .log-box .success { color:#81c784; } .log-box .error { color:#e57373; } .log-box .warn { color:#ffb74d; } .log-box .dim { color:#94a3b8; }
@@ -74,7 +75,7 @@
         table { width:100%; border-collapse:collapse; font-size:13px; }
         th, td { border-bottom:1px solid #e5e7eb; padding:8px 10px; text-align:left; vertical-align:top; }
         th { background:#f8fafc; color:#475569; }
-        @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .runtime-query-settings, .bulk-login-grid, .bulk-captcha-row, .gyj-login-grid { grid-template-columns:1fr; } .gyj-channel-tabs { grid-template-columns:repeat(5,minmax(54px,1fr)); overflow-x:auto; } .gyj-captcha-row { grid-template-columns:1fr auto; } .gyj-captcha-image { grid-column:1/-1; } }
+        @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .runtime-query-settings, .bulk-login-grid, .bulk-captcha-row, .gyj-login-grid { grid-template-columns:1fr; } .gyj-channel-tabs { grid-template-columns:repeat(5,minmax(54px,1fr)); overflow-x:auto; } .gyj-captcha-row { grid-template-columns:1fr auto; } .gyj-captcha-preview { grid-column:1/-1; } }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
@@ -178,7 +179,10 @@
             <button class="btn btn-primary" id="gyjLoginButton" type="button" onclick="startGyjChannelLogin()">登录所选通道</button>
         </div>
         <div class="gyj-captcha-row" id="gyjCaptchaRow" hidden>
-            <img class="gyj-captcha-image" id="gyjCaptchaImage" alt="GYJ 验证码">
+            <div class="gyj-captcha-preview">
+                <img class="gyj-captcha-image" id="gyjCaptchaImage" alt="GYJ 验证码" hidden>
+                <span id="gyjCaptchaPlaceholder">当前通道暂无验证码</span>
+            </div>
             <div><label>验证码</label><input id="gyjCaptcha" inputmode="text" autocapitalize="off" autocomplete="one-time-code" maxlength="12" placeholder="输入字母或数字"></div>
             <div class="actions">
                 <button class="btn btn-secondary" type="button" onclick="refreshGyjCaptcha(true)">换一张</button>
@@ -523,6 +527,15 @@ function setGyjMessage(message) {
     if (target) target.textContent = message || '';
 }
 
+function showGyjCaptchaPlaceholder(message='当前通道暂无验证码') {
+    const image = document.getElementById('gyjCaptchaImage');
+    const placeholder = document.getElementById('gyjCaptchaPlaceholder');
+    image.hidden = true;
+    image.removeAttribute('src');
+    placeholder.hidden = false;
+    placeholder.textContent = message;
+}
+
 function gyjSlotStateText(slot) {
     if (slot.busy) return '使用中';
     if (slot.logged_in) return '已登录';
@@ -573,7 +586,9 @@ async function selectGyjChannel(slotId) {
     if (!GYJ_CHANNEL_IDS.includes(slotId)) return;
     selectedGyjSlotId = slotId;
     renderGyjManagementState({slots: gyjChannels});
-    await refreshSelectedGyjChannel();
+    showGyjCaptchaPlaceholder('正在读取验证码…');
+    const selected = gyjChannels.find(slot => slot.id === slotId) || {};
+    if (selected.waiting_captcha) await refreshGyjCaptcha(false, slotId);
 }
 
 async function loadGyjCredentials() {
@@ -616,19 +631,25 @@ async function startGyjChannelLogin() {
     }
 }
 
-async function refreshGyjCaptcha(regenerate = false) {
-    const params = new URLSearchParams({slot_id: selectedGyjSlotId});
+async function refreshGyjCaptcha(regenerate = false, slotId = selectedGyjSlotId) {
+    if (slotId !== selectedGyjSlotId) return;
+    showGyjCaptchaPlaceholder('正在读取验证码…');
+    const params = new URLSearchParams({slot_id: slotId});
     const url = regenerate ? '/api/gyj/captcha/refresh' : '/api/gyj/captcha-preview?' + params.toString();
     const options = regenerate ? {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({slot_id: selectedGyjSlotId}),
+        body: JSON.stringify({slot_id: slotId}),
     } : undefined;
     const data = await fetch(url, options).then(res => res.json()).catch(() => null);
+    if (slotId !== selectedGyjSlotId) return;
     const image = document.getElementById('gyjCaptchaImage');
+    const placeholder = document.getElementById('gyjCaptchaPlaceholder');
     if (data?.success && String(data.captcha_image || '').startsWith('data:image/')) {
         image.src = data.captcha_image;
+        image.hidden = false;
+        placeholder.hidden = true;
     } else {
-        image.removeAttribute('src');
+        showGyjCaptchaPlaceholder();
         if (data?.error) setGyjMessage(data.error);
     }
 }
@@ -767,7 +788,7 @@ async function loadAccounts() {
         loadBulkCrmSlots();
         loadSavedCrmCredentials();
         loadGyjCredentials();
-        loadGyjChannels(true);
+        loadGyjChannels();
         startGyjManagementPolling();
         if (currentBulkCrmLoginJobId) startBulkLoginPolling();
     }
