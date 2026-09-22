@@ -2569,6 +2569,7 @@ class CRMSession:
                     if not ok:
                         return False, {"error": message}
                 fields = self._service_detail_fields()
+                service_products = self._service_detail_products()
                 order_no = _related_order_no_from_service_fields(fields)
                 if not order_no:
                     return False, {"error": "服务单没有关联订单号"}
@@ -2587,6 +2588,7 @@ class CRMSession:
                     "service_no": service_no,
                     "order_no": order_no,
                     "service_fields": fields,
+                    "service_products": service_products,
                     "order_products": order_products,
                 }
         except Exception as error:
@@ -6194,12 +6196,19 @@ def _run_order_product_job(job_id, worker):
         order_no = _clean_export_value(result.get('order_no'))
         order_products = list(result.get('order_products') or [])
         service_fields = list(result.get('service_fields') or [])
+        service_products = list(result.get('service_products') or [])
         with _service_order_cache_lock(service_no):
             filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
-            with open(filepath, 'r', encoding='utf-8') as file:
-                detail = json.load(file)
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as file:
+                    detail = json.load(file)
+            else:
+                detail = {'service_no': service_no, 'products': service_products}
             if not isinstance(detail, dict):
                 raise ValueError('服务单详情格式不正确')
+            if service_products:
+                detail['products'] = service_products
+            detail['service_no'] = service_no
             comparison = _build_service_order_product_comparison(
                 detail.get('products') or [],
                 order_products,
@@ -6393,6 +6402,7 @@ def _run_service_close_job(job_id, workers, orders):
         closed_count = 0
         already_closed_count = 0
         failed_count = 0
+        failed_service_nos = []
         order_map = {
             _clean_export_value(row.get("service_no")): row
             for row in (orders or [])
@@ -6420,6 +6430,8 @@ def _run_service_close_job(job_id, workers, orders):
                 _record_service_closed_for_barcodes(service_no, row.get("barcodes") or [])
             else:
                 failed_count += 1
+                if service_no not in failed_service_nos:
+                    failed_service_nos.append(service_no)
 
         general_error = "; ".join(worker_errors[:3])
         with service_close_job_lock:
@@ -6436,6 +6448,12 @@ def _run_service_close_job(job_id, workers, orders):
             job['already_closed_count'] = already_closed_count
             job['failed_count'] = failed_count
             job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        for service_no in failed_service_nos:
+            _job, created = _start_order_product_job(service_no, automatic=True)
+            log(
+                f"{service_no} 结单失败，订单产品明细{'已自动加入查询队列' if created else '已有查询任务'}",
+                "warn",
+            )
         elapsed = format_duration_seconds(time.time() - started)
         if failed_count:
             log(f"批量结单完成：新结单 {closed_count} 个，原本已结单 {already_closed_count} 个，失败 {failed_count} 个，总耗时 {elapsed}", "warn")
@@ -8201,6 +8219,8 @@ def _yield_batch_query_slot_to_priority_work(job_id, slot_id):
 
 query_slot_cooldown_lock = threading.Lock()
 query_slot_cooldowns = {}
+query_slot_round_robin_lock = threading.Lock()
+query_slot_round_robin_cursor = 0
 
 def _mark_query_slot_healthy(slot_id):
     if not slot_id:
@@ -8230,14 +8250,18 @@ def _query_slot_cooldown_message(slot_id):
         return f"{reason}，冷却 {remaining} 秒"
 
 def _select_idle_query_workers_desc(exclude_slot_ids=None):
+    global query_slot_round_robin_cursor
     exclude_slot_ids = set(exclude_slot_ids or [])
     with crm_pool.pool_lock:
         slots = list(crm_pool.query_slots)
+    with query_slot_round_robin_lock:
+        rotation_start = query_slot_round_robin_cursor % len(slots) if slots else 0
+    ordered_slots = slots[rotation_start:] + slots[:rotation_start]
     workers = []
     logged_in_count = 0
     busy_count = 0
     skipped_cooldown = 0
-    for slot_id in reversed(slots):
+    for slot_id in ordered_slots:
         if slot_id in exclude_slot_ids:
             continue
         if _query_slot_has_priority_reservation(slot_id):
@@ -8267,6 +8291,8 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
             continue
         workers.append((worker, slot_id, _query_slot_label(slot_id)))
     if workers:
+        with query_slot_round_robin_lock:
+            query_slot_round_robin_cursor = (slots.index(workers[0][1]) + 1) % len(slots)
         return workers, ""
     if logged_in_count == 0:
         if busy_count:
@@ -8597,20 +8623,31 @@ def build_transfer_summary(selected_barcodes, transfer_type="移出", distributo
 
 def _merge_service_order_products(row, products, selected_barcodes=None):
     merged = dict(row or {})
-    selected = normalize_input_barcodes(
+    requested_barcodes = normalize_input_barcodes(
         selected_barcodes
         if selected_barcodes is not None
         else (merged.get("selected_barcodes") or merged.get("barcodes") or [])
     )
-    barcodes = normalize_input_barcodes([
-        *selected,
-        *(merged.get("barcodes") or []),
-        *[
-            product.get("barcode")
-            for product in (products or [])
-            if isinstance(product, dict)
-        ],
+    product_barcodes = normalize_input_barcodes([
+        product.get("barcode")
+        for product in (products or [])
+        if isinstance(product, dict)
     ])
+    if product_barcodes:
+        product_barcode_set = set(product_barcodes)
+        selected = [barcode for barcode in requested_barcodes if barcode in product_barcode_set]
+        unmatched_selected_barcodes = [
+            barcode for barcode in requested_barcodes
+            if barcode not in product_barcode_set
+        ]
+        barcodes = product_barcodes
+    else:
+        selected = requested_barcodes
+        unmatched_selected_barcodes = []
+        barcodes = normalize_input_barcodes([
+            *selected,
+            *(merged.get("barcodes") or []),
+        ])
     product_names = []
     for value in [
         *(merged.get("product_names") or []),
@@ -8626,6 +8663,7 @@ def _merge_service_order_products(row, products, selected_barcodes=None):
     selected_set = set(selected)
     merged.update({
         "selected_barcodes": selected,
+        "unmatched_selected_barcodes": unmatched_selected_barcodes,
         "barcodes": barcodes,
         "related_barcodes": [barcode for barcode in barcodes if barcode not in selected_set],
         "product_names": product_names,
@@ -11021,24 +11059,22 @@ def _order_product_job_status_payload(job, service_no):
         'elapsed': max(0, int(time.time() - started_ts)) if started_ts else 0,
         'finished_at': current.get('finished_at') or '',
         'detail_url': f"/api/service-orders/{service_no}" if successful else '',
+        'automatic': bool(current.get('automatic')),
     }
 
 
-@app.route("/api/service-orders/<service_no>/order-products/start", methods=["POST"])
-def api_service_order_products_start(service_no):
-    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
-        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+def _start_order_product_job(service_no, automatic=False):
     service_no = _clean_export_value(service_no)
-
     with order_product_job_lock:
         running_id = latest_order_product_job_by_service.get(service_no)
         running_job = order_product_jobs.get(running_id)
         if running_job and running_job.get('running'):
-            return jsonify(_order_product_job_status_payload(running_job, service_no)), 409
+            return running_job, False
         job = _empty_order_product_job(service_no)
         job.update({
+            'automatic': bool(automatic),
             'running': True,
-            'message': '正在等待可用查询通道',
+            'message': '正在等待可用查询通道' + ('（结单失败自动补查）' if automatic else ''),
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             '_started_ts': time.time(),
         })
@@ -11049,6 +11085,8 @@ def api_service_order_products_start(service_no):
     def launch(worker, slot_id, slot_label):
         with order_product_job_lock:
             current = order_product_jobs.get(job_id)
+            if not current:
+                return
             current.update({
                 'slot_id': slot_id,
                 'slot_label': slot_label,
@@ -11065,13 +11103,19 @@ def api_service_order_products_start(service_no):
         threading.Thread(target=run, daemon=True).start()
 
     enqueue_priority_query_work('order_products', job_id, launch)
-    return jsonify({
-        'success': True,
-        'job_id': job_id,
-        'service_no': service_no,
-        'running': True,
-        'stage': 'waiting',
-    })
+    return job, True
+
+
+@app.route("/api/service-orders/<service_no>/order-products/start", methods=["POST"])
+def api_service_order_products_start(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+    service_no = _clean_export_value(service_no)
+
+    job, created = _start_order_product_job(service_no)
+    payload = _order_product_job_status_payload(job, service_no)
+    payload['success'] = True
+    return jsonify(payload), (200 if created else 409)
 
 
 @app.route("/api/service-orders/<service_no>/order-products/status")

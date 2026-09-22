@@ -89,7 +89,7 @@ def make_crm_session():
 
 
 class CRMRelatedOrderTests(unittest.TestCase):
-    def _success_patches(self, session, fields=None, products=None):
+    def _success_patches(self, session, fields=None, products=None, service_products=None):
         patches = contextlib.ExitStack()
         patches.enter_context(mock.patch.object(session, "is_alive", return_value=True))
         patches.enter_context(mock.patch.object(session, "_is_current_page_logged_in", return_value=True))
@@ -97,6 +97,7 @@ class CRMRelatedOrderTests(unittest.TestCase):
         patches.enter_context(mock.patch.object(session, "_search_service_order", return_value=(True, "")))
         patches.enter_context(mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")))
         patches.enter_context(mock.patch.object(session, "_service_detail_fields", return_value=fields or []))
+        patches.enter_context(mock.patch.object(session, "_service_detail_products", return_value=service_products or []))
         patches.enter_context(mock.patch.object(session, "_open_store_order_list", return_value=(True, "")))
         patches.enter_context(mock.patch.object(session, "_search_store_order", return_value=(True, "")))
         patches.enter_context(mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")))
@@ -147,13 +148,15 @@ class CRMRelatedOrderTests(unittest.TestCase):
         session = make_crm_session()
         fields = [{"label": "关联订单号", "value": "SO20260914001"}]
         products = [{"product_name": "前置过滤器", "product_code": "916046216", "quantity": 2}]
-        with self._success_patches(session, fields, products):
+        service_products = [{"product_name": "前置过滤器", "product_code": "916046216", "barcode": "8462412200402"}]
+        with self._success_patches(session, fields, products, service_products):
             ok, result = session.query_related_order_products("FWD20260914001")
         self.assertTrue(ok)
         self.assertEqual(result, {
             "service_no": "FWD20260914001",
             "order_no": "SO20260914001",
             "service_fields": fields,
+            "service_products": service_products,
             "order_products": products,
         })
 

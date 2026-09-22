@@ -238,6 +238,45 @@ class BackgroundJobTests(unittest.TestCase):
             ])
             self.assertTrue(saved["order_lookup"]["queried_at"])
 
+    def test_order_product_job_creates_detail_cache_from_live_service_products(self):
+        service_no = "FWD202609210703"
+        service_products = [{
+            "product_name": "前置过滤器 ESF110-A",
+            "product_code": "916046228",
+            "barcode": "8462412200402",
+        }]
+        worker = FakeRelatedOrderWorker((True, {
+            "service_no": service_no,
+            "order_no": "ORD2609210703",
+            "service_fields": [{"label": "关联订单", "value": "ORD2609210703"}],
+            "service_products": service_products,
+            "order_products": [{
+                "product_name": "前置过滤器 ESF110-A",
+                "product_code": "916046228",
+                "quantity": 1,
+            }],
+        }))
+        job = app_module._empty_order_product_job(service_no)
+        job.update({"running": True})
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ):
+            with app_module.order_product_job_lock:
+                app_module.order_product_jobs[job["job_id"]] = job
+            try:
+                app_module._run_order_product_job(job["job_id"], worker)
+                self.assertTrue(job["success"], job["error"])
+                with open(os.path.join(tempdir, f"{service_no}.json"), encoding="utf-8") as file:
+                    saved = json.load(file)
+            finally:
+                with app_module.order_product_job_lock:
+                    app_module.order_product_jobs.pop(job["job_id"], None)
+
+        self.assertEqual(saved["products"][0]["barcode"], "8462412200402")
+        self.assertEqual(saved["products"][0]["product_code"], "916046228")
+        self.assertEqual(saved["order_lookup"]["comparison"][0]["status"], "matched")
+
     def test_order_product_start_rejects_duplicate_running_service_job(self):
         service_no = "FWD20260914001"
         release = threading.Event()
@@ -870,12 +909,9 @@ class BackgroundJobTests(unittest.TestCase):
             rows = response.get_json()["service_rows"]
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["service_no"], "FWD202608050001")
-            self.assertEqual(rows[0]["selected_barcodes"], ["8722507290847", "3402512080268"])
+            self.assertEqual(rows[0]["selected_barcodes"], [])
             self.assertEqual(rows[0]["related_barcodes"], ["435221024H397"])
-            self.assertEqual(
-                rows[0]["barcodes"],
-                ["8722507290847", "3402512080268", "435221024H397"],
-            )
+            self.assertEqual(rows[0]["barcodes"], ["435221024H397"])
             self.assertEqual(rows[0]["slot_label"], "查询1")
             self.assertEqual(rows[0]["state"], "running")
             self.assertEqual(rows[0]["message"], "正在搜索服务单")
@@ -1052,6 +1088,58 @@ class BackgroundJobTests(unittest.TestCase):
 
         release_scheduler.set()
 
+    def test_idle_query_worker_selection_rotates_available_channels(self):
+        workers = {
+            f"query-{index}": mock.Mock(
+                busy=False,
+                logged_in=True,
+                remembered_logged_in=True,
+            )
+            for index in range(1, 4)
+        }
+        original_cursor = getattr(app_module, "query_slot_round_robin_cursor", 0)
+        with mock.patch.object(
+            app_module.crm_pool,
+            "query_slots",
+            ["query-1", "query-2", "query-3"],
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            side_effect=lambda slot_id, _kind: workers[slot_id],
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_priority_reservation",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_inbound",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_batch",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_background_batch",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_service_close",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_cooldown_message",
+            return_value="",
+        ):
+            app_module.query_slot_round_robin_cursor = 0
+            selected_slots = [
+                app_module._select_idle_query_worker_desc()[1]
+                for _ in range(3)
+            ]
+
+        app_module.query_slot_round_robin_cursor = original_cursor
+        self.assertEqual(selected_slots, ["query-1", "query-2", "query-3"])
+
     def test_service_close_merges_selected_and_detail_product_barcodes(self):
         row = {
             "service_no": "FWD202608050003",
@@ -1098,6 +1186,61 @@ class BackgroundJobTests(unittest.TestCase):
             ["反渗透净水机 ERO162A", "前置过滤器", "软水机"],
         )
         self.assertEqual(merged["service_products"], products)
+
+    def test_service_close_uses_crm_product_barcodes_when_selected_barcodes_disagree(self):
+        merged = app_module._merge_service_order_products(
+            {
+                "service_no": "FWD202608100404",
+                "barcodes": ["8462412200402", "9072511190315"],
+            },
+            [{
+                "barcode": "9072511190315",
+                "product_name": "前置过滤器 ESF110-A",
+                "product_code": "916046228",
+            }],
+            selected_barcodes=["8462412200402", "9072511190315"],
+        )
+
+        self.assertEqual(merged["barcodes"], ["9072511190315"])
+        self.assertEqual(merged["selected_barcodes"], ["9072511190315"])
+        self.assertEqual(merged["unmatched_selected_barcodes"], ["8462412200402"])
+
+    def test_failed_service_close_queues_an_order_product_query(self):
+        service_no = "FWD202609210703"
+        worker = mock.Mock(slot_id="query-1")
+        worker.close_service_orders.return_value = False, {
+            "results": [{
+                "service_no": service_no,
+                "success": False,
+                "status": "failed",
+                "message": "CRM 结单失败",
+            }],
+        }
+        job = app_module._empty_service_close_job("query-1", [{
+            "service_no": service_no,
+            "barcodes": ["8462412200402"],
+        }])
+        job.update({"running": True, "started_at": "2026-09-22 09:00:00"})
+        with app_module.service_close_job_lock:
+            app_module.service_close_jobs[job["job_id"]] = job
+
+        try:
+            with mock.patch.object(
+                app_module,
+                "_start_order_product_job",
+                create=True,
+            ) as start_order_product_job, mock.patch.object(
+                app_module,
+                "_append_service_close_history",
+            ):
+                app_module._run_service_close_job(
+                    job["job_id"], [(worker, "query-1", "查询1")], job["orders"]
+                )
+
+            start_order_product_job.assert_called_once_with(service_no, automatic=True)
+        finally:
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job["job_id"], None)
 
     def test_service_order_detail_is_saved_and_served_as_json(self):
         with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
