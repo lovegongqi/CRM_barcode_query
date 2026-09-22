@@ -50,6 +50,62 @@ def open_loaded_modal(page, name="CURRENT"):
     page.evaluate("() => window.currentOpen")
 
 
+@pytest.fixture
+def service_close_detail_page():
+    source = (Path(__file__).resolve().parents[1] / "templates/service_close.html").read_text()
+    styles = source[source.index("<style>") + len("<style>"):source.index("</style>")]
+    escape_source = source[source.index("const escapeHtml"):source.index("const closeState")]
+    functions = source[source.index("function fieldValue"):source.index("async function showServiceOrderDetail")]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": 430, "height": 932})
+        page.set_content('<div id="serviceDetailContent" class="service-detail-content"></div>')
+        page.add_style_tag(content=styles)
+        page.add_script_tag(content=escape_source + functions)
+        page.evaluate("""() => renderServiceOrderDetail({
+            service_no: 'FWD202609201457',
+            fields: [
+                {label: '客户姓名', value: '张总'},
+                {label: '联系电话', value: '18779725092'},
+                {label: '联系地址', value: '江西省 赣州市 瑞金市 豪门旺族5-2-1603'},
+                {label: '受理时间', value: '2026-09-20 17:20:08'},
+                {label: '客户预约时间', value: '2026-09-21 16:00:00'},
+                {label: '服务人员', value: '邓雅文'}
+            ],
+            products: [],
+            order_lookup: {}
+        })""")
+        yield page
+        browser.close()
+
+
+def test_mobile_customer_name_and_phone_share_one_row(service_close_detail_page):
+    fields = service_close_detail_page.locator(
+        ".service-detail-section:first-child .service-detail-field"
+    )
+    name_box = fields.nth(0).bounding_box()
+    phone_box = fields.nth(1).bounding_box()
+    address_box = fields.nth(2).bounding_box()
+
+    assert abs(name_box["y"] - phone_box["y"]) < 2
+    assert address_box["y"] > name_box["y"]
+    assert address_box["width"] > name_box["width"] * 1.8
+
+
+def test_mobile_service_information_defaults_collapsed_and_expands_on_tap(service_close_detail_page):
+    service = service_close_detail_page.locator(".service-detail-service")
+
+    assert service.count() == 1
+    assert service.evaluate("element => element.tagName") == "DETAILS"
+    assert not service.evaluate("element => element.open")
+    assert not service.locator(".service-detail-fields").is_visible()
+
+    service.locator("summary").click()
+
+    assert service.evaluate("element => element.open")
+    assert service.locator(".service-detail-fields").is_visible()
+
+
 @pytest.mark.parametrize("boundary", ["fetch", "json"])
 def test_late_initial_detail_cannot_replace_same_service_reopened_modal(modal_page, boundary):
     page = modal_page
