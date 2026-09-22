@@ -117,6 +117,48 @@ class ServiceCloseHistoryTests(unittest.TestCase):
             ["close-new", "close-old"],
         )
 
+    def test_newer_result_replaces_history_for_the_same_service_order(self):
+        """A service order must have one latest result instead of repeated history rows."""
+        older = self.completed_job("close-first", "2026-09-21 10:01:00", "FWD-SAME")
+        older["service_rows"].append({
+            "service_no": "FWD-OTHER",
+            "barcodes": ["870000000002"],
+            "customer_names": ["李四"],
+            "product_names": ["滤芯"],
+            "slot_label": "查询1",
+            "state": "closed",
+            "message": "已结单",
+            "detail_url": "/api/service-orders/FWD-OTHER",
+        })
+        older["results"].append({"service_no": "FWD-OTHER", "success": True})
+        older.update({"total": 2, "current": 2, "closed_count": 2})
+        app_module._append_service_close_history(older)
+        app_module._append_service_close_history(
+            self.completed_job("close-latest", "2026-09-21 10:02:00", "FWD-SAME")
+        )
+
+        records = app_module.load_service_close_history()
+
+        self.assertEqual([record["id"] for record in records], ["close-latest", "close-first"])
+        self.assertEqual(records[0]["service_rows"][0]["service_no"], "FWD-SAME")
+        self.assertEqual(records[1]["service_rows"][0]["service_no"], "FWD-OTHER")
+
+    def test_loading_existing_history_hides_older_duplicate_service_orders(self):
+        """Already-saved duplicate rows must also disappear from the shared view."""
+        with open(self.history_file, "w", encoding="utf-8") as history_file:
+            json.dump([
+                app_module._service_close_history_record(
+                    self.completed_job("close-first", "2026-09-21 10:01:00", "FWD-SAME")
+                ),
+                app_module._service_close_history_record(
+                    self.completed_job("close-latest", "2026-09-21 10:02:00", "FWD-SAME")
+                ),
+            ], history_file, ensure_ascii=False)
+
+        records = app_module.load_service_close_history()
+
+        self.assertEqual([record["id"] for record in records], ["close-latest"])
+
     def test_only_admin_can_delete_or_clear_shared_history(self):
         """Removing server-side admin checks would let a result viewer erase history."""
         app_module._append_service_close_history(

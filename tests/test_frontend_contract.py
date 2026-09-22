@@ -283,6 +283,14 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             with self.subTest(token=token):
                 self.assertIn(token, close_management)
 
+    def test_close_management_shows_service_order_link_before_product_lookup(self):
+        close_management = self.source("service_close.html")
+        self.assertIn(
+            "const directOrderNo = fieldValue(fields,['关联订单','关联订单号','订单号','销售订单号']);",
+            close_management,
+        )
+        self.assertIn("detail.order_lookup?.order_no || directOrderNo", close_management)
+
     def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
         results = self.source("index.html")
         self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)

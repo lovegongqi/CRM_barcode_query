@@ -9734,6 +9734,48 @@ def _service_close_history_record(job):
         return None
 
 
+def _trim_service_close_history_record(record, service_nos):
+    record = _service_close_history_record(record)
+    if not record:
+        return None
+    service_rows = [
+        row for row in record.get('service_rows') or []
+        if _clean_export_value(row.get('service_no')) not in service_nos
+    ]
+    if not service_rows:
+        return None
+    if len(service_rows) == len(record.get('service_rows') or []):
+        return record
+    record['service_rows'] = service_rows
+    record['results'] = [
+        result for result in record.get('results') or []
+        if not isinstance(result, dict)
+        or _clean_export_value(result.get('service_no')) not in service_nos
+    ]
+    record['total'] = len(service_rows)
+    record['current'] = min(int(record.get('current') or 0), len(service_rows))
+    record['closed_count'] = sum(row.get('state') == 'closed' for row in service_rows)
+    record['already_closed_count'] = sum(row.get('state') == 'already_closed' for row in service_rows)
+    record['failed_count'] = sum(row.get('state') == 'failed' for row in service_rows)
+    return record
+
+
+def _deduplicate_service_close_history(records):
+    seen_service_nos = set()
+    deduplicated = []
+    for record in records:
+        retained = _trim_service_close_history_record(record, seen_service_nos)
+        if not retained:
+            continue
+        deduplicated.append(retained)
+        seen_service_nos.update(
+            _clean_export_value(row.get('service_no'))
+            for row in retained.get('service_rows') or []
+            if _clean_export_value(row.get('service_no'))
+        )
+    return deduplicated
+
+
 def load_service_close_history():
     with service_close_history_lock:
         try:
@@ -9747,11 +9789,12 @@ def load_service_close_history():
             record for record in (_service_close_history_record(row) for row in rows)
             if record
         ]
-        return sorted(
+        records = sorted(
             records,
             key=lambda record: record.get('finished_at') or record.get('started_at') or '',
             reverse=True,
         )
+        return _deduplicate_service_close_history(records)
 
 
 def _save_service_close_history(records):
@@ -9793,7 +9836,17 @@ def _append_service_close_history(job):
         return False
     with service_close_history_lock:
         records = load_service_close_history()
-        records = [row for row in records if row.get('id') != record['id']]
+        service_nos = {
+            _clean_export_value(row.get('service_no'))
+            for row in record.get('service_rows') or []
+            if _clean_export_value(row.get('service_no'))
+        }
+        records = [
+            retained for row in records
+            if row.get('id') != record['id']
+            for retained in [_trim_service_close_history_record(row, service_nos)]
+            if retained
+        ]
         return _save_service_close_history([record, *records])
 
 
