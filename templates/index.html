@@ -1290,7 +1290,7 @@
             </div>
             <div class="page-nav">
                 {% for link in nav_links %}
-                <a href="{{ link.href }}" class="{{ 'active' if link.href == '/' else '' }}">{{ link.label }}</a>
+                <a href="{{ link.href }}" class="{{ 'active' if link.href == '/results' else '' }}">{{ link.label }}</a>
                 {% endfor %}
             </div>
         </div>
@@ -1298,7 +1298,7 @@
         {% if not is_desktop_app %}
         <div class="status-bar aurora-account-status">
             <div class="aurora-workspace-links">
-                <a class="active" href="/">条码列表</a>
+                <a class="active" href="/results">条码列表</a>
                 <a href="/service-close">结单管理</a>
             </div>
             <div class="aurora-account-session">

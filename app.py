@@ -2556,24 +2556,19 @@ class CRMSession:
             service_no = _clean_export_value(service_no)
             if not service_no:
                 return False, {"error": "服务单号为空"}
+            cached_detail = _cached_service_order_detail(service_no)
+            fields = list(cached_detail.get("fields") or [])
+            service_products = list(cached_detail.get("products") or [])
+            order_no = _related_order_no_from_cached_detail(cached_detail)
+            if not order_no:
+                return False, {"error": "本地服务单详情缺少关联订单号，请先重查产品明细"}
+            if not service_products:
+                return False, {"error": "本地服务单详情缺少产品明细，请先重查产品明细"}
             with self.lock:
                 if not self.is_alive() and not self._ensure_browser():
                     return False, {"error": "浏览器未启动，请先登录 CRM"}
                 if not self.logged_in and not self._is_current_page_logged_in():
                     return False, {"error": "CRM 当前未登录，请先登录 CRM"}
-                for operation in (
-                    lambda: self._open_service_order_list(emit),
-                    lambda: self._search_service_order(service_no),
-                    lambda: self._open_service_order_detail(service_no),
-                ):
-                    ok, message = operation()
-                    if not ok:
-                        return False, {"error": message}
-                fields = self._service_detail_fields()
-                service_products = self._service_detail_products()
-                order_no = _cached_related_order_no(service_no) or _related_order_no_from_service_fields(fields)
-                if not order_no:
-                    return False, {"error": "服务单没有关联订单号"}
                 for operation in (
                     lambda: self._open_store_order_list(emit),
                     lambda: self._search_store_order(order_no),
@@ -8747,25 +8742,33 @@ def _write_service_order_detail(service_no, detail):
     return f"/api/service-orders/{service_no}"
 
 
-def _cached_related_order_no(service_no):
+def _cached_service_order_detail(service_no):
     service_no = _clean_export_value(service_no)
     if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
-        return ""
+        return {}
     filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
     with _service_order_cache_lock(service_no):
         try:
             with open(filepath, "r", encoding="utf-8") as file:
                 detail = json.load(file) or {}
         except (OSError, ValueError, TypeError):
-            return ""
+            return {}
     if not isinstance(detail, dict):
-        return ""
+        return {}
+    return detail
+
+
+def _related_order_no_from_cached_detail(detail):
     order_lookup = detail.get("order_lookup")
     if isinstance(order_lookup, dict):
         order_no = _valid_related_order_no(order_lookup.get("order_no"))
         if order_no:
             return order_no
     return _related_order_no_from_service_fields(detail.get("fields") or [])
+
+
+def _cached_related_order_no(service_no):
+    return _related_order_no_from_cached_detail(_cached_service_order_detail(service_no))
 
 
 SERVICE_ORDER_INSTALL_EXPORT_COLUMNS = (
@@ -10091,7 +10094,7 @@ def save_remembered_gyj_credentials(remember, username="", password=""):
 
 PAGE_LINKS = [
     {'permission': 'crm', 'label': '查询', 'href': '/crm'},
-    {'permission': 'results', 'label': '结果', 'href': '/'},
+    {'permission': 'results', 'label': '结果', 'href': '/results'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
     {'permission': 'inbound', 'label': '入库', 'href': '/inbound'},
     {'permission': 'inventory', 'label': '盘点', 'href': '/inventory'},
@@ -10154,7 +10157,7 @@ def account_has_permission(permission):
     return permission in (row.get('permissions') or [])
 
 def required_permission_for_path(path):
-    if path in {"/", "/service-close"} or path.startswith("/barcode/") or path.startswith("/service-order/"):
+    if path in {"/results", "/service-close"} or path.startswith("/barcode/") or path.startswith("/service-order/"):
         return "results"
     if path == "/crm":
         return "crm"
@@ -10393,6 +10396,11 @@ def scan_archived():
 
 @app.route("/")
 def index():
+    return redirect("/product-library")
+
+
+@app.route("/results")
+def results_page():
     return render_template("index.html", nav_links=visible_page_links(), business_config=business_config())
 
 

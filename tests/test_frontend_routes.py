@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/inbound", "/inventory", "/service-close", "/accounts"):
+        for route in ("/results", "/crm", "/transfer", "/inbound", "/inventory", "/service-close", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
@@ -44,6 +44,22 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         login = client.get("/login")
         self.assertEqual(login.status_code, 200)
         self.assertIn(b'id="loginBtn"', login.data)
+
+    def test_root_redirects_to_product_library_and_results_has_its_own_path(self):
+        client = app_module.app.test_client()
+
+        root = client.get("/", follow_redirects=False)
+        self.assertEqual(root.status_code, 302)
+        self.assertEqual(root.headers["Location"], "/product-library")
+
+        anonymous_results = client.get("/results", follow_redirects=False)
+        self.assertEqual(anonymous_results.status_code, 302)
+        self.assertEqual(anonymous_results.headers["Location"], "/login?next=/results")
+
+        results = self.client.get("/results")
+        self.assertEqual(results.status_code, 200)
+        self.assertIn(b'data-aurora-page="results"', results.data)
+        self.assertIn(b'href="/results" class="active"', results.data)
 
     def test_anonymous_product_lookup_and_online_query_are_public(self):
         client = app_module.app.test_client()
@@ -112,7 +128,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         # user on the page through long GYJ login flows, so a logout link
         # competing for the same screen real estate is hidden there. Every
         # other work page still surfaces the logout button.
-        for route in ("/", "/crm", "/transfer", "/inventory", "/service-close", "/product-library", "/accounts"):
+        for route in ("/results", "/crm", "/transfer", "/inventory", "/service-close", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
@@ -155,7 +171,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_primary_pages_render_with_aurora_shell(self):
         expected_pages = {
-            "/": "results",
+            "/results": "results",
             "/crm": "query",
             "/transfer": "transfer",
             "/inbound": "inbound",

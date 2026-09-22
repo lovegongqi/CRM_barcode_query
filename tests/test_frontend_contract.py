@@ -245,7 +245,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         results = self.source("index.html")
         close_management = self.source("service_close.html")
         for source in (results, close_management):
-            self.assertIn('href="/">条码列表</a>', source)
+            self.assertIn('href="/results">条码列表</a>', source)
             self.assertIn('href="/service-close">结单管理</a>', source)
         self.assertIn('id="serviceCloseBtn"', results)
         self.assertIn('onclick="batchCloseServiceOrders()"', results)
