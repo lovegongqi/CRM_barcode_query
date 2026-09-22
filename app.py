@@ -2024,7 +2024,7 @@ class CRMSession:
                 stable_empty = 0
             elif snapshot.get("noData"):
                 stable_empty += 1
-                if stable_empty >= 4:
+                if stable_empty >= 6:
                     return False, f"订单列表未找到订单号：{order_no}"
             else:
                 stable_empty = 0
@@ -2629,12 +2629,20 @@ class CRMSession:
                     return False, {"error": message}
                 ok, message = self._search_store_order(order_no)
                 if not ok:
+                    emit(f"订单列表首次未找到 {order_no}，正在重新加载后重试", "warning")
+                    ok, reopen_message = self._open_store_order_list(emit)
+                    if not ok:
+                        return False, {"error": reopen_message}
+                    ok, message = self._search_store_order(order_no)
+                if not ok:
                     original_message = message
                     fresh_order_no, refresh_message = refresh_related_order()
                     if not fresh_order_no:
                         return False, {"error": refresh_message or original_message}
                     if fresh_order_no == order_no:
-                        return False, {"error": original_message}
+                        emit(f"服务单已确认关联订单仍为 {order_no}，正在进行最后一次查询", "warning")
+                    else:
+                        emit(f"关联订单已更新为 {fresh_order_no}，正在重新查询", "info")
                     order_no = fresh_order_no
                     ok, message = self._open_store_order_list(emit)
                     if not ok:
