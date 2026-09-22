@@ -2571,7 +2571,7 @@ class CRMSession:
                         return False, {"error": message}
                 fields = self._service_detail_fields()
                 service_products = self._service_detail_products()
-                order_no = _related_order_no_from_service_fields(fields)
+                order_no = _cached_related_order_no(service_no) or _related_order_no_from_service_fields(fields)
                 if not order_no:
                     return False, {"error": "服务单没有关联订单号"}
                 for operation in (
@@ -7326,12 +7326,22 @@ def _normalize_comparison_product_code(value):
     return _clean_export_value(value).upper()
 
 RELATED_ORDER_FIELD_LABELS = ("关联订单", "关联订单号", "订单号", "销售订单号")
+RELATED_ORDER_NO_PATTERN = re.compile(r"(?=[A-Z0-9_-]*\d)(?:ORD|SO)[A-Z0-9_-]{4,80}", re.I)
+
+
+def _valid_related_order_no(value):
+    order_no = _clean_export_value(value).upper()
+    if not RELATED_ORDER_NO_PATTERN.fullmatch(order_no):
+        return ""
+    return order_no
 
 def _related_order_no_from_service_fields(fields):
     for wanted in RELATED_ORDER_FIELD_LABELS:
         for field in fields or []:
             if _clean_export_value((field or {}).get("label")).rstrip("：:") == wanted:
-                return _clean_export_value((field or {}).get("value"))
+                order_no = _valid_related_order_no((field or {}).get("value"))
+                if order_no:
+                    return order_no
     return ""
 
 def _parse_order_product_quantity(value):
@@ -8735,6 +8745,27 @@ def _write_service_order_detail(service_no, detail):
     filepath = os.path.join(SERVICE_ORDER_DIR, filename)
     _atomic_save_json_rows(filepath, payload)
     return f"/api/service-orders/{service_no}"
+
+
+def _cached_related_order_no(service_no):
+    service_no = _clean_export_value(service_no)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return ""
+    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+    with _service_order_cache_lock(service_no):
+        try:
+            with open(filepath, "r", encoding="utf-8") as file:
+                detail = json.load(file) or {}
+        except (OSError, ValueError, TypeError):
+            return ""
+    if not isinstance(detail, dict):
+        return ""
+    order_lookup = detail.get("order_lookup")
+    if isinstance(order_lookup, dict):
+        order_no = _valid_related_order_no(order_lookup.get("order_no"))
+        if order_no:
+            return order_no
+    return _related_order_no_from_service_fields(detail.get("fields") or [])
 
 
 SERVICE_ORDER_INSTALL_EXPORT_COLUMNS = (

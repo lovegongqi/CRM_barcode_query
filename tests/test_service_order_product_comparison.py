@@ -124,6 +124,14 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "ORD2511110743",
         )
 
+    def test_related_order_number_rejects_lookup_control_text(self):
+        fields = [{"label": "关联订单", "value": "查找移除值确定"}]
+
+        self.assertEqual(
+            app_module._related_order_no_from_service_fields(fields),
+            "",
+        )
+
     def test_store_order_list_uses_live_crm_route_and_accepts_live_or_legacy_heading(self):
         session = make_crm_session()
         session.page.url = "http://crmportal.ecowaterchina.net.cn/#/workOrder/list"
@@ -159,6 +167,26 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "service_products": service_products,
             "order_products": products,
         })
+
+    def test_query_related_order_products_prefers_cached_order_when_live_field_is_lookup_control_text(self):
+        session = make_crm_session()
+        service_no = "FWD202609210660"
+        cached_order_no = "ORD2609210698"
+        live_fields = [{"label": "关联订单", "value": "查找移除值确定"}]
+        products = [{"product_name": "前置过滤器", "product_code": "916046216", "quantity": 1}]
+        service_products = [{"product_name": "前置过滤器", "product_code": "916046216", "barcode": "7132408080196"}]
+
+        with tempfile.TemporaryDirectory() as tempdir, \
+                mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir):
+            app_module._write_service_order_detail(service_no, {
+                "fields": [{"label": "关联订单", "value": cached_order_no}],
+                "order_lookup": {"order_no": cached_order_no},
+            })
+            with self._success_patches(session, live_fields, products, service_products):
+                ok, result = session.query_related_order_products(service_no)
+
+        self.assertTrue(ok)
+        self.assertEqual(result["order_no"], cached_order_no)
 
     def test_query_related_order_products_names_missing_related_order_stage(self):
         session = make_crm_session()
