@@ -371,6 +371,9 @@
         .service-detail-refresh { background: rgba(0, 200, 220, 0.12); border: 1px solid rgba(0, 200, 220, 0.4); color: #67e8f9; padding: 4px 12px; border-radius: 999px; font-size: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transition: background 0.15s, transform 0.15s; }
         .service-detail-refresh:hover:not(:disabled) { background: rgba(0, 200, 220, 0.22); }
         .service-detail-refresh:disabled { opacity: 0.6; cursor: not-allowed; }
+        .service-detail-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+        .service-detail-order-meta { margin-top: 5px; color: #94a3b8; font-size: 11px; line-height: 1.5; }
+        .service-detail-order-attempt { margin-top: 5px; color: #fca5a5; font-size: 11px; line-height: 1.5; white-space: pre-line; }
         .service-detail-refresh-icon { display: inline-block; font-size: 14px; line-height: 1; }
         .service-detail-refresh-icon.spinning { animation: service-detail-spin 0.9s linear infinite; }
         @keyframes service-detail-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
@@ -422,6 +425,12 @@
         .service-detail-relation { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
         .service-detail-relation.is-selected { color: #7dd3fc; background: rgba(14, 165, 233, .16); border: 1px solid rgba(56, 189, 248, .35); }
         .service-detail-relation.is-related { color: #c4b5fd; background: rgba(139, 92, 246, .16); border: 1px solid rgba(167, 139, 250, .35); }
+        .service-detail-comparison { display: inline-flex; padding: 2px 7px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+        .service-detail-comparison.is-matched { color: #86efac; background: rgba(34, 197, 94, .15); border: 1px solid rgba(74, 222, 128, .35); }
+        .service-detail-comparison.is-mismatch { color: #fde68a; background: rgba(245, 158, 11, .15); border: 1px solid rgba(251, 191, 36, .35); }
+        .service-detail-comparison.is-order-missing { color: #fca5a5; background: rgba(239, 68, 68, .15); border: 1px solid rgba(248, 113, 113, .35); }
+        .service-detail-comparison.is-service-missing { color: #c4b5fd; background: rgba(139, 92, 246, .16); border: 1px solid rgba(167, 139, 250, .35); }
+        .service-detail-comparison.is-unmatchable { color: #cbd5e1; background: rgba(148, 163, 184, .16); border: 1px solid rgba(203, 213, 225, .3); }
         .service-detail-empty { padding: 28px; color: #94a3b8; text-align: center; }
         @media (max-width: 760px) {
             .service-detail-fields { grid-template-columns: 1fr; }
@@ -1142,7 +1151,7 @@
         }
         .filter-area {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 12px;
             padding-top: 0;
             margin: 0;
@@ -1256,6 +1265,7 @@
             .action-groups { justify-content: flex-start; }
             .barcode-item { grid-template-columns: 1fr; }
             .bc-right { justify-content: flex-start; margin-left: 0; }
+            .filter-area { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 640px) {
             .workspace-head { flex-direction: column; }
@@ -1263,11 +1273,12 @@
             .field-grid, .stats-grid, .date-filter-row, .search-row { grid-template-columns: 1fr; }
             .button-col { min-width: 0; }
             .tabs-wrap { align-items: flex-start; flex-direction: column; }
+            .filter-area { grid-template-columns: 1fr; }
         }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
-    <link rel="stylesheet" href="/static/aurora.css">
-    <script defer src="/static/aurora.js"></script>
+    <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
+    <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
 </head>
 <body class="results-page" data-aurora-page="results">
     <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
@@ -1286,6 +1297,10 @@
 
         {% if not is_desktop_app %}
         <div class="status-bar aurora-account-status">
+            <div class="aurora-workspace-links">
+                <a class="active" href="/">条码列表</a>
+                <a href="/service-close">结单管理</a>
+            </div>
             <div class="aurora-account-session">
                 <span class="aurora-account-name" id="appAccountStatus">检测中</span>
                 <a class="aurora-account-logout" href="/logout">退出工具账号</a>
@@ -1382,13 +1397,11 @@
                     <button class="btn btn-copy" onclick="copyAllBarcodes()">复制全部</button>
                     <button class="btn btn-export" onclick="exportXlsx()">导出 XLSX</button>
                     <button class="btn btn-export" id="serviceOrderExportBtn" onclick="exportServiceOrdersXlsx()">导出安装表</button>
-                    <button class="btn btn-transfer" onclick="goSelectedTransfer()">选中条码移库</button>
                     <button class="btn btn-service-close" id="serviceCloseBtn" onclick="batchCloseServiceOrders()">批量结单</button>
+                    <button class="btn btn-transfer" onclick="goSelectedTransfer()">选中条码移库</button>
                     <button class="btn btn-secondary-soft" onclick="clearAllFilters()">清空筛选</button>
                 </div>
             </div>
-            <div class="query-log transfer-log transfer-log-box" id="transferLogMain"></div>
-
             <div class="filter-shell">
                 <div class="section-label">
                     <span>条件筛选</span>
@@ -1482,6 +1495,13 @@
         let lastServiceCloseLogSeq = 0;
         let serviceCloseStartAtMs = 0;
         const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1';
+        let serviceDetailCurrentServiceNo = '';
+        let serviceDetailGeneration = 0;
+        let orderProductQueryTimer = null;
+        let orderProductQueryServiceNo = '';
+        let orderProductQueryJobId = '';
+        let orderProductQueryPollInFlight = false;
+        let orderProductQueryGeneration = 0;
 
         function showToast(msg) {
             const t = document.getElementById('toast');
@@ -2199,34 +2219,6 @@
             } catch (e) {}
         }
 
-        function restoreServiceCloseJob() {
-            let saved;
-            try {
-                saved = JSON.parse(sessionStorage.getItem(SERVICE_CLOSE_SESSION_KEY) || 'null');
-            } catch (e) {
-                clearSavedServiceCloseJob();
-                return;
-            }
-            if (!saved || !saved.jobId) return;
-            serviceCloseJobId = String(saved.jobId);
-            serviceCloseSlotId = String(saved.slotId || '');
-            serviceCloseStartAtMs = Number(saved.startedAtMs) || Date.now();
-            lastServiceCloseLogSeq = 0;
-            const area = document.getElementById('transferLogMain');
-            area.style.display = 'block';
-            area.innerHTML = '';
-            const btn = document.getElementById('serviceCloseBtn');
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '结单中...';
-            }
-            if (serviceCloseTimer) clearInterval(serviceCloseTimer);
-            serviceCloseTimer = setInterval(() => {
-                pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-            }, 1200);
-            pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-        }
-
         function appendServiceCloseLogs(logs) {
             if (!logs || logs.length === 0) return;
             logs.forEach(row => {
@@ -2404,76 +2396,28 @@
             const barcodes = getSelectedBarcodeArray();
             if (barcodes.length === 0) { showToast('请先选择要结单的条码'); return; }
             if (!confirm(`确定对选中的 ${barcodes.length} 个条码执行批量结单？\n同一个服务单号只会结单一次。`)) return;
-            const btn = document.getElementById('serviceCloseBtn');
-            if (btn) {
-                btn.disabled = true;
-                btn.textContent = '结单中...';
-            }
-            const area = document.getElementById('transferLogMain');
-            area.style.display = 'block';
-            area.innerHTML = '';
-            lastServiceCloseLogSeq = 0;
-            clearSavedServiceCloseJob();
-            serviceCloseJobId = '';
-            serviceCloseSlotId = '';
-            serviceCloseStartAtMs = Date.now();
-            serviceCloseLog(`提交批量结单任务：${barcodes.length} 个条码`, 'info');
-            // 立即用已选条码渲染占位行，避免启动期间面板空白
-            renderServiceCloseStatuses(barcodes.map((bc, idx) => ({
-                service_no: '',
-                barcodes: [bc],
-                selected_barcodes: [bc],
-                related_barcodes: [],
-                customer_names: [],
-                state: 'waiting',
-                message: '启动中，正在加载服务单…',
-                slot_label: '待分配',
-                elapsed: 0,
-            })));
             try {
-                const data = await fetch('/api/service-close/start', {
+                const response = await fetch('/api/service-close/start', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({barcodes})
-                }).then(r => r.json());
-                if (!data.success) {
-                    serviceCloseLog(data.error || '批量结单启动失败', 'error');
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) {
                     showToast(data.error || '批量结单启动失败');
-                    const list = area.querySelector('.service-close-status-list');
-                    if (list) list.innerHTML = '';
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.textContent = '批量结单';
-                    }
                     return;
                 }
-                serviceCloseJobId = data.job_id || '';
-                serviceCloseSlotId = data.slot_id || '';
-                saveServiceCloseJob();
-                serviceCloseLog(`${data.message || '批量结单已开始'}，使用 ${data.slot_label || '查询通道'}`, 'success');
-                renderServiceCloseStatuses(data.service_rows || []);
-                if ((data.no_service || []).length) {
-                    serviceCloseLog(`已跳过无服务单条码 ${data.no_service.length} 个`, 'warn');
-                }
-                if ((data.missing || []).length) {
-                    serviceCloseLog(`已跳过未找到结果条码 ${data.missing.length} 个`, 'warn');
-                }
-                if (serviceCloseTimer) clearInterval(serviceCloseTimer);
-                serviceCloseTimer = setInterval(() => {
-                    pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
-                }, 1200);
-                pollServiceCloseStatus().catch(e => serviceCloseLog(`读取结单状态失败：${e.message || e}`, 'error'));
+                window.location.assign('/service-close');
+                return;
             } catch (e) {
-                serviceCloseLog(`批量结单出错：${e.message || e}`, 'error');
                 showToast('批量结单出错');
-                if (btn) {
-                    btn.disabled = false;
-                    btn.textContent = '批量结单';
-                }
             }
         }
 
         function openDetailDocument(title, filePath) {
+            serviceDetailGeneration += 1;
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = '';
             const detailFrame = document.getElementById('detailFrame');
             const serviceDetailContent = document.getElementById('serviceDetailContent');
             serviceDetailContent.style.display = 'none';
@@ -2517,6 +2461,11 @@
             const content = document.getElementById('serviceDetailContent');
             const selectedSet = new Set((detail.selected_barcodes || []).map(String));
             const relatedSet = new Set((detail.related_barcodes || []).map(String));
+            const orderLookup = detail.order_lookup && typeof detail.order_lookup === 'object' ? detail.order_lookup : {};
+            const hasSuccessfulOrderLookup = Boolean(orderLookup.order_no);
+            const comparisonByCode = new Map((orderLookup.comparison || []).map(row => [
+                String(row.product_code || '').trim().toUpperCase(), row,
+            ]));
             const fields = (detail.fields || []).filter(row => row && row.label && row.value);
             const fieldValue = (labels) => {
                 for (const label of labels) {
@@ -2552,20 +2501,220 @@
                 const barcode = String(product.barcode || '');
                 const selected = selectedSet.has(barcode);
                 const related = relatedSet.has(barcode) || !selected;
+                const productCode = String(product.product_code || '').trim().toUpperCase();
+                const comparison = productCode ? comparisonByCode.get(productCode) : null;
+                const orderQuantity = comparison ? comparison.order_quantity : '—';
+                const serviceQuantity = comparison ? comparison.service_quantity : '—';
+                const comparisonLabel = comparison
+                    ? (comparison.status_label || '—')
+                    : (hasSuccessfulOrderLookup && !productCode ? '无法比对' : '—');
+                const comparisonClass = comparison ? {
+                    matched: 'is-matched',
+                    quantity_mismatch: 'is-mismatch',
+                    order_missing: 'is-order-missing',
+                    service_missing: 'is-service-missing',
+                }[comparison.status] || '' : (hasSuccessfulOrderLookup && !productCode ? 'is-unmatchable' : '');
                 return `<tr>
                     <td>${escapeHtml(product.product_name || '—')}</td>
                     <td>${escapeHtml(product.product_code || '—')}</td>
                     <td>${escapeHtml(product.barcode || '—')}</td>
                     <td><span class="service-detail-relation ${selected ? 'is-selected' : 'is-related'}">${selected ? '已选' : (related ? '关联' : '服务单')}</span></td>
+                    <td>${escapeHtml(orderQuantity)}</td>
+                    <td>${escapeHtml(serviceQuantity)}</td>
+                    <td><span class="service-detail-comparison ${comparisonClass}">${escapeHtml(comparisonLabel)}</span></td>
                 </tr>`;
-            }).join('');
+            }).concat((orderLookup.comparison || []).filter(row => row && row.status === 'service_missing').map(row => `<tr>
+                <td>${escapeHtml(row.product_name || '—')}</td>
+                <td>${escapeHtml(row.product_code || '—')}</td>
+                <td>—</td>
+                <td></td>
+                <td>${escapeHtml(row.order_quantity)}</td>
+                <td>${escapeHtml(row.service_quantity)}</td>
+                <td><span class="service-detail-comparison is-service-missing">${escapeHtml(row.status_label || '服务单缺少')}</span></td>
+            </tr>`)).join('');
             const refreshButton = `<button type="button" class="service-detail-refresh" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="refreshServiceOrderProducts(this.dataset.serviceNo)" title="重新打开 CRM 服务单详情并重抓产品明细"><span class="service-detail-refresh-icon">↻</span>重查产品明细</button>`;
-            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><h3>产品明细</h3>${refreshButton}</div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
+            const orderQueryButton = `<button type="button" class="service-detail-refresh service-detail-order-query"
+                data-service-no="${escapeHtml(detail.service_no || '')}"
+                onclick="startOrderProductQuery(this.dataset.serviceNo)">查询订单产品明细</button>`;
+            const orderMetadata = (hasSuccessfulOrderLookup ? `<div class="service-detail-order-meta">关联订单：${escapeHtml(orderLookup.order_no)}<br>查询时间：${escapeHtml(orderLookup.queried_at || '—')}</div>` : '')
+                + '<div class="service-detail-order-attempt" role="status" hidden></div>';
+            const productSection = `<section class="service-detail-section"><div class="service-detail-section-head"><div><h3>产品明细</h3>${orderMetadata}</div><div class="service-detail-actions">${refreshButton}${orderQueryButton}</div></div>${productRows ? `<div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th></tr></thead><tbody>${productRows}</tbody></table></div>` : '<div class="service-detail-empty">未读取到产品明细</div>'}</section>`;
             content.innerHTML = customerSection + serviceSection + productSection;
+        }
+
+        function isCurrentServiceOrderDetail(serviceNo) {
+            const modal = document.getElementById('detailModal');
+            return serviceDetailCurrentServiceNo === serviceNo && modal.classList.contains('overlay-show');
+        }
+
+        function ownsServiceOrderDetail(serviceNo, generation) {
+            return generation === serviceDetailGeneration && isCurrentServiceOrderDetail(serviceNo);
+        }
+
+        function stopOrderProductQueryPolling(serviceNo = '') {
+            if (serviceNo && orderProductQueryServiceNo !== serviceNo) return;
+            orderProductQueryGeneration += 1;
+            if (orderProductQueryTimer) clearTimeout(orderProductQueryTimer);
+            orderProductQueryTimer = null;
+            orderProductQueryServiceNo = '';
+            orderProductQueryJobId = '';
+            orderProductQueryPollInFlight = false;
+        }
+
+        function ownsOrderProductQueryPolling(serviceNo, jobId, generation) {
+            return generation === orderProductQueryGeneration
+                && orderProductQueryServiceNo === serviceNo
+                && orderProductQueryJobId === jobId;
+        }
+
+        function ownsOrderProductQueryLifecycle(serviceNo, generation) {
+            return generation === orderProductQueryGeneration
+                && isCurrentServiceOrderDetail(serviceNo);
+        }
+
+        function setOrderProductQueryButtonState(serviceNo, disabled, text = '') {
+            const button = Array.from(document.querySelectorAll('.service-detail-order-query'))
+                .find(item => item.dataset.serviceNo === serviceNo);
+            if (!button) return;
+            button.dataset.originalText = button.dataset.originalText || button.textContent;
+            button.disabled = disabled;
+            button.textContent = text || button.dataset.originalText;
+        }
+
+        function setOrderProductQueryAttempt(serviceNo, data = null) {
+            if (!isCurrentServiceOrderDetail(serviceNo)) return;
+            const metadata = document.querySelector('.service-detail-order-attempt');
+            if (!metadata) return;
+            const failed = data && data.done && !data.success;
+            metadata.hidden = !failed;
+            metadata.textContent = failed
+                ? `本次查询：${data.started_at || data.finished_at || '—'}\n失败原因：${data.error || '订单产品明细查询失败'}`
+                : '';
+        }
+
+        function startOrderProductQueryPolling(serviceNo, jobId) {
+            if (orderProductQueryServiceNo === serviceNo && orderProductQueryJobId === jobId
+                && (orderProductQueryTimer || orderProductQueryPollInFlight)) return;
+            stopOrderProductQueryPolling();
+            orderProductQueryServiceNo = serviceNo;
+            orderProductQueryJobId = jobId;
+            pollOrderProductQuery(serviceNo, jobId, orderProductQueryGeneration);
+        }
+
+        async function startOrderProductQuery(serviceNo) {
+            const generation = orderProductQueryGeneration;
+            if (!serviceNo || !ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+            setOrderProductQueryButtonState(serviceNo, true, '查询中…');
+            setOrderProductQueryAttempt(serviceNo);
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`, { method: 'POST' });
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                const data = await response.json();
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                if (response.status !== 409 && (!response.ok || !data.success)) {
+                    throw new Error(data.error || '订单产品明细查询失败');
+                }
+                if (!data.job_id) throw new Error(data.error || '订单产品明细查询失败');
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                startOrderProductQueryPolling(serviceNo, data.job_id);
+            } catch (error) {
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                setOrderProductQueryButtonState(serviceNo, false);
+                showToast(error.message || '订单产品明细查询失败');
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                stopOrderProductQueryPolling(serviceNo);
+            }
+        }
+
+        async function pollOrderProductQuery(serviceNo, jobId, generation) {
+            if (!isCurrentServiceOrderDetail(serviceNo)
+                || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)
+                || orderProductQueryPollInFlight) return;
+            orderProductQueryPollInFlight = true;
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`);
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                const data = await response.json();
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) {
+                    return;
+                }
+                if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败');
+                if (data.running) {
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    orderProductQueryTimer = setTimeout(() => pollOrderProductQuery(serviceNo, jobId, generation), 1000);
+                    return;
+                }
+                if (!data.success) {
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    setOrderProductQueryButtonState(serviceNo, false);
+                    setOrderProductQueryAttempt(serviceNo, data);
+                    showToast(data.error || '订单产品明细查询失败');
+                    if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                    stopOrderProductQueryPolling(serviceNo);
+                    return;
+                }
+                const detailResponse = await fetch(data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                const detail = await detailResponse.json();
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                if (!detailResponse.ok || detail.success === false) {
+                    throw new Error(detail.error || '服务单详情读取失败');
+                }
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                renderServiceOrderDetail(detail);
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                showToast(`关联订单：${data.order_no || detail.order_lookup?.order_no || '—'}`);
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                stopOrderProductQueryPolling(serviceNo);
+            } catch (error) {
+                if (!isCurrentServiceOrderDetail(serviceNo)
+                    || !ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                setOrderProductQueryButtonState(serviceNo, false);
+                showToast(error.message || '订单产品明细查询失败');
+                if (!ownsOrderProductQueryPolling(serviceNo, jobId, generation)) return;
+                stopOrderProductQueryPolling(serviceNo);
+            } finally {
+                if (ownsOrderProductQueryPolling(serviceNo, jobId, generation)) {
+                    orderProductQueryPollInFlight = false;
+                }
+            }
+        }
+
+        async function resumeOrderProductQuery(serviceNo) {
+            const generation = orderProductQueryGeneration;
+            if (!serviceNo || !ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status`);
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                const data = await response.json();
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                if (!response.ok || !data.job_id) return;
+                if (data.done && !data.success) {
+                    setOrderProductQueryAttempt(serviceNo, data);
+                    setOrderProductQueryButtonState(serviceNo, false);
+                    return;
+                }
+                if (!data.running) return;
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                setOrderProductQueryButtonState(serviceNo, true, data.stage === 'waiting' ? '等待通道…' : '查询中…');
+                if (!ownsOrderProductQueryLifecycle(serviceNo, generation)) return;
+                startOrderProductQueryPolling(serviceNo, data.job_id);
+            } catch (_) {
+                // Status recovery is best-effort; the explicit query action reports errors.
+            }
         }
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
             if (!detailUrl) return;
+            const generation = ++serviceDetailGeneration;
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = serviceNo;
             const modal = document.getElementById('detailModal');
             const detailFrame = document.getElementById('detailFrame');
             const content = document.getElementById('serviceDetailContent');
@@ -2578,10 +2727,15 @@
             modal.classList.add('overlay-show');
             try {
                 const response = await fetch(detailUrl);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const detail = await response.json();
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在');
                 renderServiceOrderDetail(detail);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
+                resumeOrderProductQuery(serviceNo);
             } catch (error) {
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 content.innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`;
             }
         }
@@ -2591,29 +2745,43 @@
                 showToast('服务单号为空');
                 return;
             }
-            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh'));
+            const generation = serviceDetailGeneration;
+            if (!ownsServiceOrderDetail(serviceNo, generation)) return;
+            const buttons = Array.from(document.querySelectorAll('.service-detail-refresh:not(.service-detail-order-query)'));
             buttons.forEach(btn => { btn.disabled = true; btn.classList.add('is-loading'); btn.dataset.originalText = btn.dataset.originalText || btn.textContent; btn.innerHTML = '<span class="service-detail-refresh-icon spinning">↻</span>重查中…'; });
             try {
                 const res = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, { method: 'POST' });
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const data = await res.json();
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 if (!res.ok || data.success === false) {
                     throw new Error(data.error || '重查失败');
                 }
                 showToast(`已重查 ${data.product_count || 0} 个产品明细（${data.slot_label || ''}）`);
                 const detailUrl = data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`;
                 const response = await fetch(detailUrl);
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 const detail = await response.json();
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 if (response.ok && detail && detail.success !== false) {
                     renderServiceOrderDetail(detail);
+                    if (!ownsServiceOrderDetail(serviceNo, generation)) return;
+                    resumeOrderProductQuery(serviceNo);
                 }
             } catch (e) {
+                if (!ownsServiceOrderDetail(serviceNo, generation)) return;
                 showToast(`重查失败：${e.message || e}`);
             } finally {
-                buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
+                if (ownsServiceOrderDetail(serviceNo, generation)) {
+                    buttons.forEach(btn => { btn.disabled = false; btn.classList.remove('is-loading'); if (btn.dataset.originalText) { btn.textContent = btn.dataset.originalText; } });
+                }
             }
         }
 
         function closeDetailModal() {
+            serviceDetailGeneration += 1;
+            stopOrderProductQueryPolling();
+            serviceDetailCurrentServiceNo = '';
             document.getElementById('detailModal').classList.remove('overlay-show');
             document.getElementById('detailFrame').srcdoc = '';
             document.getElementById('detailFrame').src = '';
@@ -2828,7 +2996,7 @@ ${section(9, '移机单', 'moveid1', [
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDetailModal(); });
 
         loadAllData();
-        restoreServiceCloseJob();
+        clearSavedServiceCloseJob();
         setInterval(() => loadAllData(false), 30000);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) loadAllData(false);

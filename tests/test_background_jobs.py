@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -60,8 +61,8 @@ class FakeTransferWorker:
 
 
 class BlockingServiceCloseWorker:
-    def __init__(self, products=None, detail_url=""):
-        self.slot_id = "query-1"
+    def __init__(self, products=None, detail_url="", slot_id="query-1"):
+        self.slot_id = slot_id
         self.products = list(products or [])
         self.detail_url = detail_url
         self.started = threading.Event()
@@ -98,6 +99,18 @@ class BlockingServiceCloseWorker:
         }
 
 
+class FakeRelatedOrderWorker:
+    def __init__(self, result, release=None):
+        self.slot_id = "query-2"
+        self.result = result
+        self.release = release
+
+    def query_related_order_products(self, service_no, log=None):
+        if self.release:
+            self.release.wait(timeout=2)
+        return self.result
+
+
 class BackgroundJobTests(unittest.TestCase):
     def setUp(self):
         app_module.app.config.update(TESTING=True)
@@ -112,6 +125,13 @@ class BackgroundJobTests(unittest.TestCase):
             with app_module.background_query_job_lock:
                 app_module.background_query_jobs.clear()
                 app_module.latest_background_query_job_by_owner.clear()
+        if hasattr(app_module, "order_product_job_lock"):
+            with app_module.order_product_job_lock:
+                app_module.order_product_jobs.clear()
+                app_module.latest_order_product_job_by_service.clear()
+        with app_module.priority_query_work_lock:
+            app_module.priority_query_waiters.clear()
+            app_module.priority_query_slot_reservations.clear()
 
     def wait_for_query(self, job_id, timeout=3):
         deadline = time.time() + timeout
@@ -127,6 +147,272 @@ class BackgroundJobTests(unittest.TestCase):
                 return payload
             time.sleep(0.02)
         self.fail(f"background query did not finish: {payload}")
+
+    def wait_for_order_products(self, service_no, job_id=None, timeout=3):
+        deadline = time.time() + timeout
+        payload = None
+        while time.time() < deadline:
+            response = self.client.get(
+                f"/api/service-orders/{service_no}/order-products/status",
+                query_string={"job_id": job_id} if job_id else None,
+            )
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            if payload.get("done"):
+                return payload
+            time.sleep(0.02)
+        self.fail(f"order product query did not finish: {payload}")
+
+    @staticmethod
+    def dispatch_order_product_now(worker):
+        def dispatch_now(kind, job_id, launch):
+            if kind != "order_products":
+                raise AssertionError(f"unexpected priority work kind: {kind}")
+            with app_module.priority_query_work_lock:
+                app_module.priority_query_slot_reservations[worker.slot_id] = job_id
+            launch(worker, worker.slot_id, "查询2")
+
+        return dispatch_now
+
+    def test_order_product_job_persists_complete_comparison_and_releases_channel(self):
+        service_no = "FWD20260914001"
+        detail = {
+            "service_no": service_no,
+            "legacy_note": "keep me",
+            "fields": [{"label": "客户名称", "value": "旧客户"}],
+            "products": [
+                {"product_name": "A", "product_code": "A-01", "barcode": "SN-A1"},
+                {"product_name": "B", "product_code": "B-02", "barcode": "SN-B1"},
+            ],
+        }
+        service_fields = [
+            {"label": "客户名称", "value": "新客户"},
+            {"label": "关联订单号", "value": "SO20260914001"},
+        ]
+        order_products = [
+            {"product_name": "A", "product_code": "A-01", "quantity": 1},
+            {"product_name": "C", "product_code": "C-03", "quantity": 2},
+        ]
+        worker = FakeRelatedOrderWorker((True, {
+            "service_no": service_no,
+            "order_no": "SO20260914001",
+            "service_fields": service_fields,
+            "order_products": order_products,
+        }))
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=self.dispatch_order_product_now(worker),
+        ):
+            app_module._write_service_order_detail(service_no, detail)
+            response = self.client.post(
+                f"/api/service-orders/{service_no}/order-products/start"
+            )
+            self.assertEqual(response.status_code, 200)
+            job_id = response.get_json()["job_id"]
+            status = self.wait_for_order_products(service_no)
+
+            self.assertEqual(status["job_id"], job_id)
+            self.assertEqual(status["order_no"], "SO20260914001")
+            self.assertEqual(status["slot_label"], "查询2")
+            self.assertTrue(status["success"])
+            self.assertEqual(status["detail_url"], f"/api/service-orders/{service_no}")
+            self.assertNotIn(worker.slot_id, app_module.priority_query_slot_reservations)
+
+            with open(os.path.join(tempdir, f"{service_no}.json"), encoding="utf-8") as file:
+                saved = json.load(file)
+            self.assertEqual(saved["legacy_note"], "keep me")
+            self.assertEqual(saved["fields"], service_fields)
+            self.assertEqual(saved["order_lookup"]["order_no"], "SO20260914001")
+            self.assertEqual(saved["order_lookup"]["products"], order_products)
+            self.assertEqual(saved["order_lookup"]["comparison"], [
+                {"product_code": "A-01", "product_name": "A", "order_quantity": 1,
+                 "service_quantity": 1, "status": "matched", "status_label": "一致"},
+                {"product_code": "B-02", "product_name": "B", "order_quantity": 0,
+                 "service_quantity": 1, "status": "order_missing", "status_label": "订单缺少"},
+                {"product_code": "C-03", "product_name": "C", "order_quantity": 2,
+                 "service_quantity": 0, "status": "service_missing", "status_label": "服务单缺少"},
+            ])
+            self.assertTrue(saved["order_lookup"]["queried_at"])
+
+    def test_order_product_job_creates_detail_cache_from_live_service_products(self):
+        service_no = "FWD202609210703"
+        service_products = [{
+            "product_name": "前置过滤器 ESF110-A",
+            "product_code": "916046228",
+            "barcode": "8462412200402",
+        }]
+        worker = FakeRelatedOrderWorker((True, {
+            "service_no": service_no,
+            "order_no": "ORD2609210703",
+            "service_fields": [{"label": "关联订单", "value": "ORD2609210703"}],
+            "service_products": service_products,
+            "order_products": [{
+                "product_name": "前置过滤器 ESF110-A",
+                "product_code": "916046228",
+                "quantity": 1,
+            }],
+        }))
+        job = app_module._empty_order_product_job(service_no)
+        job.update({"running": True})
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ):
+            with app_module.order_product_job_lock:
+                app_module.order_product_jobs[job["job_id"]] = job
+            try:
+                app_module._run_order_product_job(job["job_id"], worker)
+                self.assertTrue(job["success"], job["error"])
+                with open(os.path.join(tempdir, f"{service_no}.json"), encoding="utf-8") as file:
+                    saved = json.load(file)
+            finally:
+                with app_module.order_product_job_lock:
+                    app_module.order_product_jobs.pop(job["job_id"], None)
+
+        self.assertEqual(saved["products"][0]["barcode"], "8462412200402")
+        self.assertEqual(saved["products"][0]["product_code"], "916046228")
+        self.assertEqual(saved["order_lookup"]["comparison"][0]["status"], "matched")
+
+    def test_order_product_start_rejects_duplicate_running_service_job(self):
+        service_no = "FWD20260914001"
+        release = threading.Event()
+        worker = FakeRelatedOrderWorker((False, {"error": "CRM 未登录"}), release=release)
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=self.dispatch_order_product_now(worker),
+        ):
+            app_module._write_service_order_detail(service_no, {
+                "service_no": service_no,
+                "products": [],
+            })
+            first = self.client.post(
+                f"/api/service-orders/{service_no}/order-products/start"
+            )
+            second = self.client.post(
+                f"/api/service-orders/{service_no}/order-products/start"
+            )
+
+            self.assertEqual(first.status_code, 200)
+            self.assertEqual(second.status_code, 409)
+            self.assertEqual(second.get_json()["job_id"], first.get_json()["job_id"])
+            self.assertTrue(second.get_json()["running"])
+
+            release.set()
+            status = self.wait_for_order_products(service_no, first.get_json()["job_id"])
+            self.assertFalse(status["success"])
+            self.assertEqual(status["stage"], "failed")
+            self.assertNotIn(worker.slot_id, app_module.priority_query_slot_reservations)
+
+    def test_order_product_status_exposes_live_stage_message_and_elapsed_time(self):
+        """The detail modal needs a human-readable update while CRM work is running."""
+        service_no = "FWD202609220002"
+        job = app_module._empty_order_product_job(service_no)
+        job.update({
+            "running": True,
+            "stage": "querying_service_order",
+            "message": "正在打开门店管理订单列表",
+            "started_at": "2026-09-22 10:00:00",
+            "_started_ts": time.time() - 3,
+        })
+        with app_module.order_product_job_lock:
+            app_module.order_product_jobs[job["job_id"]] = job
+            app_module.latest_order_product_job_by_service[service_no] = job["job_id"]
+        try:
+            status = self.client.get(
+                f"/api/service-orders/{service_no}/order-products/status",
+                query_string={"job_id": job["job_id"]},
+            ).get_json()
+            self.assertEqual(status["message"], "正在打开门店管理订单列表")
+            self.assertGreaterEqual(status["elapsed"], 3)
+        finally:
+            with app_module.order_product_job_lock:
+                app_module.order_product_jobs.pop(job["job_id"], None)
+                app_module.latest_order_product_job_by_service.pop(service_no, None)
+
+    def test_failed_order_product_refresh_preserves_successful_cache_bytes(self):
+        service_no = "FWD20260914001"
+        old_detail = {
+            "service_no": service_no,
+            "fields": [{"label": "关联订单号", "value": "SO-OLD"}],
+            "products": [{"product_name": "A", "product_code": "A-01", "barcode": "SN-A1"}],
+            "order_lookup": {
+                "order_no": "SO-OLD",
+                "products": [{"product_name": "A", "product_code": "A-01", "quantity": 1}],
+                "comparison": [{"product_code": "A-01", "status": "matched"}],
+                "queried_at": "2026-09-14 12:00:00",
+            },
+        }
+        worker = FakeRelatedOrderWorker((False, {"error": "订单详情未读取到产品明细"}))
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=self.dispatch_order_product_now(worker),
+        ):
+            filepath = os.path.join(tempdir, f"{service_no}.json")
+            os.makedirs(tempdir, exist_ok=True)
+            original = (
+                json.dumps(old_detail, ensure_ascii=False, separators=(",", ":")) + "\n"
+            ).encode()
+            with open(filepath, "wb") as file:
+                file.write(original)
+
+            response = self.client.post(
+                f"/api/service-orders/{service_no}/order-products/start"
+            )
+            self.assertEqual(response.status_code, 200)
+            status = self.wait_for_order_products(service_no, response.get_json()["job_id"])
+
+            self.assertFalse(status["success"])
+            self.assertEqual(status["error"], "订单详情未读取到产品明细")
+            with open(filepath, "rb") as file:
+                self.assertEqual(file.read(), original)
+            self.assertNotIn(worker.slot_id, app_module.priority_query_slot_reservations)
+
+    def test_order_product_cache_write_failure_preserves_existing_file_bytes(self):
+        service_no = "FWD20260914001"
+        worker = FakeRelatedOrderWorker((True, {
+            "service_no": service_no,
+            "order_no": "SO20260914001",
+            "service_fields": [{"label": "关联订单号", "value": "SO20260914001"}],
+            "order_products": [{
+                "product_name": "A",
+                "product_code": "A-01",
+                "quantity": 1,
+                "invalid_json_value": object(),
+            }],
+        }))
+
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(
+            app_module, "SERVICE_ORDER_DIR", tempdir
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=self.dispatch_order_product_now(worker),
+        ):
+            filepath = os.path.join(tempdir, f"{service_no}.json")
+            original = b'{"service_no":"FWD20260914001","products":[]}\n'
+            with open(filepath, "wb") as file:
+                file.write(original)
+
+            response = self.client.post(
+                f"/api/service-orders/{service_no}/order-products/start"
+            )
+            status = self.wait_for_order_products(service_no, response.get_json()["job_id"])
+
+            self.assertFalse(status["success"])
+            with open(filepath, "rb") as file:
+                self.assertEqual(file.read(), original)
+            self.assertNotIn(worker.slot_id, app_module.priority_query_slot_reservations)
 
     def test_background_query_finishes_without_frontend_polling(self):
         workers = {
@@ -385,6 +671,130 @@ class BackgroundJobTests(unittest.TestCase):
             ],
         )
 
+    def test_transfer_summary_initializes_and_updates_each_representative_barcode_state(self):
+        job = app_module._empty_summary_job("transfer-1")
+        job.update({
+            "running": True,
+            "started_at": "2026-08-21 17:45:00",
+        })
+        with app_module.summary_job_lock:
+            app_module.summary_jobs[job["job_id"]] = job
+
+        observed = {}
+
+        def fake_ensure(_barcodes, _log, _worker, state_tracker=None):
+            with app_module.summary_job_lock:
+                observed["pending"] = dict(app_module.summary_jobs[job["job_id"]].get("barcode_states") or {})
+            state_tracker("REP-001", "querying", "查询1")
+            state_tracker("REP-001", "ok", "查询1")
+            state_tracker("REP-002", "querying", "查询2")
+            state_tracker("REP-002", "failed", "查询2")
+            return {"queried": [], "failed": []}
+
+        try:
+            with mock.patch.object(
+                app_module,
+                "filter_disassembly_barcodes",
+                return_value=(["REP-001", "REP-002"], []),
+            ), mock.patch.object(
+                app_module,
+                "_missing_product_library_representatives",
+                return_value={"P1": "REP-001", "P2": "REP-002"},
+            ), mock.patch.object(
+                app_module,
+                "_crm_ready_for_auto_query",
+                return_value=(True, "已登录"),
+            ), mock.patch.object(
+                app_module,
+                "ensure_product_library_for_barcodes",
+                side_effect=fake_ensure,
+            ), mock.patch.object(
+                app_module,
+                "build_transfer_summary",
+                return_value={"groups": [], "details": [], "missing": [], "incomplete": [], "blocked": []},
+            ), mock.patch.object(
+                app_module,
+                "_exclude_unmatched_transfer_barcodes",
+                return_value=[],
+            ):
+                app_module._run_summary_job(
+                    job["job_id"],
+                    object(),
+                    ["REP-001", "REP-002"],
+                    "移出",
+                    "测试分销商",
+                )
+
+            self.assertEqual(
+                observed["pending"],
+                {
+                    "REP-001": {"state": "pending", "channel": "", "channel_label": "", "message": "等待查询", "level": "dim"},
+                    "REP-002": {"state": "pending", "channel": "", "channel_label": "", "message": "等待查询", "level": "dim"},
+                },
+            )
+            with app_module.summary_job_lock:
+                states = dict(app_module.summary_jobs[job["job_id"]]["barcode_states"])
+            self.assertEqual(states["REP-001"]["state"], "ok")
+            self.assertEqual(states["REP-001"]["channel_label"], "查询1")
+            self.assertEqual(states["REP-002"]["state"], "failed")
+            self.assertEqual(states["REP-002"]["channel_label"], "查询2")
+            with app_module.summary_job_lock:
+                messages = [row["message"] for row in app_module.summary_jobs[job["job_id"]]["logs"]]
+            self.assertFalse(any(message.startswith("代表条码 REP-") for message in messages))
+        finally:
+            with app_module.summary_job_lock:
+                app_module.summary_jobs.pop(job["job_id"], None)
+
+    def test_representative_barcode_state_receives_each_query_process_message(self):
+        worker = FakeQueryWorker("query-1", delay=0)
+        updates = []
+
+        def track(barcode, state, channel, message="", level="dim"):
+            updates.append((barcode, state, channel, message, level))
+
+        with mock.patch.object(
+            app_module,
+            "_missing_product_library_representatives",
+            return_value={"347": "3472311270178"},
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "query_slots",
+            ["query-1"],
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            return_value=worker,
+        ), mock.patch.object(
+            app_module,
+            "existing_barcode_result_paths",
+            return_value=[],
+        ), mock.patch.object(
+            app_module,
+            "barcode_metadata_exists",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "delete_temporary_query_result",
+        ), mock.patch.object(
+            app_module,
+            "match_product_library",
+            return_value={"product_code": "P-347", "product_name": "测试产品"},
+        ):
+            app_module.ensure_product_library_for_barcodes(
+                ["3472311270178"],
+                worker=worker,
+                state_tracker=track,
+            )
+
+        process_messages = [
+            message
+            for barcode, state, channel, message, _level in updates
+            if barcode == "3472311270178" and state == "querying" and channel == "查询1"
+        ]
+        self.assertIn("正在查询：3472311270178", process_messages)
+        self.assertIn("查询完成：3472311270178", process_messages)
+        self.assertEqual(updates[-1], ("3472311270178", "ok", "查询1", "查询成功", "success"))
+
     def test_product_library_query_status_returns_logs_since_sequence(self):
         with app_module.library_query_lock:
             app_module.library_query_job.update({
@@ -480,6 +890,8 @@ class BackgroundJobTests(unittest.TestCase):
         })
         with app_module.service_close_job_lock:
             app_module.service_close_jobs[job["job_id"]] = job
+            app_module.latest_service_close_job_id = job["job_id"]
+            app_module.latest_service_close_job_id = job["job_id"]
 
         thread = threading.Thread(
             target=app_module._run_service_close_job,
@@ -497,12 +909,9 @@ class BackgroundJobTests(unittest.TestCase):
             rows = response.get_json()["service_rows"]
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["service_no"], "FWD202608050001")
-            self.assertEqual(rows[0]["selected_barcodes"], ["8722507290847", "3402512080268"])
+            self.assertEqual(rows[0]["selected_barcodes"], [])
             self.assertEqual(rows[0]["related_barcodes"], ["435221024H397"])
-            self.assertEqual(
-                rows[0]["barcodes"],
-                ["8722507290847", "3402512080268", "435221024H397"],
-            )
+            self.assertEqual(rows[0]["barcodes"], ["435221024H397"])
             self.assertEqual(rows[0]["slot_label"], "查询1")
             self.assertEqual(rows[0]["state"], "running")
             self.assertEqual(rows[0]["message"], "正在搜索服务单")
@@ -530,6 +939,206 @@ class BackgroundJobTests(unittest.TestCase):
             thread.join(timeout=2)
             with app_module.service_close_job_lock:
                 app_module.service_close_jobs.pop(job["job_id"], None)
+                if getattr(app_module, "latest_service_close_job_id", "") == job["job_id"]:
+                    app_module.latest_service_close_job_id = ""
+
+    def test_service_close_latest_status_is_shared_between_clients(self):
+        """Removing the shared latest job ID would make another browser see an empty job."""
+        job = app_module._empty_service_close_job("query-1", [{
+            "service_no": "FWD202609210001",
+            "barcodes": ["870000000001"],
+        }])
+        job.update({
+            "running": True,
+            "started_at": "2026-09-21 12:00:00",
+            "logs": [{"id": 1, "message": "正在处理", "level": "info", "time": "12:00:01"}],
+            "log_seq": 1,
+        })
+        with app_module.service_close_job_lock:
+            app_module.service_close_jobs[job["job_id"]] = job
+            app_module.latest_service_close_job_id = job["job_id"]
+
+        second_client = app_module.app.test_client()
+        second_client.post("/api/app-auth/login", json={"username": "admin", "password": "88293529"})
+        try:
+            response = second_client.get("/api/service-close/status?latest=1")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            self.assertEqual(payload["job_id"], job["job_id"])
+            self.assertTrue(payload["running"])
+            self.assertEqual(payload["service_rows"][0]["service_no"], "FWD202609210001")
+            self.assertEqual(payload["logs"][0]["message"], "正在处理")
+
+            with app_module.service_close_job_lock:
+                job["running"] = False
+                job["done"] = True
+                job["finished_at"] = "2026-09-21 12:01:00"
+            finished = second_client.get("/api/service-close/status?latest=1").get_json()
+            self.assertTrue(finished["done"])
+            self.assertFalse(finished["running"])
+        finally:
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job["job_id"], None)
+                if app_module.latest_service_close_job_id == job["job_id"]:
+                    app_module.latest_service_close_job_id = ""
+
+    def test_service_close_start_uses_all_available_query_channels(self):
+        orders = [
+            {"service_no": f"FWD20260914000{index}", "barcodes": [f"792500000000{index}"]}
+            for index in range(1, 4)
+        ]
+        workers = [
+            BlockingServiceCloseWorker(slot_id=f"query-{index}")
+            for index in range(1, 4)
+        ]
+
+        def dispatch_now(_kind, job_id, launch):
+            with app_module.priority_query_work_lock:
+                app_module.priority_query_slot_reservations["query-1"] = job_id
+            launch(workers[0], "query-1", "查询1")
+
+        with mock.patch.object(
+            app_module,
+            "selected_latest_service_orders",
+            return_value={"orders": orders, "missing": [], "no_service": []},
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=dispatch_now,
+        ), mock.patch.object(
+            app_module,
+            "_select_idle_query_workers_desc",
+            return_value=(
+                [
+                    (workers[1], "query-2", "查询2"),
+                    (workers[2], "query-3", "查询3"),
+                ],
+                "",
+            ),
+        ):
+            response = self.client.post(
+                "/api/service-close/start",
+                json={"barcodes": [row["barcodes"][0] for row in orders]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        job_id = response.get_json()["job_id"]
+        try:
+            self.assertTrue(workers[0].started.wait(timeout=1))
+            self.assertTrue(workers[1].started.wait(timeout=1))
+            self.assertTrue(workers[2].started.wait(timeout=1))
+            status = self.client.get(
+                "/api/service-close/status",
+                query_string={"job_id": job_id},
+            ).get_json()
+            self.assertEqual(
+                status["slot_ids"],
+                ["query-1", "query-2", "query-3"],
+            )
+            self.assertEqual(
+                {row["slot_label"] for row in status["service_rows"]},
+                {"查询1", "查询2", "查询3"},
+            )
+        finally:
+            for worker in workers:
+                worker.release.set()
+            deadline = time.time() + 2
+            while time.time() < deadline:
+                with app_module.service_close_job_lock:
+                    current = app_module.service_close_jobs.get(job_id) or {}
+                    if current.get("done"):
+                        break
+                time.sleep(0.01)
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job_id, None)
+                for slot_id in ["query-1", "query-2", "query-3"]:
+                    app_module.latest_service_close_job_by_slot.pop(slot_id, None)
+            with app_module.priority_query_work_lock:
+                for slot_id in ["query-1", "query-2", "query-3"]:
+                    app_module.priority_query_slot_reservations.pop(slot_id, None)
+
+    def test_service_close_start_returns_before_the_scheduler_finds_a_channel(self):
+        """A queued close job must let the browser enter the management page immediately."""
+        scheduler_started = threading.Event()
+        release_scheduler = threading.Event()
+
+        def wait_for_scheduler(_kind, _job_id, _launch):
+            scheduler_started.set()
+            release_scheduler.wait(timeout=2)
+
+        with mock.patch.object(
+            app_module,
+            "selected_latest_service_orders",
+            return_value={
+                "orders": [{"service_no": "FWD202609220001", "barcodes": ["890000000001"]}],
+                "missing": [],
+                "no_service": [],
+            },
+        ), mock.patch.object(
+            app_module,
+            "enqueue_priority_query_work",
+            side_effect=wait_for_scheduler,
+        ):
+            started_at = time.monotonic()
+            response = self.client.post("/api/service-close/start", json={"barcodes": ["890000000001"]})
+            self.assertLess(time.monotonic() - started_at, 0.5)
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.get_json()["success"])
+            self.assertTrue(scheduler_started.wait(timeout=1))
+
+        release_scheduler.set()
+
+    def test_idle_query_worker_selection_rotates_available_channels(self):
+        workers = {
+            f"query-{index}": mock.Mock(
+                busy=False,
+                logged_in=True,
+                remembered_logged_in=True,
+            )
+            for index in range(1, 4)
+        }
+        original_cursor = getattr(app_module, "query_slot_round_robin_cursor", 0)
+        with mock.patch.object(
+            app_module.crm_pool,
+            "query_slots",
+            ["query-1", "query-2", "query-3"],
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            side_effect=lambda slot_id, _kind: workers[slot_id],
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_priority_reservation",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_inbound",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_batch",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_background_batch",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_has_running_service_close",
+            return_value=False,
+        ), mock.patch.object(
+            app_module,
+            "_query_slot_cooldown_message",
+            return_value="",
+        ):
+            app_module.query_slot_round_robin_cursor = 0
+            selected_slots = [
+                app_module._select_idle_query_worker_desc()[1]
+                for _ in range(3)
+            ]
+
+        app_module.query_slot_round_robin_cursor = original_cursor
+        self.assertEqual(selected_slots, ["query-1", "query-2", "query-3"])
 
     def test_service_close_merges_selected_and_detail_product_barcodes(self):
         row = {
@@ -577,6 +1186,61 @@ class BackgroundJobTests(unittest.TestCase):
             ["反渗透净水机 ERO162A", "前置过滤器", "软水机"],
         )
         self.assertEqual(merged["service_products"], products)
+
+    def test_service_close_uses_crm_product_barcodes_when_selected_barcodes_disagree(self):
+        merged = app_module._merge_service_order_products(
+            {
+                "service_no": "FWD202608100404",
+                "barcodes": ["8462412200402", "9072511190315"],
+            },
+            [{
+                "barcode": "9072511190315",
+                "product_name": "前置过滤器 ESF110-A",
+                "product_code": "916046228",
+            }],
+            selected_barcodes=["8462412200402", "9072511190315"],
+        )
+
+        self.assertEqual(merged["barcodes"], ["9072511190315"])
+        self.assertEqual(merged["selected_barcodes"], ["9072511190315"])
+        self.assertEqual(merged["unmatched_selected_barcodes"], ["8462412200402"])
+
+    def test_failed_service_close_queues_an_order_product_query(self):
+        service_no = "FWD202609210703"
+        worker = mock.Mock(slot_id="query-1")
+        worker.close_service_orders.return_value = False, {
+            "results": [{
+                "service_no": service_no,
+                "success": False,
+                "status": "failed",
+                "message": "CRM 结单失败",
+            }],
+        }
+        job = app_module._empty_service_close_job("query-1", [{
+            "service_no": service_no,
+            "barcodes": ["8462412200402"],
+        }])
+        job.update({"running": True, "started_at": "2026-09-22 09:00:00"})
+        with app_module.service_close_job_lock:
+            app_module.service_close_jobs[job["job_id"]] = job
+
+        try:
+            with mock.patch.object(
+                app_module,
+                "_start_order_product_job",
+                create=True,
+            ) as start_order_product_job, mock.patch.object(
+                app_module,
+                "_append_service_close_history",
+            ):
+                app_module._run_service_close_job(
+                    job["job_id"], [(worker, "query-1", "查询1")], job["orders"]
+                )
+
+            start_order_product_job.assert_called_once_with(service_no, automatic=True)
+        finally:
+            with app_module.service_close_job_lock:
+                app_module.service_close_jobs.pop(job["job_id"], None)
 
     def test_service_order_detail_is_saved_and_served_as_json(self):
         with tempfile.TemporaryDirectory() as tempdir, mock.patch.object(

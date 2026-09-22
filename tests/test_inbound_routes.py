@@ -1,0 +1,1661 @@
+import atexit
+import os
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+
+TEST_DATA_DIR = tempfile.TemporaryDirectory()
+atexit.register(TEST_DATA_DIR.cleanup)
+os.environ["CRM_DATA_DIR"] = TEST_DATA_DIR.name
+os.environ["CRM_DESKTOP_APP"] = "0"
+
+import app as app_module
+
+
+PACKING_SLIP_NO = "SH202607210002"
+FIXED_ROW = {
+    "page": 1,
+    "row_index": 1,
+    "order_number": "210524",
+    "product_code": "916000024",
+    "description": "中央净水机",
+    "expected_quantity": "1",
+    "serial": "SN00000001",
+}
+
+
+class FakeInboundWorker:
+    def __init__(self, success=True, result=None):
+        self.slot_id = "query-2"
+        self.busy = False
+        self.logged_in = True
+        self.remembered_logged_in = True
+        self.success = success
+        self.result = result
+
+    def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+        if log:
+            log("正在打开 B2B 装箱单页面")
+            log(f"正在查询装箱单 {packing_slip_no}")
+        if not self.success:
+            return False, self.result or "分页跳号：期望第 2 页，实际第 3 页"
+        page_count = {"page": 1, "row_count": 1}
+        if progress:
+            progress(page_count)
+        return True, {
+            "rows": [dict(FIXED_ROW)],
+            "page_counts": [page_count],
+            "packing_slip_type": "销售订单",
+        }
+
+
+class FakeGYJWorker:
+    slot_ids = app_module.GYJ_SLOT_IDS
+
+    def __init__(self, logged_in=True):
+        self.logged_in = logged_in
+        self.browser_running = logged_in
+        self.waiting_captcha = False
+        self.saved = []
+        self.login_calls = []
+        self.captcha_calls = []
+        self.captcha_refresh_calls = 0
+
+    def get(self, owner):
+        self.owner = owner
+        return self
+
+    def validate_slot_id(self, slot_id="gyj-1"):
+        slot_id = str(slot_id or "gyj-1")
+        if slot_id not in self.slot_ids:
+            raise ValueError("无效的 GYJ 通道")
+        return slot_id
+
+    def slot_status(self, slot_id):
+        slot_id = self.validate_slot_id(slot_id)
+        return {
+            "id": slot_id,
+            "label": f"GYJ 通道 {slot_id.rsplit('-', 1)[-1]}",
+            "browser_running": self.browser_running,
+            "logged_in": self.logged_in,
+            "waiting_captcha": self.waiting_captcha,
+            "busy": False,
+        }
+
+    def slots_payload(self):
+        return [self.slot_status(slot_id) for slot_id in self.slot_ids]
+
+    def reserve(self, timeout=60):
+        if not self.logged_in:
+            raise RuntimeError("请先登录 GYJ")
+        worker = self
+
+        class Lease:
+            slot_id = "gyj-1"
+            released = False
+
+            def __init__(self):
+                self.worker = worker
+
+            def release(self):
+                self.released = True
+
+        return Lease()
+
+    def login_step1(self, username, password):
+        self.login_calls.append((username, password))
+        self.logged_in = True
+        return True, "GYJ 登录成功"
+
+    def login_step2(self, captcha):
+        self.captcha_calls.append(captcha)
+        self.logged_in = True
+        return True, "GYJ 登录成功"
+
+    def captcha_preview(self):
+        return "data:image/png;base64,ZmFrZQ=="
+
+    def refresh_captcha(self):
+        self.captcha_refresh_calls += 1
+        return "data:image/png;base64,bmV3LWNhcHRjaGE="
+
+    def check_login_status(self):
+        return self.logged_in, ""
+
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
+        self.saved.append((packing_slip_no, list(lines), packing_slip_type))
+        if log:
+            log("正在新建 GYJ 采购入库单")
+        if progress:
+            progress({"current_line": len(lines), "total_lines": len(lines)})
+        return True, {"packing_slip_no": packing_slip_no, "order_no": "CG202608130001"}
+
+
+class _CaptchaImageLocator:
+    def __init__(self, visible=True):
+        self.first = self
+        self.visible = visible
+
+    def count(self):
+        return 1
+
+    def is_visible(self):
+        return self.visible
+
+    def screenshot(self, type):
+        self.screenshot_type = type
+        return b"actual-captcha"
+
+
+class _EmptyLocator:
+    first = None
+
+    def count(self):
+        return 0
+
+
+class _GYJLoginCaptchaPage:
+    url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self):
+        self.captcha_image = _CaptchaImageLocator()
+
+    def locator(self, selector):
+        if selector == "form#formLogin img":
+            return self.captcha_image
+        return _EmptyLocator()
+
+
+class _RestorableGYJPage:
+    def __init__(self, restored_url):
+        self.url = ""
+        self.restored_url = restored_url
+        self.gotos = []
+
+    def goto(self, url, wait_until, timeout):
+        self.gotos.append((url, wait_until, timeout))
+        self.url = self.restored_url
+
+    def locator(self, selector):
+        return _EmptyLocator()
+
+
+class GYJCaptchaPreviewTest(unittest.TestCase):
+    def test_uses_visible_login_form_captcha_image(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _GYJLoginCaptchaPage()
+        session.page = page
+
+        preview = session.captcha_preview()
+
+        self.assertEqual(preview, "data:image/png;base64,YWN0dWFsLWNhcHRjaGE=")
+        self.assertEqual(page.captcha_image.screenshot_type, "png")
+
+    def test_refresh_clicks_visible_captcha_before_returning_preview(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        image = mock.Mock()
+        session.page = mock.Mock()
+        session._first_visible = mock.Mock(return_value=image)
+        session.captcha_preview = mock.Mock(return_value="data:image/png;base64,bmV3")
+
+        preview = session.refresh_captcha()
+
+        image.click.assert_called_once_with()
+        session.page.wait_for_timeout.assert_called_once_with(300)
+        self.assertEqual(preview, "data:image/png;base64,bmV3")
+
+
+class GYJLoginFlowTest(unittest.TestCase):
+    def test_login_status_reopens_persistent_session_before_reporting_login_required(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage("https://cloud.gyjerp.com/bill/purchase_in")
+        session._ensure_browser = mock.Mock(
+            side_effect=lambda: setattr(session, "page", page) or True
+        )
+
+        success, message = session.check_login_status()
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 已登录")
+        self.assertEqual(page.gotos, [(
+            "https://cloud.gyjerp.com/bill/purchase_in", "domcontentloaded", 60000
+        )])
+
+    def test_step1_rebuilds_its_profile_once_when_the_login_form_never_appears(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        username_input = mock.Mock()
+        password_input = mock.Mock()
+        session.page = mock.Mock()
+        session._ensure_browser = mock.Mock(return_value=True)
+        session._wait_for_login_form = mock.Mock(
+            side_effect=[(None, None), (username_input, password_input)]
+        )
+        session._rebuild_browser_profile = mock.Mock(return_value=True)
+
+        success, message = session.login_step1("gyj-user", "secret")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 等待验证码")
+        session._rebuild_browser_profile.assert_called_once_with()
+
+    def test_step1_waits_for_the_delayed_gyj_captcha_form(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        username_input = mock.Mock()
+        password_input = mock.Mock()
+        captcha_input = mock.Mock()
+        session.page = mock.Mock()
+        session._ensure_browser = mock.Mock(return_value=True)
+        session._first_visible = mock.Mock(
+            side_effect=[None, None, username_input, password_input]
+        )
+        session._captcha_input = mock.Mock(side_effect=[None, captcha_input])
+
+        success, message = session.login_step1("gyj-user", "secret")
+
+        self.assertTrue(success)
+        self.assertEqual(message, "GYJ 等待验证码")
+        self.assertTrue(session.page.wait_for_timeout.called)
+        username_input.fill.assert_called_once_with("gyj-user")
+        password_input.fill.assert_called_once_with("secret")
+
+
+class InboundRouteTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        app_module.app.config.update(TESTING=True)
+
+    def setUp(self):
+        self._original_accounts = app_module.load_accounts()
+        self._original_gyj_inbound_history = (
+            app_module.load_gyj_inbound_history()
+            if hasattr(app_module, "load_gyj_inbound_history") else []
+        )
+        self._original_inbound_history = [
+            record
+            for record in (
+                app_module.get_inbound_history(summary.get("packing_slip_no"))
+                for summary in app_module.load_inbound_history()
+            )
+            if record
+        ]
+        app_module.save_accounts([
+            {
+                "id": "admin",
+                "username": "admin",
+                "display_name": "管理员",
+                "password": "88293529",
+                "permissions": [
+                    "crm",
+                    "results",
+                    "transfer",
+                    "inbound",
+                    "accounts",
+                    "product-library",
+                ],
+                "updated_at": "",
+            },
+            {
+                "id": "transfer-only",
+                "username": "transfer-only",
+                "display_name": "移库账号",
+                "password": "transfer-pass",
+                "permissions": ["transfer"],
+                "updated_at": "",
+            },
+            {
+                "id": "inbound-other",
+                "username": "inbound-other",
+                "display_name": "其他入库账号",
+                "password": "inbound-pass",
+                "permissions": ["inbound"],
+                "updated_at": "",
+            },
+            {
+                "id": "warehouse-account-id",
+                "username": "warehouse-user",
+                "display_name": "仓管员",
+                "password": "warehouse-pass",
+                "permissions": ["inbound"],
+                "updated_at": "",
+            },
+        ])
+        if hasattr(app_module, "inbound_job_lock"):
+            with app_module.inbound_job_lock:
+                app_module.inbound_jobs.clear()
+                app_module.latest_inbound_job_by_owner.clear()
+                app_module.latest_inbound_job_by_slot.clear()
+        if hasattr(app_module, "inbound_gyj_job_lock"):
+            with app_module.inbound_gyj_job_lock:
+                app_module.inbound_gyj_jobs.clear()
+                app_module.latest_inbound_gyj_job_by_owner.clear()
+        with app_module.batch_job_lock:
+            app_module.batch_jobs.clear()
+            app_module.latest_batch_job_by_slot.clear()
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs.clear()
+            app_module.latest_background_query_job_by_owner.clear()
+        if hasattr(app_module, "clear_inbound_history"):
+            app_module.clear_inbound_history()
+        if hasattr(app_module, "clear_gyj_inbound_history"):
+            app_module.clear_gyj_inbound_history()
+
+    def tearDown(self):
+        with app_module.priority_query_work_lock:
+            app_module.priority_query_waiters.clear()
+            app_module.priority_query_slot_reservations.clear()
+            timer = app_module.priority_query_wakeup_timer
+            app_module._schedule_priority_query_wakeup()
+        if timer is not None:
+            timer.join(timeout=2)
+        if hasattr(app_module, "inbound_job_lock"):
+            with app_module.inbound_job_lock:
+                app_module.inbound_jobs.clear()
+                app_module.latest_inbound_job_by_owner.clear()
+                app_module.latest_inbound_job_by_slot.clear()
+        if hasattr(app_module, "inbound_gyj_job_lock"):
+            with app_module.inbound_gyj_job_lock:
+                app_module.inbound_gyj_jobs.clear()
+                app_module.latest_inbound_gyj_job_by_owner.clear()
+        with app_module.batch_job_lock:
+            app_module.batch_jobs.clear()
+            app_module.latest_batch_job_by_slot.clear()
+        with app_module.background_query_job_lock:
+            app_module.background_query_jobs.clear()
+            app_module.latest_background_query_job_by_owner.clear()
+        if hasattr(app_module, "clear_inbound_history"):
+            app_module.clear_inbound_history()
+            for record in self._original_inbound_history:
+                app_module.upsert_inbound_history(
+                    record.get("result") or {}, record.get("read_at") or ""
+                )
+        if hasattr(app_module, "clear_gyj_inbound_history"):
+            app_module.clear_gyj_inbound_history()
+            for record in self._original_gyj_inbound_history:
+                app_module.upsert_gyj_inbound_history(
+                    record.get("result") or {},
+                    record.get("packing_slip_no") or "",
+                    record.get("actor") or "",
+                    record.get("saved_at") or "",
+                )
+        app_module.save_accounts(self._original_accounts)
+
+    @staticmethod
+    def _login(username, password):
+        client = app_module.app.test_client()
+        response = client.post(
+            "/api/app-auth/login",
+            json={"username": username, "password": password},
+        )
+        if response.status_code != 200 or not response.get_json().get("success"):
+            raise AssertionError(f"login failed for {username}")
+        return client
+
+    def _wait_for_job(self, client, job_id):
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            response = client.get(f"/api/inbound/status?job_id={job_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            if payload["done"]:
+                return payload
+            time.sleep(0.01)
+        self.fail("inbound job did not finish")
+
+    def _wait_for_gyj_job(self, client, job_id):
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            response = client.get(f"/api/inbound/gyj/status?job_id={job_id}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.get_json()
+            if payload["done"]:
+                return payload
+            time.sleep(0.01)
+        self.fail("GYJ inbound job did not finish")
+
+    def test_background_gyj_job_holds_and_releases_shared_channel_lease(self):
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=True)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        lines = [{
+            "product_code": "916000024",
+            "description": "中央净水机",
+            "quantity": 1,
+            "serials": ["SN00000001"],
+            "record_type": "serial",
+        }]
+        job = app_module._empty_inbound_gyj_job(
+            "admin", PACKING_SLIP_NO, "history:test", lines, "销售订单"
+        )
+        with app_module.inbound_gyj_job_lock:
+            app_module.inbound_gyj_jobs[job["job_id"]] = job
+
+        app_module._run_inbound_gyj_job(job["job_id"], lease.worker, lines, lease)
+
+        self.assertFalse(pool.slot_status(lease.slot_id)["busy"])
+        self.assertTrue(app_module.inbound_gyj_jobs[job["job_id"]]["success"])
+
+    def test_inbound_requires_its_own_permission(self):
+        anonymous = app_module.app.test_client()
+        page = anonymous.get("/inbound", follow_redirects=False)
+        self.assertEqual(page.status_code, 302)
+        self.assertTrue(page.headers["Location"].startswith("/login?next="))
+        start = anonymous.post(
+            "/api/inbound/start",
+            json={"packing_slip_no": PACKING_SLIP_NO},
+        )
+        self.assertEqual(start.status_code, 401)
+
+        transfer_only = self._login("transfer-only", "transfer-pass")
+        self.assertEqual(transfer_only.get("/inbound").status_code, 403)
+        denied_api = transfer_only.post(
+            "/api/inbound/start",
+            json={"packing_slip_no": PACKING_SLIP_NO},
+        )
+        self.assertEqual(denied_api.status_code, 403)
+        transfer_page = transfer_only.get("/transfer")
+        self.assertEqual(transfer_page.status_code, 200)
+        self.assertNotIn("入库".encode("utf-8"), transfer_page.data)
+
+        inbound_user = self._login("inbound-other", "inbound-pass")
+        with mock.patch.object(app_module, "render_template", return_value="inbound page"):
+            allowed_page = inbound_user.get("/inbound")
+        self.assertEqual(allowed_page.status_code, 200)
+
+    def test_gyj_start_uses_only_the_current_successful_inbound_result(self):
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
+                "duplicate_serials": [],
+                "items": [{
+                    "product_code": "916000024",
+                    "description": "中央净水机",
+                    "order_numbers": ["210524"],
+                    "serials": ["SN00000001"],
+                    "expected_quantity": 1,
+                    "serial_count": 1,
+                    "unbarcoded_quantity": 0,
+                    "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = FakeGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start")
+
+        self.assertEqual(started.status_code, 200)
+        job_id = started.get_json()["job_id"]
+        status = self._wait_for_gyj_job(client, job_id)
+        self.assertTrue(status["success"])
+        self.assertEqual(status["result"]["order_no"], "CG202608130001")
+        self.assertEqual(status["result"]["products"], [{
+            "product_code": "916000024",
+            "description": "中央净水机",
+            "quantity": 1,
+            "serials": ["SN00000001"],
+            "record_type": "条码",
+        }])
+        self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+        self.assertEqual(worker.saved[0][1][0]["product_code"], "916000024")
+
+        history_response = client.get("/api/inbound/gyj/history")
+        self.assertEqual(history_response.status_code, 200)
+        records = history_response.get_json()["records"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["order_no"], "CG202608130001")
+        self.assertEqual(records[0]["packing_slip_no"], PACKING_SLIP_NO)
+        self.assertEqual(records[0]["actor"], "admin")
+        self.assertEqual(records[0]["products"], status["result"]["products"])
+
+    def test_gyj_history_failure_does_not_change_successful_inbound_result(self):
+        lines = [{
+            "product_code": "916000024", "description": "中央净水机",
+            "quantity": 1, "serials": ["SN00000001"], "record_type": "条码",
+        }]
+        worker = FakeGYJWorker()
+        job = app_module._empty_inbound_gyj_job(
+            "admin", PACKING_SLIP_NO, "history:test", lines, "销售订单",
+            actor="admin",
+        )
+        with app_module.inbound_gyj_job_lock:
+            app_module.inbound_gyj_jobs[job["job_id"]] = job
+
+        with mock.patch.object(
+            app_module, "upsert_gyj_inbound_history", side_effect=OSError("disk full")
+        ):
+            app_module._run_inbound_gyj_job(job["job_id"], worker, lines)
+
+        saved_job = app_module.inbound_gyj_jobs[job["job_id"]]
+        self.assertTrue(saved_job["success"])
+        self.assertEqual(saved_job["result"]["order_no"], "CG202608130001")
+        self.assertTrue(any(
+            "历史记录保存失败" in entry["message"] for entry in saved_job["logs"]
+        ))
+
+    def test_admin_can_delete_one_gyj_inbound_history_record(self):
+        app_module.upsert_gyj_inbound_history(
+            {"order_no": "CGRK00001849380", "products": []},
+            PACKING_SLIP_NO,
+            "admin",
+            "2026-09-09 17:47:58",
+        )
+        client = self._login("admin", "88293529")
+
+        self.assertTrue(client.get("/api/inbound/gyj/history").get_json()["can_delete"])
+
+        response = client.delete("/api/inbound/gyj/history/CGRK00001849380")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(client.get("/api/inbound/gyj/history").get_json()["records"], [])
+
+    def test_non_admin_cannot_delete_gyj_inbound_history_record(self):
+        app_module.upsert_gyj_inbound_history(
+            {"order_no": "CGRK00001849380", "products": []},
+            PACKING_SLIP_NO,
+            "admin",
+            "2026-09-09 17:47:58",
+        )
+        client = self._login("inbound-other", "inbound-pass")
+
+        self.assertFalse(client.get("/api/inbound/gyj/history").get_json()["can_delete"])
+
+        response = client.delete("/api/inbound/gyj/history/CGRK00001849380")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.get_json()["success"])
+        self.assertEqual(
+            client.get("/api/inbound/gyj/history").get_json()["records"][0]["order_no"],
+            "CGRK00001849380",
+        )
+
+    def test_admin_delete_missing_gyj_inbound_history_returns_not_found(self):
+        client = self._login("admin", "88293529")
+
+        response = client.delete("/api/inbound/gyj/history/CGRK-NOT-FOUND")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse(response.get_json()["success"])
+
+    def test_gyj_status_exposes_each_completed_line_before_save_finishes(self):
+        class StreamingGYJWorker(FakeGYJWorker):
+            def __init__(self):
+                super().__init__()
+                self.first_line_done = threading.Event()
+                self.release = threading.Event()
+
+            def save_purchase_inbound(
+                self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+            ):
+                self.saved.append((packing_slip_no, list(lines), packing_slip_type))
+                progress({"current_line": 1, "total_lines": len(lines), "line": lines[0]})
+                self.first_line_done.set()
+                self.release.wait(timeout=2)
+                for index, line in enumerate(lines[1:], start=2):
+                    progress({"current_line": index, "total_lines": len(lines), "line": line})
+                return True, {"packing_slip_no": packing_slip_no, "order_no": "CG202608130002"}
+
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
+                "duplicate_serials": [],
+                "items": [{
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001"],
+                    "expected_quantity": 1, "serial_count": 1,
+                    "unbarcoded_quantity": 1, "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = StreamingGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start")
+            self.assertEqual(started.status_code, 200)
+            self.assertTrue(worker.first_line_done.wait(timeout=1))
+            status = client.get(f"/api/inbound/gyj/status?job_id={started.get_json()['job_id']}").get_json()
+            self.assertTrue(status["running"])
+            self.assertEqual(status["result"]["products"], [{
+                "product_code": "916000024", "description": "中央净水机",
+                "quantity": 1, "serials": ["SN00000001"], "record_type": "条码",
+            }])
+            worker.release.set()
+            self._wait_for_gyj_job(client, started.get_json()["job_id"])
+
+    def test_gyj_start_accepts_selected_shared_history_snapshot(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(started.status_code, 200)
+        status = self._wait_for_gyj_job(client, started.get_json()["job_id"])
+        self.assertTrue(status["success"])
+        self.assertEqual(worker.saved[0][0], PACKING_SLIP_NO)
+        self.assertEqual(worker.saved[0][2], "销售订单")
+        self.assertIn(f"使用装箱单号：{PACKING_SLIP_NO}", status["logs"][0]["message"])
+
+    def test_gyj_start_rejects_history_without_packing_slip_type(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+
+        with mock.patch.object(app_module, "gyj_worker", FakeGYJWorker()):
+            response = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("缺少装箱单类型", response.get_json()["error"])
+
+    def test_gyj_start_uses_only_selected_products_serials_and_quantity(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [
+                {
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001", "SN00000002"],
+                    "expected_quantity": 2, "serial_count": 2,
+                    "unbarcoded_quantity": 0, "quantity_mismatch": False,
+                },
+                {
+                    "product_code": "917000001", "description": "无条码配件",
+                    "order_numbers": [], "serials": [],
+                    "expected_quantity": 3, "serial_count": 0,
+                    "unbarcoded_quantity": 3, "quantity_mismatch": False,
+                },
+            ],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            started = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [
+                    {"product_code": "916000024", "serials": ["SN00000002"], "unbarcoded_quantity": 0},
+                    {"product_code": "917000001", "serials": [], "unbarcoded_quantity": 2},
+                ],
+            })
+
+        self.assertEqual(started.status_code, 200)
+        self._wait_for_gyj_job(client, started.get_json()["job_id"])
+        self.assertEqual(worker.saved[0][1], [
+            {
+                "product_code": "916000024", "description": "中央净水机",
+                "source_order_numbers": [], "serials": ["SN00000002"],
+                "quantity": 1, "record_type": "条码",
+            },
+            {
+                "product_code": "917000001", "description": "无条码配件",
+                "source_order_numbers": [], "serials": [],
+                "quantity": 2, "record_type": "无条码配件",
+            },
+        ])
+
+    def test_gyj_start_rejects_a_selected_serial_not_in_the_source_result(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "916000024", "serials": ["FORGED-SERIAL"],
+                    "unbarcoded_quantity": 0,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("不属于", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_quantity_above_the_source_result(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "917000001", "description": "无条码配件",
+                "order_numbers": [], "serials": [],
+                "expected_quantity": 3, "serial_count": 0,
+                "unbarcoded_quantity": 3, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "917000001", "serials": [],
+                    "unbarcoded_quantity": 4,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("超过装箱单数量", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_a_fractional_unbarcoded_quantity(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "917000001", "description": "无条码配件",
+                "order_numbers": [], "serials": [],
+                "expected_quantity": 3, "serial_count": 0,
+                "unbarcoded_quantity": 3, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "917000001", "serials": [],
+                    "unbarcoded_quantity": 1.5,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("必须是整数", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_preserves_the_source_duplicate_serial_guard(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "duplicate_serials": ["DUPLICATE-SERIAL"],
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [{
+                    "product_code": "916000024", "serials": ["SN00000001"],
+                    "unbarcoded_quantity": 0,
+                }],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("重复条码", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_rejects_an_empty_product_selection(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "916000024", "description": "中央净水机",
+                "order_numbers": [], "serials": ["SN00000001"],
+                "expected_quantity": 1, "serial_count": 1,
+                "unbarcoded_quantity": 0, "quantity_mismatch": False,
+            }],
+        }, "2026-08-13 16:00:00")
+        worker = FakeGYJWorker()
+
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start", json={
+                "packing_slip_no": PACKING_SLIP_NO,
+                "selected_items": [],
+            })
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("至少选择", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_start_requires_visible_gyj_login(self):
+        client = self._login("admin", "88293529")
+        source = app_module._empty_inbound_job("admin", PACKING_SLIP_NO, "query-2", "查询2")
+        source.update({
+            "done": True,
+            "success": True,
+            "result": {
+                "packing_slip_no": PACKING_SLIP_NO,
+                "packing_slip_type": "销售订单",
+                "items": [{
+                    "product_code": "916000024", "description": "中央净水机",
+                    "order_numbers": [], "serials": ["SN00000001"],
+                    "expected_quantity": 1, "serial_count": 1,
+                    "unbarcoded_quantity": 0, "quantity_mismatch": False,
+                }],
+            },
+        })
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs[source["job_id"]] = source
+            app_module.latest_inbound_job_by_owner["admin"] = source["job_id"]
+
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/start")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("登录", response.get_json()["error"])
+        self.assertEqual(worker.saved, [])
+
+    def test_gyj_credentials_never_return_password_and_are_shared(self):
+        admin = self._login("admin", "88293529")
+        saved = admin.post("/api/inbound/gyj/credentials", json={
+            "remember": True, "username": "gyj-admin", "password": "secret",
+        })
+        self.assertEqual(saved.status_code, 200)
+        payload = admin.get("/api/inbound/gyj/credentials").get_json()
+        self.assertTrue(payload["remember"])
+        self.assertEqual(payload["username"], "gyj-admin")
+        self.assertNotIn("password", payload)
+
+        other = self._login("inbound-other", "inbound-pass")
+        other_response = other.get("/api/inbound/gyj/credentials")
+        self.assertEqual(other_response.status_code, 403)
+        self.assertNotIn("password", other_response.get_json())
+
+    def test_gyj_background_login_forwards_credentials_only_to_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/inbound/gyj/login", json={
+                "username": "gyj-user", "password": "secret", "remember": False,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(worker.owner, "gyj-1")
+        self.assertEqual(worker.login_calls, [("gyj-user", "secret")])
+
+    def test_gyj_slots_reports_five_shared_channel_states(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=slot_id in {"gyj-1", "gyj-3"})
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        with mock.patch.object(app_module, "gyj_worker", pool):
+            response = client.get("/api/gyj/slots")
+        lease.release()
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["total"], 5)
+        self.assertEqual(payload["logged_in_count"], 2)
+        self.assertEqual(payload["available_count"], 1)
+        self.assertEqual([row["id"] for row in payload["slots"]], list(app_module.GYJ_SLOT_IDS))
+        self.assertTrue(payload["slots"][0]["busy"])
+
+    def test_gyj_login_targets_selected_channel_and_rejects_invalid_slot(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=False)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        with mock.patch.object(app_module, "gyj_worker", pool), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            selected = client.post("/api/gyj/login", json={
+                "slot_id": "gyj-3",
+                "username": "gyj-user",
+                "password": "secret",
+                "remember": True,
+            })
+            invalid = client.post("/api/gyj/login", json={
+                "slot_id": "warehouse-user",
+                "username": "gyj-user",
+                "password": "secret",
+            })
+
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(workers["gyj-3"].login_calls, [("gyj-user", "secret")])
+        self.assertNotIn("gyj-1", workers)
+        self.assertEqual(invalid.status_code, 400)
+        self.assertIn("无效", invalid.get_json()["error"])
+
+    def test_gyj_login_can_reuse_remembered_secret_without_returning_it(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        saved_store = {
+            "admin": {
+                "remember": True,
+                "username": "saved-user",
+                "password": "saved-secret",
+            }
+        }
+        with mock.patch.object(app_module, "gyj_worker", worker), mock.patch.object(
+            app_module, "load_gyj_credentials_store", return_value=saved_store
+        ), mock.patch.object(app_module, "save_remembered_gyj_credentials", return_value=True):
+            response = client.post("/api/gyj/login", json={
+                "slot_id": "gyj-2", "use_saved": True, "remember": True
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(worker.login_calls, [("saved-user", "saved-secret")])
+        self.assertNotIn("password", response.get_json())
+
+    def test_gyj_captcha_targets_selected_channel_and_busy_login_is_rejected(self):
+        client = self._login("admin", "88293529")
+        workers = {}
+
+        def factory(slot_id, _session_dir):
+            worker = FakeGYJWorker(logged_in=True)
+            worker.slot_id = slot_id
+            workers[slot_id] = worker
+            return worker
+
+        pool = app_module.GYJWorkerPool(worker_factory=factory)
+        lease = pool.reserve(timeout=0.1)
+        with mock.patch.object(app_module, "gyj_worker", pool):
+            busy = client.post("/api/gyj/login/captcha", json={
+                "slot_id": lease.slot_id, "captcha": "A1B2"
+            })
+            selected = client.post("/api/gyj/login/captcha", json={
+                "slot_id": "gyj-4", "captcha": "C3D4"
+            })
+        lease.release()
+
+        self.assertEqual(busy.status_code, 409)
+        self.assertIn("使用中", busy.get_json()["error"])
+        self.assertEqual(selected.status_code, 200)
+        self.assertEqual(workers["gyj-4"].captcha_calls, ["C3D4"])
+
+    def test_non_admin_can_view_shared_availability_but_cannot_manage_login(self):
+        client = self._login("transfer-only", "transfer-pass")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            slots = client.get("/api/gyj/slots")
+            login = client.post("/api/gyj/login", json={
+                "username": "gyj-user", "password": "secret"
+            })
+            credentials = client.get("/api/gyj/credentials")
+
+        self.assertEqual(slots.status_code, 200)
+        self.assertEqual(login.status_code, 403)
+        self.assertEqual(credentials.status_code, 403)
+        self.assertEqual(worker.login_calls, [])
+
+    def test_gyj_captcha_preview_is_returned_only_for_current_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.get("/api/inbound/gyj/captcha-preview")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,ZmFrZQ==")
+        self.assertEqual(worker.owner, "gyj-1")
+
+    def test_gyj_captcha_refresh_generates_new_image_for_current_owner_worker(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            response = client.post("/api/gyj/captcha/refresh")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["captcha_image"], "data:image/png;base64,bmV3LWNhcHRjaGE=")
+        self.assertEqual(worker.captcha_refresh_calls, 1)
+        self.assertEqual(worker.owner, "gyj-1")
+
+    def _assert_gyj_alias_equivalent(self, shared, inbound):
+        self.assertEqual(shared.status_code, inbound.status_code)
+        self.assertEqual(shared.content_type, inbound.content_type)
+        self.assertEqual(shared.data, inbound.data)
+
+    def test_shared_gyj_credentials_get_and_post_match_inbound_aliases(self):
+        client = self._login("admin", "88293529")
+        remembered = {"remember": True, "username": "gyj-user"}
+        with mock.patch.object(
+            app_module, "get_remembered_gyj_credentials", return_value=remembered
+        ):
+            shared_get = client.get("/api/gyj/credentials")
+            inbound_get = client.get("/api/inbound/gyj/credentials")
+        self._assert_gyj_alias_equivalent(shared_get, inbound_get)
+
+        payload = {"remember": False, "username": "", "password": ""}
+        with mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared_post = client.post("/api/gyj/credentials", json=payload)
+            inbound_post = client.post("/api/inbound/gyj/credentials", json=payload)
+        self._assert_gyj_alias_equivalent(shared_post, inbound_post)
+
+    def test_shared_gyj_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        payload = {"username": "gyj-user", "password": "secret", "remember": False}
+        with mock.patch.object(app_module, "gyj_worker", worker), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            shared = client.post("/api/gyj/login", json=payload)
+            inbound = client.post("/api/inbound/gyj/login", json=payload)
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_login_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.post("/api/gyj/login/captcha", json={"captcha": "1234"})
+            inbound = client.post("/api/inbound/gyj/login/captcha", json={"captcha": "1234"})
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_captcha_preview_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=False)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/captcha-preview")
+            inbound = client.get("/api/inbound/gyj/captcha-preview")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_login_status_matches_inbound_alias(self):
+        client = self._login("admin", "88293529")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+        self._assert_gyj_alias_equivalent(shared, inbound)
+
+    def test_shared_gyj_routes_require_tool_login(self):
+        anonymous = app_module.app.test_client()
+        requests = [
+            ("get", "/api/gyj/credentials", None),
+            ("post", "/api/gyj/credentials", {}),
+            ("post", "/api/gyj/login", {}),
+            ("post", "/api/gyj/login/captcha", {}),
+            ("get", "/api/gyj/captcha-preview", None),
+            ("get", "/api/gyj/login-status", None),
+        ]
+        for method, path, payload in requests:
+            with self.subTest(path=path, method=method):
+                kwargs = {"json": payload} if payload is not None else {}
+                response = getattr(anonymous, method)(path, **kwargs)
+                self.assertEqual(response.status_code, 401)
+
+    def test_shared_gyj_routes_use_account_self_instead_of_inbound_permission(self):
+        client = self._login("transfer-only", "transfer-pass")
+        worker = FakeGYJWorker(logged_in=True)
+        with mock.patch.object(app_module, "gyj_worker", worker):
+            shared = client.get("/api/gyj/login-status")
+            inbound = client.get("/api/inbound/gyj/login-status")
+
+        self.assertEqual(shared.status_code, 200)
+        self.assertEqual(inbound.status_code, 403)
+
+    def test_gyj_routes_and_inventory_provider_share_one_worker_when_account_id_differs(self):
+        client = self._login("admin", "88293529")
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "packing_slip_type": "销售订单",
+            "items": [{
+                "product_code": "916000024",
+                "description": "中央净水机",
+                "order_numbers": [],
+                "serials": ["SN00000001"],
+                "expected_quantity": 1,
+                "serial_count": 1,
+                "unbarcoded_quantity": 0,
+                "quantity_mismatch": False,
+            }],
+        }, "2026-09-01 09:40:00")
+        created_workers = []
+
+        def create_worker(owner, session_dir):
+            worker = FakeGYJWorker(logged_in=False)
+            worker.owner = owner
+            worker.session_dir = session_dir
+            worker.check_login_status = mock.Mock(wraps=worker.check_login_status)
+            worker.captcha_preview = mock.Mock(wraps=worker.captcha_preview)
+            created_workers.append(worker)
+            return worker
+
+        worker_factory = mock.Mock(side_effect=create_worker)
+        pool = app_module.GYJWorkerPool(worker_factory=worker_factory)
+
+        with mock.patch.object(app_module, "gyj_worker", pool), mock.patch.object(
+            app_module, "save_remembered_gyj_credentials", return_value=True
+        ):
+            login = client.post("/api/gyj/login", json={
+                "username": "gyj-user", "password": "secret", "remember": False,
+            })
+            status = client.get("/api/inbound/gyj/login-status")
+            captcha = client.post("/api/gyj/login/captcha", json={"captcha": "1234"})
+            preview = client.get("/api/inbound/gyj/captcha-preview")
+            started = client.post(
+                "/api/inbound/gyj/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(status.status_code, 200)
+            self.assertEqual(captcha.status_code, 200)
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(started.status_code, 200)
+            self._wait_for_gyj_job(client, started.get_json()["job_id"])
+            self.assertEqual(worker_factory.call_count, 5)
+            self.assertEqual(list(pool.workers), list(app_module.GYJ_SLOT_IDS))
+            self.assertEqual(created_workers[0].login_calls, [("gyj-user", "secret")])
+            self.assertEqual(created_workers[0].captcha_calls, ["1234"])
+            self.assertEqual(created_workers[0].check_login_status.call_count, 2)
+            created_workers[0].captcha_preview.assert_called_once_with()
+            self.assertEqual(len(created_workers[0].saved), 1)
+            business_worker = app_module.gyj_business_worker_for_owner(
+                "warehouse-account-id"
+            )
+            self.assertIs(business_worker.pool, pool)
+            self.assertEqual(business_worker.actor, "warehouse-user")
+            self.assertEqual(worker_factory.call_count, 5)
+
+        job_id = started.get_json()["job_id"]
+        self.assertEqual(app_module.inbound_gyj_jobs[job_id]["owner"], "admin")
+        self.assertEqual(
+            app_module.latest_inbound_gyj_job_by_owner["admin"], job_id
+        )
+
+    def test_invalid_number_is_rejected_before_selecting_a_channel(self):
+        client = self._login("admin", "88293529")
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            side_effect=AssertionError("channel selection must not run"),
+        ):
+            response = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": "210524"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["success"])
+
+    def test_inbound_waits_for_a_query_slot_instead_of_rejecting_the_request(self):
+        client = self._login("admin", "88293529")
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(None, "", "", "所有已登录查询通道都在查询中，请稍后再试"),
+        ):
+            response = client.post(
+                "/api/inbound/start", json={"packing_slip_no": PACKING_SLIP_NO}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["stage"], "waiting")
+        status = client.get(f"/api/inbound/status?job_id={payload['job_id']}").get_json()
+        self.assertTrue(status["running"])
+        self.assertEqual(status["stage"], "waiting")
+        self.assertIn("等待查询通道", status["logs"][0]["message"])
+
+    def test_bulk_login_slot_becoming_available_starts_waiting_inbound_job(self):
+        client = self._login("admin", "88293529")
+        worker = FakeInboundWorker()
+        available = {"value": False}
+
+        def select_worker():
+            if available["value"]:
+                return worker, "query-2", "查询2", ""
+            return None, "", "", "所有已登录查询通道都在查询中，请稍后再试"
+
+        bulk_job = app_module._empty_bulk_login_job("query", [{
+            "id": "query-2", "label": "查询2", "kind": "query", "status": "opening",
+        }])
+        with app_module.bulk_login_job_lock:
+            app_module.bulk_login_jobs[bulk_job["job_id"]] = bulk_job
+        with mock.patch.object(app_module, "_select_idle_query_worker_desc", side_effect=select_worker):
+            started = client.post("/api/inbound/start", json={"packing_slip_no": PACKING_SLIP_NO})
+            self.assertEqual(started.status_code, 200)
+            available["value"] = True
+            app_module._update_bulk_login_slot(bulk_job["job_id"], "query-2", "logged_in", "登录成功")
+            status = self._wait_for_job(client, started.get_json()["job_id"])
+
+        self.assertTrue(status["success"])
+        self.assertEqual(status["slot_id"], "query-2")
+
+    def test_session_revalidates_login_before_reading_packing_slip(self):
+        crm_session = app_module.CRMSession()
+        crm_session.logged_in = True
+        crm_session.is_alive = lambda: True
+        crm_session._is_current_page_logged_in = lambda: False
+
+        success, error = crm_session.extract_packing_slip(PACKING_SLIP_NO)
+
+        self.assertFalse(success)
+        self.assertEqual(error, "CRM 当前未登录，请先登录 CRM")
+
+    def test_successful_job_is_owner_isolated_and_downloads_server_result(self):
+        client = self._login("admin", "88293529")
+        worker = FakeInboundWorker()
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(worker, "query-2", "查询2", ""),
+        ):
+            started = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+        self.assertEqual(started.status_code, 200)
+        job_id = started.get_json()["job_id"]
+        status = self._wait_for_job(client, job_id)
+        self.assertTrue(status["success"])
+        self.assertEqual(status["stage"], "success")
+        self.assertEqual(status["result"]["packing_slip_type"], "销售订单")
+        self.assertEqual(status["result"]["pages_read"], [1])
+        self.assertEqual(status["download_url"], f"/api/inbound/export?job_id={job_id}")
+        latest = client.get("/api/inbound/status?latest=1")
+        self.assertEqual(latest.status_code, 200)
+        self.assertEqual(latest.get_json()["job_id"], job_id)
+
+        other = self._login("inbound-other", "inbound-pass")
+        self.assertEqual(
+            other.get(f"/api/inbound/status?job_id={job_id}").status_code,
+            404,
+        )
+        self.assertEqual(
+            other.get(f"/api/inbound/export?job_id={job_id}").status_code,
+            404,
+        )
+
+        download = client.get(
+            "/api/inbound/export",
+            query_string={
+                "job_id": job_id,
+                "rows": "client rows must be ignored",
+            },
+        )
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(
+            download.mimetype,
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        disposition = download.headers.get("Content-Disposition", "")
+        self.assertIn("attachment", disposition)
+        self.assertIn(PACKING_SLIP_NO, disposition)
+        self.assertTrue(download.data.startswith(b"PK"))
+
+    def test_inbound_history_survives_job_cleanup_and_is_shared(self):
+        result = {
+            "packing_slip_no": PACKING_SLIP_NO,
+            "page_counts": [{"page": 1, "row_count": 1}],
+            "items": [{"product_code": "916000024", "serials": ["SN00000001"]}],
+        }
+        app_module.upsert_inbound_history(result, "2026-08-13 16:00:00")
+        with app_module.inbound_job_lock:
+            app_module.inbound_jobs.clear()
+
+        self.assertEqual(
+            app_module.get_inbound_history(PACKING_SLIP_NO)["result"], result
+        )
+        admin = self._login("admin", "88293529")
+        other = self._login("inbound-other", "inbound-pass")
+        self.assertEqual(admin.get("/api/inbound/history").get_json()["records"][0]["packing_slip_no"], PACKING_SLIP_NO)
+        self.assertEqual(other.get("/api/inbound/history").get_json()["records"][0]["packing_slip_no"], PACKING_SLIP_NO)
+
+    def test_inbound_history_routes_return_detail_and_delete_snapshot(self):
+        app_module.upsert_inbound_history({
+            "packing_slip_no": PACKING_SLIP_NO,
+            "page_counts": [{"page": 1, "row_count": 1}],
+            "items": [{"product_code": "916000024", "description": "中央净水机"}],
+        }, "2026-08-13 16:00:00")
+        client = self._login("admin", "88293529")
+
+        detail = client.get(f"/api/inbound/history/{PACKING_SLIP_NO}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.get_json()["record"]["result"]["items"][0]["product_code"], "916000024")
+        deleted = client.delete(f"/api/inbound/history/{PACKING_SLIP_NO}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.get_json()["success"])
+        self.assertEqual(client.get(f"/api/inbound/history/{PACKING_SLIP_NO}").status_code, 404)
+
+    def test_new_start_removes_prior_completed_owner_job_and_result(self):
+        client = self._login("admin", "88293529")
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(FakeInboundWorker(), "query-2", "查询2", ""),
+        ):
+            first = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+        first_job_id = first.get_json()["job_id"]
+        self.assertTrue(self._wait_for_job(client, first_job_id)["success"])
+        self.assertEqual(
+            client.get(f"/api/inbound/export?job_id={first_job_id}").status_code,
+            200,
+        )
+
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(FakeInboundWorker(), "query-2", "查询2", ""),
+        ):
+            second = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": "SH202607210003"},
+            )
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(
+            client.get(f"/api/inbound/status?job_id={first_job_id}").status_code,
+            404,
+        )
+        self.assertEqual(
+            client.get(f"/api/inbound/export?job_id={first_job_id}").status_code,
+            404,
+        )
+
+    def test_explicit_batch_start_refuses_an_inbound_reserved_slot(self):
+        with app_module.inbound_job_lock:
+            inbound_job = app_module._empty_inbound_job(
+                "admin", PACKING_SLIP_NO, "query-2", "查询2"
+            )
+            inbound_job["running"] = True
+            app_module.inbound_jobs[inbound_job["job_id"]] = inbound_job
+            app_module.latest_inbound_job_by_slot["query-2"] = inbound_job["job_id"]
+
+        client = self._login("admin", "88293529")
+        with (
+            mock.patch.object(app_module, "_request_slot_id", return_value="query-2"),
+            mock.patch.object(app_module.crm_pool, "get", return_value=object()),
+            mock.patch.object(app_module.threading, "Thread"),
+        ):
+            response = client.post(
+                "/api/crm/batch/start",
+                json={"barcodes": ["7925000000001"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["success"])
+        self.assertIn("入库", response.get_json()["error"])
+
+    def test_background_batch_start_skips_an_inbound_reserved_slot(self):
+        class IdleWorker:
+            def clear_stop(self):
+                pass
+
+        with app_module.inbound_job_lock:
+            inbound_job = app_module._empty_inbound_job(
+                "admin", PACKING_SLIP_NO, "query-2", "查询2"
+            )
+            inbound_job["running"] = True
+            app_module.inbound_jobs[inbound_job["job_id"]] = inbound_job
+            app_module.latest_inbound_job_by_slot["query-2"] = inbound_job["job_id"]
+
+        client = self._login("admin", "88293529")
+        with (
+            mock.patch.object(
+                app_module,
+                "configured_query_slot_ids",
+                return_value=["query-1", "query-2"],
+            ),
+            mock.patch.object(app_module.crm_pool, "get", return_value=IdleWorker()),
+            mock.patch.object(app_module.threading, "Thread"),
+        ):
+            response = client.post(
+                "/api/crm/background-batch/start",
+                json={"barcodes": ["7925000000001"]},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["success"])
+        self.assertEqual(response.get_json()["slot_ids"], ["query-1"])
+
+    def test_concurrent_inbound_and_batch_start_claim_only_one_contested_slot(self):
+        class BlockingQueryWorker:
+            def __init__(self):
+                self.slot_id = "query-2"
+                self.busy = False
+                self.logged_in = True
+                self.remembered_logged_in = True
+                self.batch_query_started = threading.Event()
+                self.release_batch_query = threading.Event()
+                self.inbound_calls = 0
+
+            def clear_stop(self):
+                pass
+
+            def is_stop_requested(self):
+                return False
+
+            def query_barcode(self, barcode, log=None, output_dir=None):
+                self.batch_query_started.set()
+                self.release_batch_query.wait(2)
+                return True, f"{barcode}.html"
+
+            def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+                self.inbound_calls += 1
+                return True, {
+                    "rows": [dict(FIXED_ROW)],
+                    "page_counts": [{"page": 1, "row_count": 1}],
+                }
+
+        worker = BlockingQueryWorker()
+        batch_checked = threading.Event()
+        release_batch_check = threading.Event()
+        batch_done = threading.Event()
+        inbound_started = threading.Event()
+        inbound_done = threading.Event()
+        responses = {}
+        original_inbound_check = app_module._query_slot_has_running_inbound
+
+        def coordinate_inbound_check(slot_id):
+            if threading.current_thread().name == "batch-start":
+                batch_checked.set()
+                release_batch_check.wait(2)
+                return False
+            return original_inbound_check(slot_id)
+
+        batch_client = self._login("admin", "88293529")
+        inbound_client = self._login("admin", "88293529")
+
+        def start_batch():
+            responses["batch"] = batch_client.post(
+                "/api/crm/batch/start",
+                json={"slot_id": "query-2", "barcodes": ["7925000000001"]},
+            )
+            batch_done.set()
+
+        def start_inbound():
+            inbound_started.set()
+            responses["inbound"] = inbound_client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+            inbound_done.set()
+
+        batch_thread = threading.Thread(target=start_batch, name="batch-start")
+        inbound_thread = threading.Thread(target=start_inbound, name="inbound-start")
+        try:
+            with (
+                mock.patch.object(app_module, "_query_slot_has_running_inbound", side_effect=coordinate_inbound_check),
+                mock.patch.object(app_module.crm_pool, "query_slots", ["query-2"]),
+                mock.patch.object(app_module.crm_pool, "get", return_value=worker),
+                mock.patch.object(app_module, "_query_slot_cooldown_message", return_value=""),
+                mock.patch.object(app_module, "_query_slot_has_running_service_close", return_value=False),
+            ):
+                batch_thread.start()
+                self.assertTrue(batch_checked.wait(1))
+                inbound_thread.start()
+                self.assertTrue(inbound_started.wait(1))
+                inbound_finished_before_batch_claim = inbound_done.wait(0.1)
+                release_batch_check.set()
+                self.assertTrue(batch_done.wait(1))
+                self.assertTrue(worker.batch_query_started.wait(1))
+                self.assertTrue(inbound_done.wait(1))
+        finally:
+            release_batch_check.set()
+            worker.release_batch_query.set()
+            batch_thread.join(2)
+            inbound_thread.join(2)
+
+        self.assertFalse(inbound_finished_before_batch_claim)
+        self.assertTrue(responses["batch"].get_json()["success"])
+        self.assertEqual(responses["inbound"].status_code, 200)
+        self.assertTrue(responses["inbound"].get_json()["success"])
+        self.assertEqual(worker.inbound_calls, 1)
+
+    def test_start_reserves_slot_before_worker_runs_and_rejects_owner_conflict(self):
+        class BlockingWorker(FakeInboundWorker):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.reservation_seen = False
+
+            def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+                with app_module.inbound_job_lock:
+                    job_id = app_module.latest_inbound_job_by_slot.get(self.slot_id)
+                    job = app_module.inbound_jobs.get(job_id)
+                    self.reservation_seen = bool(job and job.get("running"))
+                self.started.set()
+                self.release.wait(2)
+                return super().extract_packing_slip(packing_slip_no, log, progress)
+
+        client = self._login("admin", "88293529")
+        worker = BlockingWorker()
+        try:
+            with mock.patch.object(
+                app_module,
+                "_select_idle_query_worker_desc",
+                return_value=(worker, worker.slot_id, "查询2", ""),
+            ):
+                first = client.post(
+                    "/api/inbound/start",
+                    json={"packing_slip_no": PACKING_SLIP_NO},
+                )
+                self.assertEqual(first.status_code, 200)
+                self.assertTrue(worker.started.wait(1))
+                self.assertTrue(worker.reservation_seen)
+
+                second = client.post(
+                    "/api/inbound/start",
+                    json={"packing_slip_no": PACKING_SLIP_NO},
+                )
+                self.assertEqual(second.status_code, 409)
+        finally:
+            worker.release.set()
+
+        self._wait_for_job(client, first.get_json()["job_id"])
+
+    def test_failed_job_has_error_without_download_url(self):
+        client = self._login("admin", "88293529")
+        error = "分页跳号：期望第 2 页，实际第 3 页"
+        worker = FakeInboundWorker(success=False, result=error)
+        with mock.patch.object(
+            app_module,
+            "_select_idle_query_worker_desc",
+            return_value=(worker, "query-2", "查询2", ""),
+        ):
+            started = client.post(
+                "/api/inbound/start",
+                json={"packing_slip_no": PACKING_SLIP_NO},
+            )
+        job_id = started.get_json()["job_id"]
+        status = self._wait_for_job(client, job_id)
+        self.assertTrue(status["done"])
+        self.assertFalse(status["success"])
+        self.assertEqual(status["stage"], "failed")
+        self.assertEqual(status["error"], error)
+        self.assertNotIn("download_url", status)
+
+    def test_reserved_inbound_slot_is_excluded_from_idle_query_workers(self):
+        class IdleWorker:
+            busy = False
+            logged_in = True
+            remembered_logged_in = True
+
+        with app_module.inbound_job_lock:
+            job = app_module._empty_inbound_job(
+                "admin", PACKING_SLIP_NO, "query-2", "查询2"
+            )
+            job["running"] = True
+            app_module.inbound_jobs[job["job_id"]] = job
+            app_module.latest_inbound_job_by_slot["query-2"] = job["job_id"]
+
+        with (
+            mock.patch.object(app_module.crm_pool, "query_slots", ["query-1", "query-2"]),
+            mock.patch.object(app_module.crm_pool, "get", return_value=IdleWorker()),
+            mock.patch.object(app_module, "_query_slot_has_running_batch", return_value=False),
+            mock.patch.object(app_module, "_query_slot_has_running_service_close", return_value=False),
+        ):
+            workers, error = app_module._select_idle_query_workers_desc()
+
+        self.assertEqual(error, "")
+        self.assertEqual([slot_id for _worker, slot_id, _label in workers], ["query-1"])
+
+
+if __name__ == "__main__":
+    unittest.main()

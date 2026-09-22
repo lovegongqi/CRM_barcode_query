@@ -4,10 +4,11 @@
         '/': ['⌕', '查询'],
         '/results': ['▤', '结果'],
         '/transfer': ['⇄', '移库'],
+        '/inbound': ['⇅', '入库'],
+        '/inventory': ['⌁', '盘点'],
         '/product-library': ['≋', '匹配'],
         '/accounts': ['⚙', '设置']
     };
-
     function escapeHtml(value) {
         return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -15,20 +16,22 @@
     }
 
     function navMeta(anchor) {
-        const path = new URL(anchor.href, location.origin).pathname;
+        const path = new URL(anchor.href, document.baseURI).pathname;
         if (path === '/' && anchor.textContent.includes('结果')) return ['▤', '结果'];
         return NAV[path] || ['•', anchor.textContent.trim()];
     }
 
     function enhanceNavigation() {
-        document.querySelectorAll('.page-nav a').forEach(anchor => {
-            if (anchor.dataset.auroraEnhanced) return;
-            const original = anchor.textContent.trim();
-            const [glyph, fallback] = navMeta(anchor);
-            anchor.dataset.auroraEnhanced = '1';
-            anchor.setAttribute('aria-label', original || fallback);
-            anchor.title = original || fallback;
-            anchor.innerHTML = `<span class="aurora-nav-glyph" aria-hidden="true">${escapeHtml(glyph)}</span><span class="aurora-nav-label">${escapeHtml(fallback)}</span>`;
+        document.querySelectorAll('.page-nav').forEach(nav => {
+            nav.querySelectorAll('a').forEach(anchor => {
+                if (anchor.dataset.auroraEnhanced) return;
+                const original = anchor.textContent.trim();
+                const [glyph, fallback] = navMeta(anchor);
+                anchor.dataset.auroraEnhanced = '1';
+                anchor.setAttribute('aria-label', original || fallback);
+                anchor.title = original || fallback;
+                anchor.innerHTML = `<span class="aurora-nav-glyph" aria-hidden="true">${escapeHtml(glyph)}</span><span class="aurora-nav-label">${escapeHtml(fallback)}</span>`;
+            });
         });
     }
 
@@ -116,7 +119,9 @@
     };
 
     document.addEventListener('keydown', event => {
-        if (event.key === 'Escape') closeAuroraLog();
+        if (event.key === 'Escape') {
+            closeAuroraLog();
+        }
     });
     document.addEventListener('DOMContentLoaded', () => {
         enhanceNavigation();

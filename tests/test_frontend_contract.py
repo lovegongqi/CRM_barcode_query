@@ -1,6 +1,9 @@
 import pathlib
 import re
+import subprocess
 import unittest
+
+from playwright.sync_api import sync_playwright
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -12,7 +15,10 @@ class FrontendContractTest(unittest.TestCase):
     page_templates = {
         "query": "crm.html",
         "results": "index.html",
+        "service-close": "service_close.html",
         "transfer": "transfer.html",
+        "inbound": "inbound.html",
+        "inventory": "inventory.html",
         "product-library": "product_library.html",
         "settings": "accounts.html",
         "login": "login.html",
@@ -58,10 +64,175 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("受理时间", results)
         self.assertIn("客户预约时间", results)
         self.assertIn("服务人员", results)
-        self.assertIn("<th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th>", results)
+        self.assertIn("<th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th>", results)
         self.assertNotIn("<th>型号</th>", results)
         self.assertNotIn("product.product_model", results)
         self.assertNotIn("service-close-summary-log", results)
+
+    def test_service_detail_can_query_and_compare_related_order_products(self):
+        """The service-detail UI must expose its order comparison workflow."""
+        html = self.source("index.html")
+        for text in (
+            "查询订单产品明细",
+            "订单数量",
+            "服务单数量",
+            "对比结果",
+            "startOrderProductQuery",
+            "pollOrderProductQuery",
+            "/order-products/start",
+            "/order-products/status",
+            "服务单缺少",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, html)
+
+    def test_close_management_resumes_order_product_query_after_reopening_detail(self):
+        html = self.source("service_close.html")
+        self.assertIn("async function resumeOrderProductQuery(serviceNo)", html)
+        self.assertIn("await resumeOrderProductQuery(serviceNo)", html)
+        self.assertIn("/order-products/status", html)
+
+    def test_close_management_deletes_individual_service_orders_not_batches(self):
+        html = self.source("service_close.html")
+        self.assertIn("data-history-service-no", html)
+        self.assertIn("/api/service-close/history/service/", html)
+
+    def test_service_detail_order_product_query_resumes_and_guards_modal_identity(self):
+        """A duplicate start must resume polling without updating a replaced modal."""
+        html = self.source("index.html")
+        self.assertRegex(
+            html,
+            r"response\.status\s*!==\s*409\s*&&\s*\(!response\.ok\s*\|\|\s*!data\.success\)",
+        )
+        self.assertIn("isCurrentServiceOrderDetail(serviceNo)", html)
+        self.assertIn("setTimeout(() => pollOrderProductQuery(serviceNo, jobId, generation), 1000)", html)
+        self.assertIn("resumeOrderProductQuery(serviceNo)", html)
+
+    def test_service_detail_polling_ignores_late_prior_lifecycle_for_same_service(self):
+        """A late poll from a closed modal cannot mutate its reopened replacement."""
+        html = self.source("index.html")
+        start = html.index("function isCurrentServiceOrderDetail(serviceNo)")
+        end = html.index("async function showServiceOrderDetail(serviceNo, detailUrl)", start)
+        polling_functions = html[start:end]
+        script = f"""
+const assert = require('assert');
+let serviceDetailCurrentServiceNo = 'FWD20260914001';
+let orderProductQueryTimer = null;
+let orderProductQueryServiceNo = '';
+let orderProductQueryJobId = '';
+let orderProductQueryPollInFlight = false;
+let orderProductQueryGeneration = 0;
+const modal = {{ classList: {{ contains: name => name === 'overlay-show' }} }};
+const button = {{ dataset: {{ serviceNo: 'FWD20260914001', originalText: '' }}, disabled: false, textContent: '查询订单产品明细' }};
+const document = {{
+  getElementById: () => modal,
+  querySelectorAll: () => [button],
+  querySelector: () => null,
+}};
+const timers = [];
+const clearedTimers = [];
+const setTimeout = callback => {{ timers.push(callback); return timers.length; }};
+const clearTimeout = timer => clearedTimers.push(timer);
+const pendingFetches = [];
+const fetch = () => new Promise(resolve => pendingFetches.push(resolve));
+const showToast = () => {{}};
+const renderServiceOrderDetail = () => {{}};
+{polling_functions}
+const response = data => ({{ ok: true, json: async () => data }});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+(async () => {{
+  startOrderProductQueryPolling('FWD20260914001', 'job-1');
+  assert.strictEqual(pendingFetches.length, 1);
+  stopOrderProductQueryPolling();
+  startOrderProductQueryPolling('FWD20260914001', 'job-1');
+  assert.strictEqual(pendingFetches.length, 2);
+  assert.strictEqual(orderProductQueryPollInFlight, true);
+
+  pendingFetches[0](response({{ running: true, stage: 'waiting' }}));
+  await flush();
+  await flush();
+  assert.strictEqual(timers.length, 0, 'late old poll must not schedule a timer');
+  assert.strictEqual(orderProductQueryPollInFlight, true, 'late old poll must not clear new in-flight state');
+
+  pendingFetches[1](response({{ running: true, stage: 'waiting' }}));
+  await flush();
+  await flush();
+  assert.strictEqual(timers.length, 1, 'only the current lifecycle schedules polling');
+  assert.strictEqual(orderProductQueryPollInFlight, false);
+}})().catch(error => {{ console.error(error.stack); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_service_detail_entry_requests_ignore_late_prior_lifecycle_for_same_service(self):
+        """Late start and recovery responses cannot replace a newer same-service poll."""
+        html = self.source("index.html")
+        start = html.index("function isCurrentServiceOrderDetail(serviceNo)")
+        end = html.index("async function showServiceOrderDetail(serviceNo, detailUrl)", start)
+        detail_functions = html[start:end]
+        script = f"""
+const assert = require('assert');
+const serviceNo = 'FWD20260914001';
+let serviceDetailCurrentServiceNo = serviceNo;
+let orderProductQueryTimer = null;
+let orderProductQueryServiceNo = '';
+let orderProductQueryJobId = '';
+let orderProductQueryPollInFlight = false;
+let orderProductQueryGeneration = 0;
+const modal = {{ classList: {{ contains: name => name === 'overlay-show' }} }};
+const button = {{ dataset: {{ serviceNo, originalText: '' }}, disabled: false, textContent: '查询订单产品明细' }};
+const document = {{ getElementById: () => modal, querySelectorAll: () => [button], querySelector: () => null }};
+const timers = [];
+const setTimeout = callback => {{ timers.push(callback); return timers.length; }};
+const clearTimeout = () => {{}};
+const pendingFetches = [];
+const fetch = () => new Promise(resolve => pendingFetches.push(resolve));
+const showToast = () => {{}};
+const renderServiceOrderDetail = () => {{}};
+{detail_functions}
+const response = data => ({{ ok: true, status: 200, json: async () => data }});
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServiceNo = serviceNo; }};
+(async () => {{
+  startOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 1);
+  reopen();
+  startOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 2);
+  pendingFetches[1](response({{ success: true, job_id: 'new-start' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'new start owns its status poll');
+  pendingFetches[0](response({{ success: true, job_id: 'old-start' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'late start must not replace the new poll');
+
+  pendingFetches.length = 0;
+  reopen();
+  resumeOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 1);
+  reopen();
+  resumeOrderProductQuery(serviceNo);
+  assert.strictEqual(pendingFetches.length, 2);
+  pendingFetches[1](response({{ running: true, job_id: 'new-resume', stage: 'waiting' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'new recovery owns its status poll');
+  pendingFetches[0](response({{ running: true, job_id: 'old-resume', stage: 'waiting' }}));
+  await flush(); await flush();
+  assert.strictEqual(pendingFetches.length, 3, 'late recovery must not replace the new poll');
+}})().catch(error => {{ console.error(error.stack); process.exit(1); }});
+"""
+        result = subprocess.run(
+            ["node", "-e", script],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_results_page_can_export_service_orders_in_install_template(self):
         results = self.source("index.html")
@@ -69,6 +240,73 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("function exportServiceOrdersXlsx()", results)
         self.assertIn("fetch('/api/service-orders/export/xlsx'", results)
         self.assertIn("getSelectedBarcodeArray()", results)
+
+    def test_results_and_close_management_expose_the_two_workspace_links(self):
+        results = self.source("index.html")
+        close_management = self.source("service_close.html")
+        for source in (results, close_management):
+            self.assertIn('href="/">条码列表</a>', source)
+            self.assertIn('href="/service-close">结单管理</a>', source)
+        self.assertIn('id="serviceCloseBtn"', results)
+        self.assertIn('onclick="batchCloseServiceOrders()"', results)
+        self.assertNotIn('id="serviceCloseBtn"', close_management)
+        self.assertNotIn('id="serviceCloseBarcodeList"', close_management)
+
+    def test_close_management_uses_the_service_detail_modal_instead_of_new_tabs(self):
+        close_management = self.source("service_close.html")
+        self.assertIn('id="detailModal"', close_management)
+        self.assertIn('function showServiceOrderDetail(serviceNo, detailUrl)', close_management)
+        self.assertIn('onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)"', close_management)
+        self.assertNotIn('target="_blank"', close_management)
+
+    def test_results_redirect_to_close_management_after_starting_a_close_job(self):
+        results = self.source("index.html")
+        start_index = results.index("async function batchCloseServiceOrders()")
+        close_index = results.index("function openDetailDocument", start_index)
+        batch_close = results[start_index:close_index]
+        self.assertIn("window.location.assign('/service-close')", batch_close)
+        self.assertNotIn("btn.disabled = true", batch_close)
+        self.assertNotIn("renderServiceCloseStatuses", batch_close)
+
+    def test_results_does_not_restore_an_old_close_job_and_disable_new_submissions(self):
+        """Close progress belongs to the management page, not a stale list-page session."""
+        results = self.source("index.html")
+        self.assertNotIn("function restoreServiceCloseJob()", results)
+        self.assertIn("clearSavedServiceCloseJob();\n        setInterval(() => loadAllData(false)", results)
+
+    def test_close_management_uses_one_expanded_newest_first_record_panel(self):
+        close_management = self.source("service_close.html")
+        self.assertIn('<h2>结单记录</h2>', close_management)
+        self.assertNotIn('<h2>本次结单</h2>', close_management)
+        self.assertNotIn('<h2>结单历史</h2>', close_management)
+        self.assertNotIn('<details>', close_management)
+        self.assertIn('records.unshift(currentRecord)', close_management)
+
+    def test_close_management_shows_live_order_product_query_progress(self):
+        close_management = self.source("service_close.html")
+        for token in (
+            "function setOrderProductQueryStatus",
+            "data.message",
+            "data.elapsed",
+            "等待通道…",
+            "service-detail-order-attempt is-live",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, close_management)
+
+    def test_close_management_shows_service_order_link_before_product_lookup(self):
+        close_management = self.source("service_close.html")
+        self.assertIn(
+            "const directOrderNo = fieldValue(fields,['关联订单','关联订单号','订单号','销售订单号']);",
+            close_management,
+        )
+        self.assertIn("detail.order_lookup?.order_no || directOrderNo", close_management)
+
+    def test_results_filters_keep_native_dates_and_four_desktop_columns(self):
+        results = self.source("index.html")
+        self.assertIn('grid-template-columns: repeat(4, minmax(0, 1fr))', results)
+        self.assertIn('input type="date" id="dateStart"', results)
+        self.assertIn('input type="date" id="dateEnd"', results)
 
     def test_service_order_detail_matches_the_dark_workspace_theme(self):
         results = self.source("index.html")
@@ -103,6 +341,15 @@ class FrontendContractTest(unittest.TestCase):
             r"\.aurora-logo\s*\{[^}]*width:\s*38px;[^}]*height:\s*38px",
         )
 
+    def test_close_management_title_reserves_space_for_the_logo(self):
+        """The close-management title must not render underneath the shared logo."""
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertIn('body[data-aurora-page="service-close"] .app-header > .app-title', css)
+        self.assertRegex(
+            css,
+            r'body\[data-aurora-page="service-close"\] \.app-header > \.app-title\s*\{[^}]*padding-left:\s*76px',
+        )
+
     def test_settings_query_channel_options_wrap(self):
         settings = self.source("accounts.html")
         self.assertRegex(
@@ -126,7 +373,7 @@ class FrontendContractTest(unittest.TestCase):
             r"body\[data-aurora-page\]\s*\{[^}]*overflow-x:\s*hidden",
         )
 
-    def test_mobile_results_actions_use_equal_three_column_grid(self):
+    def test_mobile_results_actions_use_equal_five_column_grid(self):
         results = self.source("index.html")
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         before_mobile, mobile_css, after_mobile = self.media_block(css, 640)
@@ -143,11 +390,19 @@ class FrontendContractTest(unittest.TestCase):
             self.assertNotIn(selector, after_mobile)
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)\)',
+            r'body\[data-aurora-page="results"\] \.action-groups\s*\{[^}]*display:\s*grid[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)',
         )
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*11px[^}]*white-space:\s*nowrap',
+            r'body\[data-aurora-page="results"\] \.action-groups \.btn\s*\{[^}]*width:\s*100%[^}]*font-size:\s*9px[^}]*white-space:\s*normal',
+        )
+
+    def test_mobile_results_filters_use_equal_two_column_grid(self):
+        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        _before_mobile, mobile_css, _after_mobile = self.media_block(css, 640)
+        self.assertRegex(
+            mobile_css,
+            r'body\[data-aurora-page="results"\] \.filter-area\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)',
         )
 
     def test_mobile_results_stats_stay_in_one_equal_three_column_row(self):
@@ -386,13 +641,24 @@ class FrontendContractTest(unittest.TestCase):
         )
 
     def test_every_work_page_uses_the_shared_tool_account_logout_button(self):
+        # /inbound is intentionally excluded: the inbound workspace keeps the
+        # user on the page through long GYJ login flows, so the logout link
+        # is suppressed there to avoid competing for screen real estate.
         for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
             with self.subTest(filename=filename):
-                self.assertIn("aurora-account-logout", self.source(filename))
+                self.assertIn('class="aurora-account-logout"', self.source(filename))
+        # inbound.html MUST omit the logout link. We assert the actual link
+        # element is gone rather than the bare class name (the CSS rule
+        # and the container <div> are still present, but neither contains a
+        # <a href="/logout">).
+        self.assertNotIn('class="aurora-account-logout" href="/logout"', self.source("inbound.html"))
+        self.assertNotIn('href="/logout"', self.source("inbound.html"))
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertIn(".aurora-account-logout", css)
 
     def test_every_work_page_places_plain_username_before_logout(self):
+        # /inbound is excluded because the logout link is intentionally hidden
+        # there (see test_inbound_does_not_render_the_tool_account_logout_link).
         filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
         for filename in filenames:
             with self.subTest(filename=filename):
@@ -403,12 +669,17 @@ class FrontendContractTest(unittest.TestCase):
                 self.assertNotIn("当前工具账号", source)
                 self.assertNotIn("工具账号：", source)
                 self.assertNotIn("（管理员）", source)
+        # /inbound still has the username but no logout button.
+        inbound = self.source("inbound.html")
+        self.assertIn('class="aurora-account-session"', inbound)
+        self.assertIn('class="aurora-account-name"', inbound)
+        self.assertNotIn('class="aurora-account-logout"', inbound)
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         self.assertRegex(css, r"\.aurora-account-session\s*\{[^}]*display:\s*inline-flex")
         self.assertRegex(css, r"\.aurora-account-name\s*\{[^}]*text-overflow:\s*ellipsis")
 
     def test_tool_account_controls_use_compact_status_rows(self):
-        filenames = ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html")
+        filenames = ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html")
         for filename in filenames:
             with self.subTest(filename=filename):
                 source = self.source(filename)
@@ -432,6 +703,31 @@ class FrontendContractTest(unittest.TestCase):
             css,
             r'body\[data-aurora-page="results"\] \.aurora-results-grid\s*\{[^}]*max-height:[^;}]+;[^}]*overflow-y:\s*auto',
         )
+
+    def test_inventory_audit_card_fits_inside_its_dialog(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        audit_rule = re.search(r"\.inventory-audit-card\s*\{([^}]*)\}", css, re.S)
+        event_rule = re.search(r"\.inventory-audit-event\s*\{([^}]*)\}", css, re.S)
+        span_rule = re.search(
+            r"\.inventory-audit-event\s+span\s*\{([^}]*)\}",
+            css,
+            re.S,
+        )
+        code_rule = re.search(
+            r"\.inventory-audit-event\s+code\s*\{([^}]*)\}",
+            css,
+            re.S,
+        )
+        self.assertIsNotNone(audit_rule)
+        self.assertIsNotNone(event_rule)
+        self.assertIsNotNone(span_rule)
+        self.assertIsNotNone(code_rule)
+        self.assertRegex(audit_rule.group(1), r"max-width:\s*100%")
+        self.assertRegex(event_rule.group(1), r"min-width:\s*0")
+        self.assertRegex(event_rule.group(1), r"overflow-wrap:\s*anywhere")
+        for value_rule in (span_rule, code_rule):
+            self.assertRegex(value_rule.group(1), r"min-width:\s*0")
+            self.assertRegex(value_rule.group(1), r"overflow-wrap:\s*anywhere")
 
     def test_work_pages_share_one_desktop_bottom_baseline(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
@@ -470,6 +766,61 @@ class FrontendContractTest(unittest.TestCase):
             r'body\[data-aurora-page="settings"\] \.settings-primary-grid\s*\{[^}]*grid-template-columns:',
         )
 
+    def test_settings_gyj_channel_card_spans_row_without_desktop_overflow(self):
+        template = self.source("accounts.html")
+        inline_css = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
+        aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 1106, "height": 1024})
+                page.set_content(
+                    f"""
+                    <style>{inline_css}\n{aurora_css}</style>
+                    <body data-aurora-page="settings">
+                      <div class="container">
+                        <div class="settings-primary-grid">
+                          <div class="card"></div>
+                          <div class="card"></div>
+                          <div class="card" id="gyjChannelCard">
+                            <h2 class="gyj-card-heading"><span>GYJ 五通道登录</span><strong>GYJ 已登录 1/5</strong></h2>
+                            <div class="gyj-channel-tabs">
+                              <button class="gyj-channel-tab">通道 1<small>已登录</small></button>
+                              <button class="gyj-channel-tab">通道 2<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 3<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 4<small>未启动</small></button>
+                              <button class="gyj-channel-tab">通道 5<small>未启动</small></button>
+                            </div>
+                            <div class="gyj-login-grid">
+                              <div><label>GYJ 账号</label><input value="jxtl"></div>
+                              <div><label>GYJ 密码</label><input placeholder="已记住时可留空"></div>
+                              <label class="remember-inline"><input type="checkbox"> 记住账号密码</label>
+                              <button class="btn btn-primary">重新登录所选通道</button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </body>
+                    """
+                )
+                grid = page.locator(".settings-primary-grid").bounding_box()
+                card = page.locator("#gyjChannelCard").bounding_box()
+                overflow = page.locator("#gyjChannelCard").evaluate(
+                    "element => element.scrollWidth - element.clientWidth"
+                )
+                self.assertAlmostEqual(card["x"], grid["x"], delta=1)
+                self.assertAlmostEqual(card["width"], grid["width"], delta=1)
+                self.assertLessEqual(overflow, 0)
+            finally:
+                browser.close()
+
+    def test_settings_page_cache_busts_aurora_layout_css(self):
+        self.assertIn(
+            '/static/aurora.css{{ aurora_css_v }}',
+            self.source("accounts.html"),
+        )
+
     def test_settings_bulk_login_buttons_show_each_slot_latest_message(self):
         template = self.source("accounts.html")
         self.assertIn("mergeBulkCrmSlotProgress(data.slots || [])", template)
@@ -493,10 +844,672 @@ class FrontendContractTest(unittest.TestCase):
             source.index("'permission': 'crm'"),
             source.index("'permission': 'results'"),
             source.index("'permission': 'transfer'"),
+            source.index("'permission': 'inbound'"),
+            source.index("'permission': 'inventory'"),
             source.index("'permission': 'product-library'"),
             source.index("'permission': 'accounts'"),
         ]
         self.assertEqual(positions, sorted(positions))
+
+    def test_inbound_page_exposes_extraction_and_download_contract(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "packingSlipInput",
+            "startInboundBtn",
+            "inboundStage",
+            "inboundSlot",
+            "inboundCurrentPage",
+            "inboundLogs",
+            "inboundSummary",
+            "inboundPageCounts",
+            "inboundWarnings",
+            "inboundProducts",
+            "downloadInboundBtn",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in (
+            "startInboundExtraction",
+            "pollInboundStatus",
+            "renderInboundStatus",
+            "renderInboundResult",
+            "downloadInboundXlsx",
+        ):
+            with self.subTest(function_name=function_name):
+                self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/start'", inbound)
+        self.assertIn("fetch('/api/inbound/status?'", inbound)
+        self.assertIn("sessionStorage.getItem('inbound_job_id')", inbound)
+        self.assertIn("sessionStorage.setItem('inbound_job_id'", inbound)
+        self.assertIn("sessionStorage.removeItem('inbound_job_id')", inbound)
+        self.assertIn("params.set('latest', '1')", inbound)
+        self.assertRegex(inbound, r"response\.status === 404[\s\S]*pollInboundStatus\(true\)")
+        self.assertIn("let activeJobAccepted = false", inbound)
+        self.assertIn("if (!activeJobAccepted)", inbound)
+        self.assertRegex(
+            inbound,
+            r"visibilitychange[\s\S]*if \(!document\.hidden\)[\s\S]*restoreInboundJob\(\)",
+        )
+        self.assertIn("document.hidden", inbound)
+
+    def test_inbound_page_exposes_shared_gyj_status_and_plain_save_flow(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "crmPackingTab", "gyjPurchaseTab", "crmPackingWorkspace",
+            "gyjPurchaseWorkspace", "gyjLoginBtn", "gyjStartBtn",
+            "gyjSelection", "gyjSelectionPackingSlip",
+            "gyjLogs", "gyjResult",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in (
+            "selectInboundWorkspace", "checkGYJLoginStatus",
+            "renderGYJSelection", "hasGYJSelection",
+            "collectGYJSelection",
+            "startGYJPurchaseInbound", "pollGYJInboundStatus",
+        ):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/slots'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/start'", inbound)
+        self.assertIn("fetch('/api/inbound/gyj/status?'", inbound)
+        self.assertIn("selected_items", inbound)
+        self.assertIn('onchange="updateGYJStartButton()"', inbound)
+        self.assertIn("const hasSelection = hasGYJSelection()", inbound)
+        self.assertNotIn('id="openAccountLoginBtn"', inbound)
+        self.assertNotIn('id="accountLoginModal"', inbound)
+        self.assertIn("昆山怡口净水系统有限公司", inbound)
+        self.assertIn("江西天麓", inbound)
+        self.assertIn("沈桥仓", inbound)
+        self.assertNotIn('id="gyjStage"', inbound)
+        self.assertNotIn('id="gyjProgress"', inbound)
+
+    def test_gyj_inbound_history_uses_order_number_and_expandable_details(self):
+        inbound = self.source("inbound.html")
+        for element_id in (
+            "gyjInboundHistoryTab", "gyjInboundHistoryWorkspace",
+            "gyjInboundHistory", "gyjInboundHistoryList",
+        ):
+            self.assertIn(f'id="{element_id}"', inbound)
+        self.assertIn("function loadGYJInboundHistory", inbound)
+        self.assertIn("function renderGYJInboundHistory", inbound)
+        self.assertIn("/api/inbound/gyj/history", inbound)
+        self.assertIn("record.order_no", inbound)
+        self.assertIn("record.packing_slip_no", inbound)
+        self.assertIn("record.actor", inbound)
+        self.assertIn("<details", inbound)
+
+    def test_gyj_inbound_history_is_a_dedicated_top_level_workspace(self):
+        inbound = self.source("inbound.html")
+        inline_script = re.findall(r"<script>(.*?)</script>", inbound, re.S)[-1]
+        markup = re.sub(r"<script\b.*?</script>", "", inbound, flags=re.S)
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(markup)
+                page.evaluate(
+                    """
+                    Object.defineProperty(window, 'sessionStorage', {value: {
+                        getItem: () => null,
+                        setItem: () => {},
+                        removeItem: () => {}
+                    }});
+                    window.requestedUrls = [];
+                    window.fetch = async url => {
+                        window.requestedUrls.push(String(url));
+                        return {ok: true, json: async () => ({success: true, records: []})};
+                    };
+                    """
+                )
+                page.add_script_tag(content=inline_script)
+
+                self.assertEqual(
+                    page.locator("#gyjInboundHistoryTab").evaluate(
+                        "element => element.parentElement.className"
+                    ),
+                    "inbound-workspace-tabs",
+                )
+                page.evaluate("selectInboundWorkspace('history')")
+                page.wait_for_function(
+                    "window.requestedUrls.includes('/api/inbound/gyj/history')"
+                )
+
+                self.assertTrue(page.locator("#crmPackingWorkspace").evaluate("el => el.hidden"))
+                self.assertTrue(page.locator("#gyjPurchaseWorkspace").evaluate("el => el.hidden"))
+                self.assertFalse(page.locator("#gyjInboundHistoryWorkspace").evaluate("el => el.hidden"))
+                self.assertEqual(
+                    page.locator("#gyjInboundHistoryTab").get_attribute("aria-selected"),
+                    "true",
+                )
+            finally:
+                browser.close()
+
+    def test_gyj_inbound_history_delete_is_visible_and_sent_only_for_admin(self):
+        inbound = self.source("inbound.html")
+        inline_script = re.findall(r"<script>(.*?)</script>", inbound, re.S)[-1]
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page()
+                page.set_content('<div id="gyjInboundHistoryList"></div>')
+                page.evaluate(
+                    """
+                    window.confirm = () => true;
+                    window.requestedHistoryDeletes = [];
+                    window.fetch = async (url, options = {}) => {
+                        if (options.method === 'DELETE') {
+                            window.requestedHistoryDeletes.push(String(url));
+                        }
+                        return {
+                            ok: true,
+                            json: async () => ({success: true, records: [], can_delete: true})
+                        };
+                    };
+                    """
+                )
+                page.add_script_tag(content=inline_script)
+                record = {
+                    "order_no": "CGRK00001849380",
+                    "packing_slip_no": "SH202608140032",
+                    "actor": "admin",
+                    "saved_at": "2026-09-09 17:47:58",
+                    "products": [],
+                }
+
+                page.evaluate("record => renderGYJInboundHistory([record], false)", record)
+                self.assertEqual(page.locator(".gyj-inbound-history-delete").count(), 0)
+
+                page.evaluate("record => renderGYJInboundHistory([record], true)", record)
+                self.assertEqual(page.locator(".gyj-inbound-history-delete").count(), 1)
+                page.locator(".gyj-inbound-history-delete").click()
+                page.wait_for_function("window.requestedHistoryDeletes.length === 1")
+                self.assertEqual(
+                    page.evaluate("window.requestedHistoryDeletes[0]"),
+                    "/api/inbound/gyj/history/CGRK00001849380",
+                )
+            finally:
+                browser.close()
+
+    def test_settings_gyj_login_uses_backend_credentials_contract(self):
+        inbound = self.source("accounts.html")
+        for element_id in ("gyjUsername", "gyjPassword", "gyjRememberLogin", "gyjCaptcha"):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', inbound)
+        for function_name in ("loadGyjCredentials", "startGyjChannelLogin", "submitGyjCaptcha"):
+            self.assertIn(f"function {function_name}", inbound)
+        self.assertIn("fetch('/api/gyj/credentials'", inbound)
+        self.assertIn("fetch('/api/gyj/login/captcha'", inbound)
+        self.assertIn("slot_id: selectedGyjSlotId", inbound)
+
+    def test_settings_gyj_captcha_preview_can_be_refreshed_without_storage(self):
+        inbound = self.source("accounts.html")
+        self.assertIn('id="gyjCaptchaImage"', inbound)
+        self.assertIn("function refreshGyjCaptcha", inbound)
+        self.assertIn("'/api/gyj/captcha-preview?'", inbound)
+        self.assertNotIn("gyj_captcha_image", inbound)
+
+    def test_settings_gyj_captcha_preview_hides_empty_response(self):
+        inbound = self.source("accounts.html")
+
+        self.assertIn("String(data.captcha_image || '').startsWith('data:image/')", inbound)
+        self.assertIn("image.removeAttribute('src');", inbound)
+
+    def test_inbound_page_escapes_crm_values_and_uses_server_side_download(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function escapeHtml", inbound)
+        self.assertIn("result.items || []", inbound)
+        self.assertIn("item.serials || []", inbound)
+        self.assertIn("data.page_counts || []", inbound)
+        self.assertIn("result.duplicate_serials || []", inbound)
+        self.assertIn("data.done && data.success && data.download_url", inbound)
+        self.assertIn("new URL(inboundDownloadUrl, window.location.origin)", inbound)
+        self.assertIn("url.origin !== window.location.origin", inbound)
+        self.assertNotIn("result.rows", inbound)
+        self.assertNotIn("JSON.stringify(inbound", inbound)
+
+    def test_inbound_page_clears_stale_result_surfaces_for_new_and_failed_jobs(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function clearInboundResultSurfaces()", inbound)
+        self.assertRegex(
+            inbound,
+            r"function startInboundExtraction\(\)[\s\S]*?clearInboundResultSurfaces\(\)[\s\S]*?fetch\('/api/inbound/start'",
+        )
+        self.assertRegex(
+            inbound,
+            r"if \(data\.done\)[\s\S]*?data\.success && data\.result[\s\S]*?clearInboundResultSurfaces\(\)",
+        )
+
+    def test_inbound_stale_job_fallback_stops_polling_when_no_latest_job_exists(self):
+        inbound = self.source("inbound.html")
+        self.assertRegex(
+            inbound,
+            r"if \(preferLatest && !data\.job_id\)\s*\{[\s\S]*?clearInterval\(inboundPollTimer\)[\s\S]*?inboundPollTimer = null;[\s\S]*?return;",
+        )
+
+    def test_shared_navigation_has_inventory_permission_and_responsive_columns(self):
+        settings = self.source("accounts.html")
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+        layout_css = (STATIC / "app_layout.css").read_text(encoding="utf-8")
+        aurora_css = (STATIC / "aurora.css").read_text(encoding="utf-8")
+        self.assertRegex(settings, r'<input type="checkbox" value="inbound">\s*入库')
+        self.assertRegex(settings, r'<input type="checkbox" value="inventory">\s*盘点')
+        self.assertIn("'/inbound':", aurora)
+        self.assertIn("'/inventory':", aurora)
+        self.assertRegex(layout_css, r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)")
+        # aurora.css declares .page-nav twice (desktop + mobile media query).
+        # Both must use auto-fit so limited-permission accounts don’t end up
+        # with a row of empty cells on the right.
+        self.assertNotIn(
+            "grid-template-columns: repeat(6, minmax(0, 1fr))",
+            aurora_css,
+            "the legacy 6-column .page-nav rule must not be present once we switched to auto-fit",
+        )
+        # aurora.css declares .page-nav twice (desktop + mobile media query).
+        # desktop uses grid auto-fit; mobile switched to flex because grid
+        # auto-fit at min 64px overflowed a 430px phone with 6 admin tabs.
+        # Either layout is acceptable; what matters is the legacy 6-column
+        # grid is gone, so low-permission accounts don't show empty cells.
+        desktop_auto_fit = re.search(
+            r"\.page-nav\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(\d+px,\s*1fr\)\)",
+            aurora_css,
+        )
+        mobile_flex = re.search(
+            r"\.page-nav\s*\{[^}]*display:\s*flex\s*!important\s*;[^}]*flex-wrap:\s*nowrap",
+            aurora_css,
+        )
+        self.assertTrue(
+            desktop_auto_fit or mobile_flex,
+            "aurora.css must declare either an auto-fit grid OR a flex .page-nav so the nav row adapts to the number of visible tabs",
+        )
+
+    def test_inventory_page_has_live_count_contract_and_no_price_copy(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for token in (
+            'id="inventoryTaskSummary"', 'id="inventorySearch"',
+            'id="inventoryFilters"', 'id="inventoryCategoryFilter"',
+            'id="inventoryItems"',
+            'id="inventoryCountDialog"', 'id="inventoryGyjStatus"',
+            "pollInventoryTask", "renderInventoryItems", "openCountItem",
+            "renderCountEntries", "addCountEntry", "updateCountEntry",
+            "deleteCountEntry", "refreshGyjStatusButton",
+            'id="inventoryCompleteTask"',
+            'id="inventoryCompletionConfirmDialog"',
+            'id="inventoryCompletionConfirm"',
+            'id="inventoryAuditDialog"',
+            "reopenInventoryTask", "renderInventoryAudit",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source + script)
+        for forbidden in ("成本价", "采购价", "零售价", "销售价", "库存金额"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source + script)
+
+    def test_inventory_has_category_filter(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn('id="inventoryCategoryFilter"', source)
+        self.assertIn("renderInventoryCategories", script)
+        self.assertIn("inventoryCategoryMatches", script)
+
+    def test_inventory_camera_uses_local_pinned_decoder(self):
+        source = self.source("inventory.html")
+        vendor = STATIC / "vendor" / "zxing-browser-0.2.1.min.js"
+        license_file = STATIC / "vendor" / "zxing-browser-LICENSE.txt"
+        self.assertTrue(vendor.is_file())
+        self.assertGreater(vendor.stat().st_size, 400_000)
+        self.assertIn("MIT License", license_file.read_text(encoding="utf-8"))
+        decoder_script = '<script defer src="/static/vendor/zxing-browser-0.2.1.min.js"></script>'
+        inventory_script = '<script defer src="/static/inventory.js{{ inventory_js_v }}"></script>'
+        self.assertIn(decoder_script, source)
+        self.assertLess(source.index(decoder_script), source.index(inventory_script))
+        self.assertNotRegex(source, r"https?://[^\"']*(?:zxing|unpkg|jsdelivr)")
+        for element_id in (
+            "inventoryCameraStart", "inventoryCameraStop", "inventoryCameraPanel",
+            "inventoryCameraVideo", "inventoryCameraMessage", "inventoryCameraDetails",
+            "inventoryCameraZoomControls", "inventoryCameraZoom1", "inventoryCameraZoom2",
+            "inventoryCameraZoom3", "inventoryCameraZoom5",
+        ):
+            with self.subTest(element_id=element_id):
+                self.assertIn(f'id="{element_id}"', source)
+
+    def test_inventory_camera_zoom_buttons_are_mobile_touch_sized(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{self.source('../static/inventory.css')}</style>
+                    <div class="inventory-camera-panel">
+                      <div class="inventory-camera-zoom-controls">
+                        <button type="button">5×</button>
+                      </div>
+                    </div>
+                    """
+                )
+                box = page.locator(".inventory-camera-zoom-controls button").bounding_box()
+                self.assertGreaterEqual(box["width"], 44)
+                self.assertGreaterEqual(box["height"], 44)
+            finally:
+                browser.close()
+
+    def test_inventory_card_keeps_cache_and_state_badges_in_right_control_stack(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 430, "height": 932})
+                page.set_content(
+                    f"""
+                    <style>{css}</style>
+                    <select id="inventoryFilters"><option value="all">全部</option></select>
+                    <input id="inventorySearch" value="">
+                    <div id="inventoryItems"></div>
+                    """
+                )
+                page.add_script_tag(content=script)
+                page.evaluate(
+                    """
+                    renderInventoryItems([{
+                        barcode: '926019505',
+                        name: 'CTO滤芯测试商品',
+                        has_serial: true,
+                        serial_synced_at: '2026-09-09T17:00:00',
+                        serial_expected_count: 1277,
+                        state: 'serial_pending',
+                        book_qty: 1277,
+                        actual_qty: 0,
+                        diff_qty: -1277
+                    }]);
+                    """
+                )
+
+                card = page.locator(".inventory-item").bounding_box()
+                controls = page.locator(".inventory-item-top-actions").bounding_box()
+                self.assertEqual(
+                    page.locator(".inventory-item-top-actions .inventory-serial-cache-badge").inner_text(),
+                    "序列号已缓存 1277",
+                )
+                self.assertEqual(
+                    page.locator(".inventory-item-top-actions .inventory-state-badge").inner_text(),
+                    "待序列号",
+                )
+                self.assertLessEqual(
+                    abs((controls["x"] + controls["width"]) - (card["x"] + card["width"] - 10)),
+                    2,
+                )
+            finally:
+                browser.close()
+
+    def test_inventory_script_uses_exact_live_endpoints_and_timing(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for endpoint in (
+            "/api/inventory/tasks/active",
+            "/count-entries",
+            "/api/gyj/slots",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIn(endpoint, script)
+        self.assertIn("localStorage.getItem(INVENTORY_DEVICE_KEY)", script)
+        self.assertIn("localStorage.setItem(INVENTORY_DEVICE_KEY", script)
+        self.assertIn("crypto.randomUUID()", script)
+        self.assertRegex(script, r"setInterval\(pollInventoryTask,\s*1000\)")
+        self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
+        self.assertIn("params.set('version'", script)
+        self.assertIn("params.set('query'", script)
+        self.assertIn("event.key === 'Enter'", script)
+        self.assertIn("item.barcode === query", script)
+        self.assertIn("function decimalDifferenceText", script)
+        self.assertIn("BigInt", script)
+        self.assertNotIn("parseFloat", script)
+        self.assertIn("item.count_expression", script)
+        self.assertIn("可立即录入实盘数量，账面库存由后台自动更新", script)
+        self.assertNotIn("sendInventoryHeartbeat", script)
+
+    def test_inventory_renders_allowlisted_fields_without_html_injection(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for field in (
+            "item.barcode", "item.name", "item.spec", "item.model",
+            "item.category", "item.unit", "item.has_serial",
+            "item.latest_book_qty", "item.completed_actual_qty",
+            "item.diff_qty", "item.state",
+            "item.updated_at",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, script)
+        for label in ("商品总数", "已完成", "待盘点", "数量一致", "盘盈", "盘亏", "待序列号"):
+            with self.subTest(label=label):
+                self.assertIn(label, source + script)
+        self.assertNotIn("innerHTML", script)
+        self.assertNotIn("接口未提供", script)
+        self.assertIn("task.participant_count", script)
+        self.assertIn("task.product_total", script)
+        self.assertIn("task.quantity_difference_count", script)
+        self.assertIn("task.serial_difference_count", script)
+        self.assertIn('tabindex="0"', source)
+        self.assertIn('tabindex="-1"', source)
+        self.assertNotIn("insertAdjacentHTML", script)
+        self.assertNotIn("JSON.stringify(data", script)
+        self.assertNotIn("JSON.stringify(item", script)
+
+    def test_inventory_marks_catalog_data_errors_as_not_countable(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn("item.data_error", script)
+        self.assertIn("资料异常", script)
+        self.assertIn("不可盘", script)
+
+    def test_inventory_dialogs_are_accessible_keyboard_and_mobile_ready(self):
+        source = self.source("inventory.html")
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertRegex(source, r'<dialog[^>]+id="inventoryCountDialog"[^>]+aria-labelledby="inventoryCountDialogTitle"')
+        self.assertNotIn('id="inventoryGyjLoginDialog"', source)
+        self.assertIn('aria-live="polite"', source)
+        self.assertIn('inputmode="decimal"', source)
+        self.assertIn("@media (max-width: 720px)", css)
+        self.assertIn("min-height: 44px", css)
+
+    def test_inventory_mobile_summary_cards_are_compact(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 720px)", 1)[1]
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-summary\s*\{[^}]*grid-template-columns:\s*repeat\(8,\s*minmax\(0,\s*1fr\)\)",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-serial-counts\s*\{[^}]*grid-template-columns:\s*repeat\(5,\s*minmax\(0,\s*1fr\)\)",
+        )
+        self.assertRegex(mobile_css, r"\.inventory-summary-card\s*\{[^}]*padding:\s*6px\s+2px")
+        self.assertRegex(
+            mobile_css,
+            r"\.inventory-serial-counts \.inventory-metric\s*\{[^}]*padding:\s*6px\s+4px",
+        )
+
+    def test_inventory_gyj_captcha_accepts_alphanumeric_codes(self):
+        source = self.source("accounts.html")
+        self.assertRegex(
+            source,
+            r'<input id="gyjCaptcha"[^>]+inputmode="text"[^>]+autocapitalize="off"',
+        )
+
+    def test_gyj_login_management_is_centralized_in_settings(self):
+        accounts = self.source("accounts.html")
+        inventory = self.source("inventory.html")
+        inbound = self.source("inbound.html")
+
+        self.assertIn('id="gyjChannelCard"', accounts)
+        self.assertIn('href="/accounts#gyjChannelCard"', inventory)
+        self.assertIn('href="/accounts#gyjChannelCard"', inbound)
+        for duplicate_id in (
+            "inventoryGyjUsername", "inventoryGyjPassword", "inventoryGyjCaptcha",
+            "gyjUsername", "gyjPassword", "gyjCaptcha",
+        ):
+            with self.subTest(duplicate_id=duplicate_id):
+                self.assertNotIn(f'id="{duplicate_id}"', inventory + inbound)
+        self.assertIn("GYJ 已登录 ${loggedInCount}/5", accounts)
+        self.assertIn("GYJ 已登录 ${loggedInCount}/5", inventory + inbound)
+
+    def test_inbound_gyj_captcha_accepts_alphanumeric_codes(self):
+        source = self.source("inbound.html")
+        self.assertNotIn('id="gyjCaptcha"', source)
+
+    def test_inventory_has_shared_gyj_status_and_cache_busted_assets(self):
+        source = self.source("inventory.html")
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn('id="inventoryGyjStatus"', source)
+        self.assertNotIn('id="inventoryGyjLoginButton"', source)
+        self.assertNotIn("查询通道", source)
+        self.assertIn("CURRENT_ACCOUNT.is_admin", source)
+        self.assertIn('/static/inventory.css{{ inventory_css_v }}', source)
+        self.assertIn('/static/inventory.js{{ inventory_js_v }}', source)
+        self.assertIn('"inventory_css_v": _stamp("inventory.css")', app_source)
+        self.assertIn('"inventory_js_v": _stamp("inventory.js")', app_source)
+
+    def test_inventory_active_task_keeps_full_summary_when_zero_stock_rows_are_hidden(self):
+        app_source = (ROOT / "app.py").read_text(encoding="utf-8")
+        self.assertIn("def _inventory_task_summary(items):", app_source)
+        self.assertIn('snapshot["summary"] = _inventory_task_summary(unfiltered_items)', app_source)
+        self.assertLess(
+            app_source.index('snapshot["summary"] = _inventory_task_summary(unfiltered_items)'),
+            app_source.index('snapshot["items"] = inventory_store.list_items('),
+        )
+
+    def test_inventory_partial_count_ui_has_no_quantity_lock_controls(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for element_id in (
+            "inventoryCountEntries", "inventoryCountExpression",
+            "inventoryCountNewQuantity", "inventoryCountAdd",
+        ):
+            self.assertIn(f'id="{element_id}"', source)
+        self.assertNotIn('id="inventoryActualQuantity"', source)
+        self.assertNotIn('id="inventoryCountSubmit"', source)
+        self.assertNotIn("setCountReadOnly", script)
+        self.assertNotIn("sendInventoryHeartbeat", script)
+
+    def test_inventory_mobile_product_cards_are_collapsible(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        style = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertIn("let inventoryExpandedBarcodes = new Set();", script)
+        self.assertIn("function toggleInventoryItemDetails(barcode)", script)
+        self.assertIn("inventory-item-toggle", script)
+        self.assertIn("inventory-item-primary-action", script)
+        self.assertIn(".inventory-item:not(.is-expanded) .inventory-item-full-only", style)
+        self.assertIn(".inventory-item-toggle", style)
+
+    def test_inventory_category_filter_is_multi_select(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertIn('id="inventoryCategoryFilter"', source)
+        self.assertIn('id="inventoryCategorySummary"', source)
+        self.assertIn('id="inventoryCategoryOptions"', source)
+        self.assertNotIn('<select id="inventoryCategoryFilter">', source)
+        self.assertIn("let inventorySelectedCategories = new Set();", script)
+
+    def test_inventory_serial_dialog_has_carton_controls(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for element_id in (
+            "inventoryCartonQuantity", "inventoryCartonPresetSave",
+            "inventoryCartonQuantityEditor", "inventoryCartonQuantityToggle",
+            "inventoryCartonStartSerial", "inventoryCartonCameraStart",
+            "inventoryCartonGenerate", "inventoryCartonPreview",
+            "inventoryCartonAddSerial", "inventoryCartonSave",
+            "inventorySerialScannerMode",
+        ):
+            self.assertIn(f'id="{element_id}"', source)
+        self.assertNotIn('id="inventoryCartonCode"', source)
+        self.assertIn("function generateCartonSerials(startSerial, quantity)", script)
+        self.assertIn("function formatCartonRange(serials)", script)
+        self.assertIn("function toggleSerialGroup(key)", script)
+        self.assertIn("inventoryCameraMode === 'carton-start'", script)
+
+    def test_inventory_saved_carton_quantity_editor_can_actually_hide(self):
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertRegex(
+            css,
+            r"\.inventory-carton-fields\[hidden\]\s*\{\s*display:\s*none",
+        )
+
+    def test_inventory_dialog_async_work_cannot_restart_after_close(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        self.assertNotIn("const requestId = ++countDialogRequestId;", script)
+        self.assertRegex(
+            script,
+            r"function closeCountDialog[\s\S]*countDialogRequestId \+= 1;",
+        )
+        self.assertNotIn("gyjLoginSession", script)
+        self.assertNotIn("closeGyjLogin", script)
+
+    def test_inventory_serial_and_history_contract(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for token in (
+            'role="tablist"', '当前盘点', '历史任务', '历史差异',
+            'id="inventorySerialWorkspace"', 'id="inventorySerialInput"',
+            'id="inventoryHistory"', 'id="inventoryDifferencesOpen"',
+            'id="inventoryDifferencesArchived"', "openSerialItem",
+            "scanSerial", "finishSerialItem", "loadInventoryHistory",
+            "loadDiscrepancies", "saveDiscrepancyNote",
+            "archiveDiscrepancy", "restoreDiscrepancy",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, source + script)
+        for label in (
+            "匹配", "账面独有", "实物独有", "其他商品", "重复扫描",
+            "盘点任务单号", "开始时间", "完成时间", "参与人数", "商品总数",
+            "已盘商品", "未盘商品",
+            "数量差异", "序列号差异", "Excel", "待处理", "已归档",
+        ):
+            with self.subTest(label=label):
+                self.assertIn(label, source + script)
+        self.assertNotIn("innerHTML", script)
+
+    def test_inventory_serial_dialog_has_manual_refresh_controls(self):
+        source = self.source("inventory.html")
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        css = (STATIC / "inventory.css").read_text(encoding="utf-8")
+        self.assertIn('id="inventorySerialRefresh"', source)
+        self.assertIn('id="inventorySerialSyncedAt"', source)
+        self.assertIn('重新获取', source)
+        self.assertIn("function manualRefreshSerialItem()", script)
+        self.assertIn(
+            "inventoryElement('inventorySerialRefresh').addEventListener('click', manualRefreshSerialItem)",
+            script,
+        )
+        self.assertIn(".inventory-serial-refresh", css)
+        self.assertNotIn("serialRefreshTimer", script)
+        self.assertNotIn("正在强制刷新 GYJ 账面序列号并完成核对", script)
+
+    def test_inventory_serial_history_and_discrepancy_timing_contract(self):
+        script = (STATIC / "inventory.js").read_text(encoding="utf-8")
+        for endpoint in (
+            "/serial/open", "/serial/refresh", "/serials", "/serial/finish",
+            "/api/inventory/tasks/history", "/api/inventory/discrepancies",
+            "/notes", "/archive", "/restore", "/export",
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertIn(endpoint, script)
+        self.assertNotRegex(script, r"setInterval\([^,]+,\s*60000\)")
+        self.assertRegex(script, r"setTimeout\([^,]+,\s*250\)")
+        self.assertIn("CURRENT_ACCOUNT.is_admin", script)
+        self.assertIn("encodeURIComponent(serial)", script)
+        self.assertIn("method: 'DELETE'", script)
+        self.assertNotIn("/heartbeat", script)
+        self.assertNotIn("sendSerialHeartbeat", script)
+
+    def test_inbound_navigation_uses_compact_vertical_transfer_glyph(self):
+        aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
+        self.assertIn("'/transfer': ['⇄', '移库']", aurora)
+        self.assertIn("'/inbound': ['⇅', '入库']", aurora)
+        self.assertNotIn("'/inbound': ['↕', '入库']", aurora)
+        self.assertNotIn("'/inbound': ['⇩', '入库']", aurora)
 
     def test_login_and_access_pages_use_approved_compositions(self):
         login = self.source("login.html")
@@ -601,19 +1614,17 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("document.hidden && !clearSelection", source)
         self.assertNotIn("fetch('/api/filter-options')", source)
 
-    def test_results_page_restores_service_close_job_from_session(self):
+    def test_results_page_clears_legacy_service_close_session(self):
         source = self.source("index.html")
         for token in (
             "const SERVICE_CLOSE_SESSION_KEY = 'crm_service_close_job_v1'",
-            "function saveServiceCloseJob()",
             "function clearSavedServiceCloseJob()",
-            "function restoreServiceCloseJob()",
-            "sessionStorage.setItem(SERVICE_CLOSE_SESSION_KEY",
             "sessionStorage.removeItem(SERVICE_CLOSE_SESSION_KEY)",
-            "restoreServiceCloseJob();",
+            "clearSavedServiceCloseJob();\n        setInterval(() => loadAllData(false)",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, source)
+        self.assertNotIn("function restoreServiceCloseJob()", source)
 
     def test_results_page_groups_barcodes_by_latest_installation_order(self):
         source = self.source("index.html")
@@ -670,7 +1681,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("logHistory.slice(-MAX_RENDERED_HISTORY)", source)
 
     def test_work_page_polling_skips_hidden_tabs(self):
-        for filename in ("crm.html", "index.html", "transfer.html", "product_library.html", "accounts.html"):
+        for filename in ("crm.html", "index.html", "transfer.html", "inbound.html", "product_library.html", "accounts.html"):
             with self.subTest(filename=filename):
                 self.assertIn("document.hidden", self.source(filename))
 
@@ -825,6 +1836,69 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn('已选条码 ${summary.total || 0} 个，产品 ${(summary.groups || []).length} 条，数量合计 ${totalQty}。', transfer)
         self.assertNotIn("<th>条码</th><th>匹配前缀</th><th>产品型号</th><th>产品名称</th>", transfer)
 
+    def test_transfer_distributor_history_waits_for_async_server_history(self):
+        transfer = self.source("transfer.html")
+        save_history = transfer.split("function saveDistributorHistory(value)", 1)[1].split(
+            "function mergeDistributorHistory(values)", 1
+        )[0]
+        merge_history = transfer.split("function mergeDistributorHistory(values)", 1)[1].split(
+            "function filteredDistributorHistory()", 1
+        )[0]
+        delete_history = transfer.split("async function deleteDistributorHistory(name)", 1)[1].split(
+            "function openDistributorImportModal()", 1
+        )[0]
+        keyboard_history = transfer.split("function handleDistributorKeydown(event)", 1)[1].split(
+            "function hideDistributorDropdownSoon()", 1
+        )[0]
+
+        self.assertIn("async function saveDistributorHistory(value)", transfer)
+        self.assertIn("async function mergeDistributorHistory(values)", transfer)
+        self.assertIn("async function handleDistributorKeydown(event)", transfer)
+        self.assertIn("await loadDistributorHistory()", save_history)
+        self.assertIn("await loadDistributorHistory()", merge_history)
+        self.assertIn("await loadDistributorHistory()", delete_history)
+        self.assertIn("await filteredDistributorHistory()", keyboard_history)
+
+    def test_transfer_live_log_only_shows_during_unmatched_summary_queries(self):
+        transfer = self.source("transfer.html")
+        render_logs = transfer.split("function renderLogs(", 1)[1].split("function renderPreviewQueries", 1)[0]
+
+        self.assertIn(
+            "function renderLogs(logs, jobData=null, runningLabel='已耗时', doneLabel='总耗时', recordId='', showPreviewQuery=false)",
+            transfer,
+        )
+        self.assertNotIn('id="transferSummaryLog"', transfer)
+        self.assertIn(
+            "const previewEntries = Object.entries((jobData && jobData.barcode_states) || {});",
+            render_logs,
+        )
+        self.assertIn(
+            "const showLookupProgress = showPreviewQuery && previewEntries.length && !(jobData && jobData.done);",
+            render_logs,
+        )
+        self.assertIn("previewLog.style.display = showLookupProgress ? 'block' : 'none';", render_logs)
+        self.assertEqual(
+            transfer.count("renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true)"),
+            2,
+        )
+
+    def test_transfer_preview_uses_one_live_row_per_representative_barcode(self):
+        transfer = self.source("transfer.html")
+        preview_queries = transfer.split("function renderPreviewQueries(barcodeStates)", 1)[1].split(
+            "function startTransferPolling", 1
+        )[0]
+
+        self.assertIn('id="previewQueries"', transfer)
+        self.assertIn('id="previewQueriesBadge"', transfer)
+        self.assertIn('id="previewQueriesRows"', transfer)
+        self.assertIn("<th>#</th><th>代表条码</th><th>查询通道</th><th>实时状态</th>", transfer)
+        self.assertIn("Object.entries(barcodeStates)", preview_queries)
+        self.assertIn("const stateLabel = {ok: '成功', failed: '失败', querying: '查询中…', pending: '等待中'}", preview_queries)
+        self.assertIn("row.message || stateLabel[row.state]", preview_queries)
+        self.assertIn("<code>${escapeHtml(row.barcode)}</code>", preview_queries)
+        self.assertNotIn("function renderPreviewLogRows(logs)", transfer)
+        self.assertNotIn(".preview-log-row {", transfer)
+
     def test_transfer_summary_detail_modal_uses_aurora_colors(self):
         transfer = self.source("transfer.html")
         self.assertIn(".summary-detail-modal {", transfer)
@@ -835,13 +1909,70 @@ class FrontendContractTest(unittest.TestCase):
 
     def test_shared_navigation_uses_stable_short_labels(self):
         app_source = (ROOT / "app.py").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'label': '{label}'", app_source)
         aurora = (STATIC / "aurora.js").read_text(encoding="utf-8")
-        for label in ("查询", "结果", "移库", "匹配", "设置"):
+        for label in ("查询", "结果", "移库", "入库", "盘点", "匹配", "设置"):
             self.assertIn(f"'{label}'", aurora)
         self.assertIn("aurora-nav-label", aurora)
         self.assertNotIn("anchor.textContent =", aurora)
+
+    def test_inbound_page_has_shared_history_actions(self):
+        inbound = self.source("inbound.html")
+        self.assertIn('id="inboundHistory"', inbound)
+        self.assertIn('.inbound-progress[hidden] { display:none !important; }', inbound)
+        self.assertIn("function loadInboundHistory", inbound)
+        self.assertIn("function selectInboundHistory", inbound)
+        self.assertIn("function deleteInboundHistory", inbound)
+        self.assertIn("/api/inbound/history", inbound)
+
+    def test_inbound_products_fold_serials_and_copy_chunked_values(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function toggleInboundSerials", inbound)
+        self.assertIn("serials.length ? ` onclick=\"toggleInboundSerials('${productId}')\"`", inbound)
+        self.assertIn("serials.slice(index, index + 100)", inbound)
+        self.assertIn('data-copy="${escapeHtml(item.product_code)}"', inbound)
+        self.assertIn('data-copy="${escapeHtml(item.description || \'无物料描述\')}"', inbound)
+        self.assertNotIn("· 订单 ${escapeHtml(orders", inbound)
+        self.assertNotIn('class="inbound-product-total"', inbound)
+        self.assertIn("条码 ${escapeHtml(serials.length)} 条", inbound)
+        self.assertIn("无条码配件 × ${escapeHtml(unbarcoded)}", inbound)
+        self.assertNotIn("${unbarcoded ? `<code>无条码配件", inbound)
+
+    def test_inbound_result_surfaces_use_dark_contrast_without_gyj_state_cards(self):
+        inbound = self.source("inbound.html")
+        self.assertRegex(inbound, r"\.inbound-history-row\s*\{[^}]*background:rgba\(8,25,48,.88\)")
+        self.assertRegex(inbound, r"\.inbound-product-head\s*\{[^}]*background:rgba\(13,44,72,.92\)[^}]*color:#e6f6ff")
+        self.assertRegex(inbound, r"\.inbound-serials code\s*\{[^}]*background:rgba\(12,36,62,.95\)[^}]*color:#e6f6ff")
+        self.assertNotIn('id="gyjStage"', inbound)
+        self.assertNotIn('id="gyjProgress"', inbound)
+
+    def test_inbound_workspace_tabs_use_the_dark_glass_theme(self):
+        inbound = self.source("inbound.html")
+        tab_rule = re.search(r"\.inbound-workspace-tab\s*\{([^}]*)\}", inbound, re.S)
+        active_rule = re.search(r"\.inbound-workspace-tab\.active\s*\{([^}]*)\}", inbound, re.S)
+        self.assertIsNotNone(tab_rule)
+        self.assertIsNotNone(active_rule)
+        self.assertRegex(tab_rule.group(1), r"background:\s*rgba\(13,44,72,.88\)")
+        self.assertRegex(tab_rule.group(1), r"color:\s*#d8f5ff")
+        self.assertRegex(active_rule.group(1), r"border-color:\s*#48cfff")
+        self.assertRegex(active_rule.group(1), r"color:\s*#f2fbff")
+
+    def test_inbound_renders_saved_gyj_products_with_collapsed_serials(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("function renderGYJSavedProducts", inbound)
+        self.assertIn("function toggleGYJSavedSerials", inbound)
+        self.assertIn("展开条码", inbound)
+        self.assertIn(".inbound-serials[hidden] { display:none !important; }", inbound)
+        self.assertIn('id="gyjSavedSerials-${productId}" hidden', inbound)
+        self.assertNotIn('`<div class="inbound-serials"><code>无条码</code></div>`', inbound)
+        self.assertIn('class="gyj-saved-serial-toggle"', inbound)
+        self.assertNotIn('`${serials.length ? `<button class="inbound-product-toggle"', inbound)
+
+    def test_inbound_gyj_result_updates_while_lines_are_being_saved(self):
+        inbound = self.source("inbound.html")
+        self.assertIn("if (data.result && Array.isArray(data.result.products))", inbound)
+        self.assertIn("'completed_products': []", (ROOT / "app.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

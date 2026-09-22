@@ -9,18 +9,61 @@ os.environ['ASYNCIO_CORE_EVENT_LOOP'] = '0'
 
 import re
 import json
+import base64
 import sqlite3
 import time
 import builtins
 import html as html_mod
 import threading
+import concurrent.futures
 import queue
 import uuid
 import shutil
 import hashlib
+from contextlib import closing, contextmanager
 from collections import OrderedDict
-from flask import Flask, render_template, request, jsonify, send_from_directory, Response, session, redirect
+from decimal import Decimal, InvalidOperation
+from functools import wraps
+from urllib.parse import urlparse
+from flask import Flask, render_template, request, jsonify, send_file, send_from_directory, Response, session, redirect
 from datetime import datetime
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:
+    msvcrt = None
+
+from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
+from inbound_extraction import (
+    build_inbound_result,
+    build_inbound_workbook,
+    normalize_packing_slip_no,
+    normalize_packing_slip_type,
+)
+from gyj_inbound import (
+    GYJInboundError,
+    GYJPlaywrightPage,
+    GYJPurchaseInboundWriter,
+    GYJ_PURCHASE_IN_URL,
+    build_gyj_purchase_lines,
+)
+from gyj_inventory import GYJInventoryReadError, GYJInventoryReader
+from inventory_export import build_discrepancy_workbook, build_inventory_workbook
+from inventory_service import InventoryService, InventoryServiceError
+from inventory_store import (
+    InventoryConfirmationRequired,
+    InventoryConflict,
+    InventoryNotFound,
+    InventoryPermissionDenied,
+    InventoryStore,
+    InventoryVersionConflict,
+    normalize_quantity,
+)
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
@@ -1855,6 +1898,240 @@ class CRMSession:
                 pass
         return False, "点击服务单号后未进入服务单详情"
 
+    def _store_order_list_ready(self):
+        try:
+            current_url = urlparse(self.page.url or "")
+            target_url = urlparse(self._store_order_list_url())
+            if (
+                current_url.scheme.lower(),
+                current_url.netloc.lower(),
+                current_url.fragment,
+            ) != (
+                target_url.scheme.lower(),
+                target_url.netloc.lower(),
+                target_url.fragment,
+            ):
+                return False
+            return bool(self.page.evaluate("""() => {
+                const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+                const clean = value => (value || '').replace(/\\s+/g, '').trim();
+                const contexts = Array.from(document.querySelectorAll(
+                    'h1,h2,h3,h4,h5,h6,[role="heading"],header,.el-page-header__title,.page-title,[class*="page-title"],[class*="PageTitle"],[aria-current="page"],.el-breadcrumb__inner'
+                )).filter(visible);
+                const hasHeading = contexts.some(node => ['订单查询', '订单列表'].includes(clean(node.innerText || node.textContent || '')));
+                const hasOrderHeader = Array.from(document.querySelectorAll('table')).filter(visible)
+                    .some(table => Array.from(table.querySelectorAll('thead th')).filter(visible)
+                        .some(cell => clean(cell.innerText || cell.textContent || '') === '订单号'));
+                return hasHeading && hasOrderHeader;
+            }"""))
+        except Exception:
+            return False
+
+    def _store_order_list_url(self):
+        cfg = load_crm_config()
+        return f"{cfg['website']['url'].rstrip('/')}/#/ordertwoc/list"
+
+    def _open_store_order_list(self, emit):
+        emit("打开 CRM 门店管理订单列表...")
+        if not self.is_alive():
+            if not self._ensure_browser():
+                return False, "浏览器未启动"
+        target_url = self._store_order_list_url()
+        if not self._store_order_list_ready():
+            ok, message = self._goto(target_url, timeout=60000)
+            if not ok:
+                return False, message
+        for _ in range(15):
+            time.sleep(0.8)
+            if self._store_order_list_ready():
+                return True, ""
+        if not self._is_current_page_logged_in():
+            return False, "CRM 当前未登录，请先登录 CRM"
+        body = ""
+        try:
+            body = re.sub(r"\s+", " ", self.page.inner_text("body", timeout=2000))[:240]
+        except Exception:
+            pass
+        return False, f"未进入门店管理订单列表，当前页面：{body or self.page.url}"
+
+    def _set_store_order_search_keyword(self, order_no):
+        selected = bool(self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const eligible = input => {
+            const type = (input.getAttribute('type') || 'text').toLowerCase();
+            return visible(input)
+                && !input.disabled
+                && !['hidden', 'checkbox', 'radio', 'button', 'submit', 'reset'].includes(type)
+                && !input.closest('table,.el-pagination,.ant-pagination,[class*="pagination"],[class*="Pagination"]');
+        };
+        const inputs = Array.from(document.querySelectorAll('input:not([disabled]),textarea:not([disabled])'))
+            .filter(eligible);
+        const items = Array.from(document.querySelectorAll('.el-form-item,.ant-form-item,.form-group'));
+        let input = items.filter(visible).map(item => ({
+            inputs: Array.from(item.querySelectorAll('input:not([disabled]),textarea:not([disabled])')).filter(eligible),
+            text: clean(item.innerText || item.textContent || '')
+        })).find(row => row.inputs.length && row.text.includes('订单号'))?.inputs[0];
+        if (!input) input = inputs.find(el => clean(el.placeholder).includes('订单号'));
+        const body = clean(document.body?.innerText || '');
+        if (!input && (body.includes('订单查询') || body.includes('订单列表'))) {
+            input = inputs.map(el => ({ el, rect: el.getBoundingClientRect() }))
+                .sort((a, b) => b.rect.width - a.rect.width || a.rect.top - b.rect.top || a.rect.left - b.rect.left)[0]?.el;
+        }
+        if (!input) return false;
+        input.focus();
+        input.setAttribute('data-codex-service-search', '1');
+        return true;
+    }""", str(order_no)))
+        if not selected:
+            return False
+        try:
+            self.page.keyboard.press("Control+A")
+            self.page.keyboard.type(str(order_no))
+            return True
+        except Exception:
+            return False
+
+    def _click_store_order_search_button(self):
+        return self._click_service_search_button()
+
+    def _store_order_search_snapshot(self, order_no):
+        return self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const rows = Array.from(document.querySelectorAll('tbody tr')).filter(visible);
+        const found = rows.some(row => Array.from(row.querySelectorAll('a,button')).filter(visible)
+            .some(target => clean(target.innerText || target.textContent || '') === clean(orderNo)));
+        const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]'))
+            .some(visible);
+        const body = clean(document.body?.innerText || '');
+        return {found, loading, noData: /暂无数据|无数据|暂无记录|没有数据/.test(body)};
+    }""", str(order_no))
+
+    def _search_store_order(self, order_no):
+        if not self._set_store_order_search_keyword(order_no):
+            return False, "未找到订单号搜索输入框"
+        if not self._click_store_order_search_button():
+            return False, "未找到订单查询按钮"
+        stable_empty = 0
+        for _ in range(35):
+            time.sleep(0.8)
+            snapshot = self._store_order_search_snapshot(order_no) or {}
+            if snapshot.get("found"):
+                return True, ""
+            if snapshot.get("loading"):
+                stable_empty = 0
+            elif snapshot.get("noData"):
+                stable_empty += 1
+                if stable_empty >= 4:
+                    return False, f"订单列表未找到订单号：{order_no}"
+            else:
+                stable_empty = 0
+        return False, f"订单搜索后未找到精确订单号：{order_no}"
+
+    def _open_store_order_detail(self, order_no):
+        clicked = self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, '').trim();
+        const target = Array.from(document.querySelectorAll('tbody tr')).filter(visible)
+            .flatMap(row => Array.from(row.querySelectorAll('a,button')).filter(visible))
+            .find(el => clean(el.innerText || el.textContent || '') === clean(orderNo));
+        if (!target) return false;
+        target.click();
+        return true;
+    }""", str(order_no))
+        if not clicked:
+            return False, f"未找到可打开的订单：{order_no}"
+        stable_empty = 0
+        for _ in range(20):
+            time.sleep(0.5)
+            snapshot = self._store_order_product_table_snapshot(order_no)
+            if not snapshot.get("context") or snapshot.get("loading") or not snapshot.get("recognized"):
+                stable_empty = 0
+                continue
+            if snapshot.get("error"):
+                return False, snapshot["error"]
+            if snapshot.get("rows"):
+                return True, ""
+            stable_empty = stable_empty + 1 if snapshot.get("empty") else 0
+            if stable_empty >= 2:
+                return True, ""
+        return False, f"点击订单后未进入订单详情：{order_no}"
+
+    def _store_order_product_table_snapshot(self, order_no=""):
+        return self.page.evaluate("""(orderNo) => {
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+        const compact = value => clean(value).replace(/\\s+/g, '');
+        const cellText = cell => {
+            const values = Array.from(cell.querySelectorAll('input:not([type="hidden"]),textarea,select'))
+                .map(el => clean(el.value || el.innerText || '')).filter(Boolean);
+            return clean(values.join(' ') || cell.innerText || cell.textContent || '');
+        };
+        const context = !orderNo || Array.from(document.querySelectorAll('.el-form-item,.ivu-form-item,.ant-form-item,.form-group'))
+            .filter(visible).some(node => {
+                const label = node.querySelector('.el-form-item__label,.ivu-form-item-label,.ant-form-item-label,label');
+                if (!['订单号', '销售订单号', '关联订单号'].includes(compact(label?.textContent).replace(/[：:]+$/, ''))) return false;
+                const control = node.querySelector('input:not([type="hidden"]),textarea');
+                const content = node.querySelector('.el-form-item__content,.ivu-form-item-content,.ant-form-item-control');
+                return compact(control ? control.value : content?.innerText) === compact(orderNo);
+            });
+        const loading = Array.from(document.querySelectorAll('.el-loading-mask,.ant-spin,[aria-busy="true"]')).some(visible);
+        const labels = {
+            name: ['产品名称', '商品名称', '物料名称', '怡口产品名称'],
+            code: ['产品编码', '商品编码', '物料编码', '怡口产品编码'],
+            quantity: ['数量', '产品数量', '订单数量', '购买数量']
+        };
+        const tables = Array.from(document.querySelectorAll('.el-table,.ant-table,table')).filter(visible)
+            .filter((table, index, all) => !all.some((other, otherIndex) => otherIndex < index && other.contains(table)));
+        for (const table of tables) {
+            const headers = Array.from(table.querySelectorAll('thead th')).map(cell => compact(cell.innerText));
+            const indices = key => headers.flatMap((text, index) => labels[key].includes(text) ? [index] : []);
+            const nameIndex = indices('name')[0];
+            const codeIndices = indices('code');
+            const quantityIndices = indices('quantity');
+            if (!codeIndices.length || !quantityIndices.length) continue;
+            if (codeIndices.length !== 1 || quantityIndices.length !== 1) {
+                return {context, loading, recognized: true, error: '订单产品编码或数量表头不唯一'};
+            }
+            const codeIndex = codeIndices[0];
+            const quantityIndex = quantityIndices[0];
+            const emptyText = /^(暂无数据|无数据|暂无记录|没有数据)$/;
+            const rows = Array.from(table.querySelectorAll('tbody tr')).filter(visible).map(tr => {
+                const cells = Array.from(tr.querySelectorAll(':scope > td'));
+                const values = cells.map(cellText);
+                if (!values.some(Boolean)) return null;
+                if (cells.length === 1 && cells[0].colSpan > 1 && emptyText.test(compact(values[0]))) return null;
+                return {
+                    product_name: values[nameIndex] || '',
+                    product_code: values[codeIndex] || '',
+                    quantity: values[quantityIndex] || ''
+                };
+            }).filter(Boolean);
+            const empty = Array.from(table.querySelectorAll('*'))
+                .filter(visible).some(el => emptyText.test(compact(el.innerText)));
+            return {context, loading, recognized: true, rows, empty};
+        }
+        return {context, loading, recognized: false, rows: [], empty: false};
+    }""", str(order_no))
+
+    def _store_order_detail_products(self):
+        snapshot = self._store_order_product_table_snapshot()
+        if snapshot.get("error"):
+            raise ValueError(snapshot["error"])
+        rows = snapshot.get("rows") or []
+        products = []
+        for row in rows or []:
+            code = _normalize_comparison_product_code((row or {}).get("product_code"))
+            if not code:
+                raise ValueError("订单产品缺少产品编码")
+            products.append({
+                "product_name": _clean_export_value((row or {}).get("product_name")),
+                "product_code": code,
+                "quantity": _parse_order_product_quantity((row or {}).get("quantity")),
+            })
+        return products
+
     def _service_detail_closed_state(self):
         try:
             result = self.page.evaluate("""() => {
@@ -2034,6 +2311,7 @@ class CRMSession:
                     const values = [];
                     for (const control of node.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
                         const type = (control.getAttribute('type') || '').toLowerCase();
+                        if (['button', 'submit', 'reset', 'image', 'file'].includes(type)) continue;
                         if ((type === 'radio' || type === 'checkbox') && !control.checked) continue;
                         let value = '';
                         if (control.tagName === 'SELECT') {
@@ -2269,6 +2547,53 @@ class CRMSession:
                 return True, {"products": products}
         except Exception as e:
             return False, {"error": str(e)}
+
+    def query_related_order_products(self, service_no, log=None):
+        def emit(message, level="info"):
+            if log:
+                log(message, level)
+        try:
+            service_no = _clean_export_value(service_no)
+            if not service_no:
+                return False, {"error": "服务单号为空"}
+            with self.lock:
+                if not self.is_alive() and not self._ensure_browser():
+                    return False, {"error": "浏览器未启动，请先登录 CRM"}
+                if not self.logged_in and not self._is_current_page_logged_in():
+                    return False, {"error": "CRM 当前未登录，请先登录 CRM"}
+                for operation in (
+                    lambda: self._open_service_order_list(emit),
+                    lambda: self._search_service_order(service_no),
+                    lambda: self._open_service_order_detail(service_no),
+                ):
+                    ok, message = operation()
+                    if not ok:
+                        return False, {"error": message}
+                fields = self._service_detail_fields()
+                service_products = self._service_detail_products()
+                order_no = _related_order_no_from_service_fields(fields)
+                if not order_no:
+                    return False, {"error": "服务单没有关联订单号"}
+                for operation in (
+                    lambda: self._open_store_order_list(emit),
+                    lambda: self._search_store_order(order_no),
+                    lambda: self._open_store_order_detail(order_no),
+                ):
+                    ok, message = operation()
+                    if not ok:
+                        return False, {"error": message}
+                order_products = self._store_order_detail_products()
+                if not order_products:
+                    return False, {"error": "订单详情未读取到产品明细"}
+                return True, {
+                    "service_no": service_no,
+                    "order_no": order_no,
+                    "service_fields": fields,
+                    "service_products": service_products,
+                    "order_products": order_products,
+                }
+        except Exception as error:
+            return False, {"error": str(error)}
 
     def _move_create_url(self):
         cfg = load_crm_config()
@@ -3464,6 +3789,27 @@ class CRMSession:
                     return False, crash_message
                 return False, str(e)
 
+    def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+        with self.lock:
+            if not self.is_alive() and not self._ensure_browser():
+                return False, "浏览器未启动，请先登录 CRM"
+            if not self._is_current_page_logged_in():
+                self.logged_in = False
+                return False, "CRM 当前未登录，请先登录 CRM"
+            self.logged_in = True
+            try:
+                result = PackingSlipCRMReader(self, log=log, progress=progress).extract(
+                    packing_slip_no
+                )
+                return True, result
+            except PackingSlipReadError as error:
+                return False, str(error)
+            except Exception as error:
+                crash_message = self._handle_browser_exception(error)
+                return False, crash_message or str(error)
+            finally:
+                self.needs_navigation = True
+
 class CRMWorker:
     """把所有 Playwright 操作固定到同一个线程里执行。"""
     def __init__(self, slot_id="default", session_dir=None):
@@ -3611,8 +3957,14 @@ class CRMWorker:
             log(f"CRM 重查产品明细任务已加入队列：{service_no}", "dim")
         return self._call("refresh_service_order_products", service_no, log)
 
+    def query_related_order_products(self, service_no, log=None):
+        return self._call("query_related_order_products", service_no, log)
+
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
+
+    def extract_packing_slip(self, packing_slip_no, log=None, progress=None):
+        return self._call("extract_packing_slip", packing_slip_no, log, progress)
 
     def shutdown(self):
         try:
@@ -3623,6 +3975,573 @@ class CRMWorker:
             self.browser_running = False
             self.logged_in_cache = False
         return result
+
+
+class GYJSession:
+    """独立、非持久化的 GYJ 浏览器会话；登录只通过可见页面完成。"""
+    login_url = "https://cloud.gyjerp.com/user/login"
+
+    def __init__(self, session_dir):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.session_dir = session_dir
+        self.lock = threading.RLock()
+        self.logged_in = False
+        self.waiting_captcha = False
+
+    def is_alive(self):
+        try:
+            return bool(self.page and self.page.url)
+        except Exception:
+            return False
+
+    def _close_browser(self):
+        try:
+            if self.context:
+                self.context.close()
+            if self.browser:
+                self.browser.close()
+            if self.playwright:
+                self.playwright.stop()
+        finally:
+            self.playwright = None
+            self.browser = None
+            self.context = None
+            self.page = None
+            self.logged_in = False
+            self.waiting_captcha = False
+
+    def _ensure_browser(self):
+        if self.is_alive():
+            return True
+        if not HAS_PLAYWRIGHT:
+            return False
+        self._close_browser()
+        os.makedirs(self.session_dir, exist_ok=True)
+        browser_cfg = load_crm_config().get("browser", {})
+        self.playwright = sync_playwright().start()
+        self.context = self.playwright.chromium.launch_persistent_context(
+            user_data_dir=self.session_dir,
+            headless=browser_cfg.get("headless", True),
+            viewport=browser_cfg.get("viewport"),
+            user_agent=browser_cfg.get("user_agent"),
+            locale=browser_cfg.get("locale", "zh-CN"),
+            timezone_id=browser_cfg.get("timezone_id", "Asia/Shanghai"),
+            args=browser_cfg.get("args", []),
+        )
+        self.page = self.context.new_page()
+        return True
+
+    def _rebuild_browser_profile(self):
+        self._close_browser()
+        if os.path.exists(self.session_dir):
+            backup_dir = f"{self.session_dir}.failed-{uuid.uuid4().hex[:8]}"
+            os.replace(self.session_dir, backup_dir)
+        return self._ensure_browser()
+
+    def _is_login_page(self):
+        return "/user/login" in (self.page.url or "").lower()
+
+    def _rendered_login_page(self):
+        try:
+            page = self.page
+            if page is None:
+                return False
+            has_username = page.evaluate(
+                "() => !!document.querySelector(\"input[name='username'], input[name='userName'], input[placeholder*='账号'], input[placeholder*='用户名']\")"
+            )
+        except Exception:
+            return False
+        return bool(has_username)
+
+    def _first_visible(self, selectors):
+        for selector in selectors:
+            try:
+                locator = self.page.locator(selector)
+                if locator.count() and locator.first.is_visible():
+                    return locator.first
+            except Exception:
+                continue
+        return None
+
+    def _captcha_input(self):
+        return self._first_visible([
+            "input[placeholder*='验证码']", "input[name*='captcha']",
+            "input[name*='verify']", "input[id*='captcha']", "input[id*='verify']", "#inputCode",
+        ])
+
+    def _wait_for_login_form(self, attempts=60, interval_ms=250):
+        for _ in range(attempts):
+            username_input = self._first_visible([
+                "input[name='username']", "input[name='userName']", "input[name='account']",
+                "input[placeholder*='账号']", "input[placeholder*='用户名']", "input[type='text']",
+            ])
+            password_input = self._first_visible([
+                "input[name='password']", "input[name='pwd']", "input[type='password']",
+            ])
+            captcha_input = self._captcha_input()
+            if username_input and password_input and captcha_input:
+                return username_input, password_input
+            self.page.wait_for_timeout(interval_ms)
+        return None, None
+
+    def captcha_preview(self):
+        """返回当前可见验证码图片；只保存在本次 API 响应内。"""
+        with self.lock:
+            if not self.is_alive():
+                return ""
+            image = self._first_visible([
+                "form#formLogin img",
+                "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
+                "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
+                "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
+                ".captcha img", ".verify img", ".verify-code img", ".captcha canvas",
+            ])
+            if not image:
+                return ""
+            try:
+                png = image.screenshot(type="png")
+                return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+            except Exception:
+                return ""
+
+    def refresh_captcha(self):
+        """点击 GYJ 登录页验证码，生成并返回一张新的验证码图片。"""
+        with self.lock:
+            if not self.is_alive():
+                return ""
+            image = self._first_visible([
+                "form#formLogin img",
+                "img[alt*='验证码']", "img[title*='验证码']", "img[src*='captcha']",
+                "img[src*='verify']", "img[class*='captcha']", "img[class*='verify']",
+                "img[class*='code']", "canvas[class*='captcha']", "canvas[class*='verify']",
+                ".captcha img", ".verify img", ".verify-code img", ".captcha canvas",
+            ])
+            if not image:
+                return ""
+            try:
+                image.click()
+                self.page.wait_for_timeout(300)
+            except Exception:
+                return ""
+            return self.captcha_preview()
+
+    def login_step1(self, username, password):
+        if not username or not password:
+            return False, "请输入 GYJ 账号和密码"
+        with self.lock:
+            try:
+                for attempt in range(2):
+                    if not self._ensure_browser():
+                        return False, "GYJ 浏览器未启动"
+                    self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+                    username_input, password_input = self._wait_for_login_form()
+                    if username_input and password_input:
+                        username_input.fill(username)
+                        password_input.fill(password)
+                        self.logged_in = False
+                        self.waiting_captcha = True
+                        return True, "GYJ 等待验证码"
+                    if attempt == 0 and self._rebuild_browser_profile():
+                        continue
+                    return False, "未找到 GYJ 登录表单或验证码输入框"
+            except Exception as error:
+                self.logged_in = False
+                self.waiting_captcha = False
+                return False, str(error)
+
+    def login_step2(self, captcha):
+        if not str(captcha or "").strip():
+            return False, "请输入 GYJ 验证码"
+        with self.lock:
+            try:
+                if not self.is_alive():
+                    return False, "GYJ 登录会话已关闭，请重新后台登录"
+                captcha_input = self._captcha_input()
+                if not captcha_input:
+                    return False, "未找到 GYJ 验证码输入框，请重新后台登录"
+                captcha_input.fill(str(captcha).strip())
+                confirm = self._first_visible([
+                    "button:has-text('确定')", "button:has-text('登 录')", "button[type='submit']",
+                ])
+                if not confirm:
+                    return False, "未找到 GYJ 验证码确认按钮"
+                confirm.click()
+                self.page.wait_for_timeout(1200)
+                if not self._is_login_page():
+                    self.logged_in = True
+                    self.waiting_captcha = False
+                    return True, "GYJ 登录成功"
+                self.logged_in = False
+                self.waiting_captcha = bool(self._captcha_input())
+                return False, "GYJ 验证码无效或登录未完成"
+            except Exception as error:
+                return False, str(error)
+
+    def open_login(self):
+        with self.lock:
+            if not self._ensure_browser():
+                return False, "GYJ 浏览器未启动"
+            self.page.goto(self.login_url, wait_until="domcontentloaded", timeout=60000)
+            self.logged_in = False
+            self.waiting_captcha = False
+            return True, "GYJ 登录页面已打开，请在浏览器完成登录"
+
+    def check_login_status(self):
+        with self.lock:
+            if not self.is_alive():
+                try:
+                    if not self._ensure_browser():
+                        return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
+                    self.page.goto(
+                        GYJ_PURCHASE_IN_URL,
+                        wait_until="domcontentloaded",
+                        timeout=60000,
+                    )
+                except Exception as error:
+                    self._close_browser()
+                    return False, f"GYJ 会话恢复失败：{error}"
+            try:
+                url = (self.page.url or "").lower()
+                if "login" in url or self._rendered_login_page():
+                    self.logged_in = False
+                    self.waiting_captcha = bool(self._captcha_input())
+                    return False, "GYJ 等待验证码" if self.waiting_captcha else "仍在 GYJ 登录页，未登录"
+                if "cloud.gyjerp.com" not in url:
+                    self.logged_in = False
+                    return False, "无法确认 GYJ 登录状态"
+                self.logged_in = True
+                self.waiting_captcha = False
+                return True, "GYJ 已登录"
+            except Exception as error:
+                self.logged_in = False
+                return False, str(error)
+
+    def load_inventory_catalog(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).load_catalog()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_total_stock(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_stock_totals(self):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_stock_totals()
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def read_inventory_serials(self, barcode):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).read_unshipped_serials(barcode)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def lookup_inventory_serial(self, serial):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJInventoryReader(
+                    GYJPlaywrightPage(self.page)
+                ).lookup_serial(serial)
+                return True, result
+            except GYJInventoryReadError as error:
+                return False, str(error)
+
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
+        with self.lock:
+            ok, message = self.check_login_status()
+            if not ok:
+                return False, message
+            try:
+                result = GYJPurchaseInboundWriter(
+                    GYJPlaywrightPage(self.page, log=log), log=log, progress=progress
+                ).save_packing_slip(
+                    packing_slip_no, lines, packing_slip_type=packing_slip_type
+                )
+                return True, result
+            except GYJInboundError as error:
+                return False, str(error)
+            except Exception as error:
+                return False, str(error)
+
+    def shutdown(self):
+        with self.lock:
+            self._close_browser()
+            return True
+
+
+class GYJWorker:
+    """将 GYJ 的所有可见浏览器操作固定到同一线程。"""
+    def __init__(self, owner, session_dir):
+        self.owner = str(owner or '')
+        self.slot_id = self.owner
+        self.session_dir = session_dir
+        self.tasks = queue.Queue()
+        self.state_lock = threading.Lock()
+        self.browser_running = False
+        self.logged_in_cache = False
+        self.waiting_captcha_cache = False
+        self.current_task = ""
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _update_state(self, session):
+        with self.state_lock:
+            self.browser_running = session.is_alive()
+            self.logged_in_cache = bool(self.browser_running and session.logged_in)
+            self.waiting_captcha_cache = bool(self.browser_running and session.waiting_captcha)
+
+    def _run(self):
+        session = GYJSession(self.session_dir)
+        while True:
+            method_name, args, kwargs, result_queue = self.tasks.get()
+            try:
+                with self.state_lock:
+                    self.current_task = method_name
+                if method_name == "shutdown":
+                    result = session.shutdown()
+                    self._update_state(session)
+                    result_queue.put((True, result))
+                    return
+                result = getattr(session, method_name)(*args, **kwargs)
+                self._update_state(session)
+                result_queue.put((True, result))
+            except Exception as error:
+                self._update_state(session)
+                result_queue.put((False, str(error)))
+            finally:
+                with self.state_lock:
+                    self.current_task = ""
+
+    def _call(self, method_name, *args, **kwargs):
+        result_queue = queue.Queue(maxsize=1)
+        self.tasks.put((method_name, args, kwargs, result_queue))
+        ok, result = result_queue.get()
+        if ok:
+            return result
+        raise RuntimeError(result)
+
+    def open_login(self):
+        return self._call("open_login")
+
+    def login_step1(self, username, password):
+        return self._call("login_step1", username, password)
+
+    def login_step2(self, captcha):
+        return self._call("login_step2", captcha)
+
+    def captcha_preview(self):
+        return self._call("captcha_preview")
+
+    def refresh_captcha(self):
+        return self._call("refresh_captcha")
+
+    def check_login_status(self):
+        return self._call("check_login_status")
+
+    def load_inventory_catalog(self):
+        return self._call("load_inventory_catalog")
+
+    def read_inventory_stock(self, barcode):
+        return self._call("read_inventory_stock", barcode)
+
+    def read_inventory_stock_totals(self):
+        return self._call("read_inventory_stock_totals")
+
+    def read_inventory_serials(self, barcode):
+        return self._call("read_inventory_serials", barcode)
+
+    def lookup_inventory_serial(self, serial):
+        return self._call("lookup_inventory_serial", serial)
+
+    def save_purchase_inbound(
+        self, packing_slip_no, lines, packing_slip_type="", log=None, progress=None
+    ):
+        return self._call(
+            "save_purchase_inbound", packing_slip_no, lines, packing_slip_type, log, progress
+        )
+
+    def shutdown(self):
+        return self._call("shutdown")
+
+    @property
+    def waiting_captcha(self):
+        with self.state_lock:
+            return self.waiting_captcha_cache
+
+    @property
+    def logged_in(self):
+        with self.state_lock:
+            return self.logged_in_cache
+
+
+class GYJWorkerPool:
+    def __init__(self, worker_factory=None):
+        self.slot_ids = GYJ_SLOT_IDS
+        self.worker_factory = worker_factory or GYJWorker
+        self.workers = {}
+        self.reservations = {slot_id: 0 for slot_id in self.slot_ids}
+        self.cursor = 0
+        self.condition = threading.Condition()
+
+    def validate_slot_id(self, slot_id="gyj-1"):
+        slot_id = str(slot_id or "gyj-1").strip()
+        if slot_id not in self.slot_ids:
+            raise ValueError("无效的 GYJ 通道")
+        return slot_id
+
+    def get(self, slot_id="gyj-1"):
+        slot_id = self.validate_slot_id(slot_id)
+        with self.condition:
+            if slot_id not in self.workers:
+                self.workers[slot_id] = self.worker_factory(
+                    slot_id, _gyj_session_dir(slot_id)
+                )
+            return self.workers[slot_id]
+
+    def slot_status(self, slot_id):
+        slot_id = self.validate_slot_id(slot_id)
+        worker = self.get(slot_id)
+        with self.condition:
+            busy = self.reservations[slot_id] > 0
+        return {
+            "id": slot_id,
+            "label": f"GYJ 通道 {int(slot_id.rsplit('-', 1)[-1])}",
+            "browser_running": bool(worker.browser_running),
+            "logged_in": bool(worker.logged_in),
+            "waiting_captcha": bool(worker.waiting_captcha),
+            "busy": busy,
+        }
+
+    def slots_payload(self):
+        return [self.slot_status(slot_id) for slot_id in self.slot_ids]
+
+    def reserve(self, timeout=60):
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                workers = {slot_id: self.get(slot_id) for slot_id in self.slot_ids}
+                logged_in_slots = [
+                    slot_id for slot_id in self.slot_ids if workers[slot_id].logged_in
+                ]
+                if not logged_in_slots:
+                    raise RuntimeError("请先登录 GYJ")
+                for offset in range(len(self.slot_ids)):
+                    index = (self.cursor + offset) % len(self.slot_ids)
+                    slot_id = self.slot_ids[index]
+                    if workers[slot_id].logged_in and self.reservations[slot_id] == 0:
+                        self.reservations[slot_id] = 1
+                        self.cursor = (index + 1) % len(self.slot_ids)
+                        return GYJWorkerLease(self, slot_id, workers[slot_id])
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("所有 GYJ 通道正忙，请稍后重试")
+                self.condition.wait(remaining)
+
+    def _release(self, slot_id):
+        with self.condition:
+            if self.reservations.get(slot_id, 0) > 0:
+                self.reservations[slot_id] -= 1
+            self.condition.notify_all()
+
+    def shutdown(self):
+        with self.condition:
+            workers = list(self.workers.values())
+        for worker in workers:
+            try:
+                worker.shutdown()
+            except Exception:
+                pass
+
+
+class GYJWorkerLease:
+    def __init__(self, pool, slot_id, worker):
+        self.pool = pool
+        self.slot_id = slot_id
+        self.worker = worker
+        self._released = False
+        self._release_lock = threading.Lock()
+
+    def __enter__(self):
+        return self.worker
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.release()
+        return False
+
+    def release(self):
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+        self.pool._release(self.slot_id)
+
+
+class GYJBusinessWorker:
+    """Lease one shared GYJ channel for each inventory operation."""
+
+    def __init__(self, pool, actor=""):
+        self.pool = pool
+        self.actor = str(actor or "")
+
+    def _call(self, method_name, *args, **kwargs):
+        with self.pool.reserve(timeout=60) as worker:
+            return getattr(worker, method_name)(*args, **kwargs)
+
+    def load_inventory_catalog(self):
+        return self._call("load_inventory_catalog")
+
+    def read_inventory_stock(self, barcode):
+        return self._call("read_inventory_stock", barcode)
+
+    def read_inventory_stock_totals(self):
+        return self._call("read_inventory_stock_totals")
+
+    def read_inventory_serials(self, barcode):
+        return self._call("read_inventory_serials", barcode)
+
+    def lookup_inventory_serial(self, serial):
+        return self._call("lookup_inventory_serial", serial)
 
 def _positive_int_env(name, default):
     try:
@@ -3691,6 +4610,16 @@ def _crm_session_base_dir():
         return load_crm_config()["session"]["state_path"]
     except Exception:
         return os.path.join(RUNTIME_BASE_DIR, "session")
+
+
+GYJ_SLOT_IDS = tuple(f"gyj-{index}" for index in range(1, 6))
+
+
+def _gyj_session_dir(slot_id):
+    slot_id = str(slot_id or "gyj-1").strip()
+    profile_name = "admin" if slot_id in {"gyj-1", "admin"} else slot_id
+    safe_name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", profile_name) or "gyj-1"
+    return os.path.join(_runtime_data_base_dir(), "gyj_session", safe_name)
 
 CRM_SLOT_STATE_FILE = os.path.join(_runtime_config_dir(), "crm_slot_state.json")
 crm_slot_state_lock = threading.Lock()
@@ -3818,6 +4747,7 @@ class CRMWorkerPool:
                 pass
 
 crm_pool = CRMWorkerPool()
+gyj_worker = GYJWorkerPool()
 
 def _desktop_startup_login_check_loop():
     """桌面应用启动后验证上次记住的 CRM 登录，避免显示假登录状态。"""
@@ -3875,6 +4805,19 @@ MAX_BATCH_RETRY_LIMIT = 5
 
 BATCH_LOG_LIMIT = 5000
 
+query_slot_reservation_lock = threading.RLock()
+priority_query_work_lock = threading.RLock()
+priority_query_waiters = []
+priority_query_slot_reservations = {}
+priority_query_wakeup_timer = None
+PRIORITY_QUERY_WAKEUP_SECONDS = 1.0
+PRIORITY_QUERY_WORK_ORDER = {
+    'inbound': 1,
+    'service_close': 2,
+    'order_products': 3,
+    'library': 3,
+}
+
 batch_job_lock = threading.Lock()
 batch_jobs = {}
 latest_batch_job_by_slot = {}
@@ -3902,9 +4845,26 @@ transfer_job_lock = threading.Lock()
 transfer_jobs = {}
 latest_transfer_job_by_slot = {}
 
+inbound_job_lock = threading.RLock()
+inbound_jobs = {}
+latest_inbound_job_by_owner = {}
+latest_inbound_job_by_slot = {}
+
+inbound_gyj_job_lock = threading.RLock()
+inbound_gyj_jobs = {}
+latest_inbound_gyj_job_by_owner = {}
+
 service_close_job_lock = threading.Lock()
 service_close_jobs = {}
 latest_service_close_job_by_slot = {}
+latest_service_close_job_id = ''
+service_close_history_lock = threading.RLock()
+
+order_product_job_lock = threading.RLock()
+order_product_jobs = {}
+latest_order_product_job_by_service = {}
+service_order_cache_locks_guard = threading.Lock()
+service_order_cache_locks = {}
 
 summary_job_lock = threading.Lock()
 summary_jobs = {}
@@ -3997,6 +4957,77 @@ def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_typ
         'finished_at': '',
     }
 
+
+def _empty_inbound_job(owner, packing_slip_no, slot_id, slot_label):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'packing_slip_no': str(packing_slip_no or ''),
+        'slot_id': str(slot_id or ''),
+        'slot_label': str(slot_label or ''),
+        'stage': 'waiting',
+        'running': False,
+        'done': False,
+        'success': False,
+        'error': '',
+        'current_page': 0,
+        'page_counts': [],
+        'log_seq': 0,
+        'logs': [],
+        'result': None,
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
+def _purge_completed_inbound_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_jobs.pop(job_id, None)
+        if latest_inbound_job_by_owner.get(owner) == job_id:
+            latest_inbound_job_by_owner.pop(owner, None)
+        for slot_id, mapped_job_id in list(latest_inbound_job_by_slot.items()):
+            if mapped_job_id == job_id:
+                latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _empty_inbound_gyj_job(
+    owner, packing_slip_no, source_job_id, lines, packing_slip_type="", actor=""
+):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'owner': str(owner or ''),
+        'actor': str(actor or ''),
+        'packing_slip_no': str(packing_slip_no or ''),
+        'packing_slip_type': str(packing_slip_type or ''),
+        'source_job_id': str(source_job_id or ''),
+        'stage': 'waiting',
+        'running': False,
+        'done': False,
+        'success': False,
+        'error': '',
+        'current_line': 0,
+        'total_lines': len(lines or []),
+        'log_seq': 0,
+        'logs': [],
+        'completed_products': [],
+        'result': None,
+        'started_at': '',
+        'finished_at': '',
+    }
+
+
+def _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner):
+    owner = str(owner or '')
+    for job_id, job in list(inbound_gyj_jobs.items()):
+        if job.get('owner') != owner or job.get('running') or not job.get('done'):
+            continue
+        inbound_gyj_jobs.pop(job_id, None)
+        if latest_inbound_gyj_job_by_owner.get(owner) == job_id:
+            latest_inbound_gyj_job_by_owner.pop(owner, None)
+
 def _empty_summary_job(slot_id=None):
     return {
         'job_id': uuid.uuid4().hex,
@@ -4052,11 +5083,32 @@ def _empty_service_close_job(slot_id=None, orders=None):
             for index, row in enumerate(orders, 1)
         ],
         'results': [],
+        'actor': '',
+        'selected_barcodes': [],
         'missing': [],
         'no_service': [],
+        'history_saved': False,
         'log_seq': 0,
         'logs': [],
         'started_at': '',
+        'finished_at': '',
+    }
+
+def _empty_order_product_job(service_no):
+    return {
+        'job_id': uuid.uuid4().hex,
+        'service_no': _clean_export_value(service_no),
+        'order_no': '',
+        'slot_id': '',
+        'slot_label': '',
+        'running': False,
+        'done': False,
+        'success': False,
+        'stage': 'waiting',
+        'message': '',
+        'error': '',
+        'started_at': '',
+        '_started_ts': 0,
         'finished_at': '',
     }
 
@@ -4072,6 +5124,8 @@ def _empty_bulk_login_job(scope, slots=None):
         'password': '',
         'stop_requested': False,
         'captcha': '',
+        'captcha_generation': 0,
+        'captcha_submitting': False,
         'step1_done': False,
         'log_seq': 0,
         'logs': [],
@@ -4082,6 +5136,7 @@ def _empty_bulk_login_job(scope, slots=None):
                 'label': slot['label'],
                 'status': 'pending',
                 'message': '',
+                'captcha_generation': -1,
             }
             for slot in (slots or [])
         ],
@@ -4239,6 +5294,10 @@ def _transfer_job_log(job_id, message, level='dim'):
     _job_log(transfer_job_lock, transfer_jobs, job_id, message, level, 500)
     _sync_transfer_record_from_job(job_id)
 
+
+def _inbound_job_log(job_id, message, level='dim'):
+    _job_log(inbound_job_lock, inbound_jobs, job_id, message, level, 300)
+
 def _service_close_job_log(job_id, message, level='dim'):
     _job_log(service_close_job_lock, service_close_jobs, job_id, message, level, 1000)
 
@@ -4313,6 +5372,7 @@ def _finalize_bulk_login_job_if_ready(job_id):
             )
 
 def _update_bulk_login_slot(job_id, slot_id, status, message=''):
+    should_dispatch = False
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
@@ -4321,21 +5381,33 @@ def _update_bulk_login_slot(job_id, slot_id, status, message=''):
             if slot.get('id') == slot_id:
                 slot['status'] = status
                 slot['message'] = message
-                return dict(slot)
-    return None
+                should_dispatch = status == 'logged_in' and slot.get('kind') == 'query'
+                updated = dict(slot)
+                break
+        else:
+            return None
+    if should_dispatch:
+        dispatch_priority_query_work()
+    return updated
 
-def _submit_bulk_login_slot(job_id, slot, captcha):
+def _submit_bulk_login_slot(job_id, slot, captcha, captcha_generation=None):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         if not job:
             return False
+        generation = int(job.get('captcha_generation') or 0) if captcha_generation is None else int(captcha_generation)
         username = job.get('username') or ''
         password = job.get('password') or ''
         target = next((row for row in job.get('slots') or [] if row.get('id') == slot['id']), None)
-        if not target or target.get('status') != 'waiting_captcha':
+        if (
+            not target
+            or target.get('status') != 'waiting_captcha'
+            or int(target.get('captcha_generation', -1)) == generation
+        ):
             return False
         target['status'] = 'submitting_captcha'
         target['message'] = '正在提交验证码'
+        target['captcha_generation'] = generation
     _bulk_login_job_log(job_id, f"{slot['label']} 提交验证码", 'info')
     try:
         worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
@@ -4364,69 +5436,127 @@ def _submit_bulk_login_slot(job_id, slot, captcha):
     keep_waiting = any(text in message_text for text in ["验证码可能错误", "验证码不能为空", "验证码已填入"])
     _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha' if keep_waiting else 'failed', message_text)
     _bulk_login_job_log(job_id, f"{slot['label']} 验证码提交失败：{message or '未知错误'}", 'error')
-    with bulk_login_job_lock:
-        job = bulk_login_jobs.get(job_id)
-        if job:
-            job['captcha'] = ''
     return False
 
 def _submit_bulk_login_pending(job_id):
-    while True:
+    try:
         with bulk_login_job_lock:
             job = bulk_login_jobs.get(job_id)
             if not job or not job.get('captcha'):
                 return
             captcha = job['captcha']
-            pending = [dict(slot) for slot in job.get('slots') or [] if slot.get('status') == 'waiting_captcha']
-        if not pending:
-            _finalize_bulk_login_job_if_ready(job_id)
-            return
-        for slot in pending:
-            _submit_bulk_login_slot(job_id, slot, captcha)
+            generation = int(job.get('captcha_generation') or 0)
+            pending = [
+                dict(slot)
+                for slot in job.get('slots') or []
+                if slot.get('status') == 'waiting_captcha'
+                and int(slot.get('captcha_generation', -1)) != generation
+            ]
+        if pending:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending)) as executor:
+                futures = [
+                    executor.submit(
+                        _submit_bulk_login_slot, job_id, slot, captcha, generation
+                    )
+                    for slot in pending
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
         _finalize_bulk_login_job_if_ready(job_id)
+    finally:
+        with bulk_login_job_lock:
+            job = bulk_login_jobs.get(job_id)
+            if job:
+                job['captcha_submitting'] = False
+                if job.get('step1_done'):
+                    job['captcha'] = ''
+
+def _run_bulk_login_one_slot(job_id, slot, username, password):
+    """Per-slot login worker. Each slot has its own Playwright Chromium instance
+    so it’s safe to run these in parallel — in fact, that’s exactly what each
+    query/transfer worker was designed to do for batch barcode queries."""
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        if not job or job.get('stop_requested'):
+            return
+    _update_bulk_login_slot(job_id, slot['id'], 'opening', '正在打开登录页')
+    _bulk_login_job_log(job_id, f"打开 {slot['label']} 登录页", 'info')
+    success, message = False, ""
+    for attempt in range(2):
+        try:
+            worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
+            success, message = worker.login_step1(username, password)
+        except Exception as e:
+            success, message = False, str(e)
+        if success:
+            break
+        if attempt == 0:
+            _bulk_login_job_log(
+                job_id,
+                f"{slot['label']} 登录页未准备好，准备重试一次：{message or '未知错误'}",
+                'warn',
+            )
+            time.sleep(2)
+
+    if not success:
+        _update_bulk_login_slot(job_id, slot['id'], 'failed', message or '登录失败')
+        _bulk_login_job_log(job_id, f"{slot['label']} 登录失败：{message or '未知错误'}", 'error')
+        return
+
+    if _slot_logged_in_message(message):
+        _update_bulk_login_slot(job_id, slot['id'], 'logged_in', message or '已登录')
+        _bulk_login_job_log(job_id, f"{slot['label']} 已登录", 'success')
+        return
+
+    _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha', message or '等待验证码')
+    _bulk_login_job_log(job_id, f"{slot['label']} 已进入验证码步骤", 'success')
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        captcha = (job or {}).get('captcha') or ''
+        captcha_generation = int((job or {}).get('captcha_generation') or 0)
+    if captcha:
+        _submit_bulk_login_slot(job_id, slot, captcha, captcha_generation)
+
 
 def _run_bulk_login_job(job_id, username, password):
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
         slots = [dict(slot) for slot in (job or {}).get('slots') or []]
     _bulk_login_job_log(job_id, f"开始批量登录 {len(slots)} 个 CRM 通道", 'info')
-    for slot in slots:
+    if not slots:
         with bulk_login_job_lock:
             job = bulk_login_jobs.get(job_id)
-            if not job or job.get('stop_requested'):
-                break
-        _update_bulk_login_slot(job_id, slot['id'], 'opening', '正在打开登录页')
-        _bulk_login_job_log(job_id, f"打开 {slot['label']} 登录页", 'info')
-        success, message = False, ""
-        for attempt in range(2):
+            if job:
+                job['step1_done'] = True
+        _submit_bulk_login_pending(job_id)
+        _finalize_bulk_login_job_if_ready(job_id)
+        return
+    # Each slot owns its own Playwright Chromium worker (see crm_pool). Run
+    # them all in parallel so the user’s batch-login finishes in roughly the
+    # time of the slowest single slot rather than the sum of every slot.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(slots))) as ex:
+        futures = [
+            ex.submit(_run_bulk_login_one_slot, job_id, slot, username, password)
+            for slot in slots
+        ]
+        # Wait for everyone. as_completed lets the UI update live as each
+        # slot finishes (each helper already updates state under the lock).
+        for f in concurrent.futures.as_completed(futures):
             try:
-                worker = crm_pool.get(slot['id'], slot.get('kind') or 'query')
-                success, message = worker.login_step1(username, password)
+                f.result()
             except Exception as e:
-                success, message = False, str(e)
-            if success:
-                break
-            if attempt == 0:
-                _bulk_login_job_log(job_id, f"{slot['label']} 登录页未准备好，准备重试一次：{message or '未知错误'}", 'warn')
-                time.sleep(2)
+                # Shouldn’t happen — the helpers swallow their own errors.
+                _bulk_login_job_log(job_id, f"通道登录出现异常：{e}", 'error')
 
-        if not success:
-            _update_bulk_login_slot(job_id, slot['id'], 'failed', message or '登录失败')
-            _bulk_login_job_log(job_id, f"{slot['label']} 登录失败：{message or '未知错误'}", 'error')
-            continue
-
-        if _slot_logged_in_message(message):
-            _update_bulk_login_slot(job_id, slot['id'], 'logged_in', message or '已登录')
-            _bulk_login_job_log(job_id, f"{slot['label']} 已登录", 'success')
-            continue
-
-        _update_bulk_login_slot(job_id, slot['id'], 'waiting_captcha', message or '等待验证码')
-        _bulk_login_job_log(job_id, f"{slot['label']} 已进入验证码步骤", 'success')
-        with bulk_login_job_lock:
-            job = bulk_login_jobs.get(job_id)
-            captcha = (job or {}).get('captcha') or ''
-        if captcha:
-            _submit_bulk_login_slot(job_id, slot, captcha)
+    with bulk_login_job_lock:
+        job = bulk_login_jobs.get(job_id)
+        if job:
+            job['step1_done'] = True
+            if job.get('stop_requested'):
+                job['running'] = False
+                job['done'] = True
+                job['error'] = '批量登录已取消'
+                job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     with bulk_login_job_lock:
         job = bulk_login_jobs.get(job_id)
@@ -4693,6 +5823,19 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
         auto_library = {'queried': [], 'failed': []}
         representatives = _missing_product_library_representatives(barcodes)
         if representatives:
+            with summary_job_lock:
+                job = summary_jobs.get(job_id)
+                if job is not None:
+                    job['barcode_states'] = {
+                        barcode: {
+                            'state': 'pending',
+                            'channel': '',
+                            'channel_label': '',
+                            'message': '等待查询',
+                            'level': 'dim',
+                        }
+                        for barcode in representatives.values()
+                    }
             items = "，".join([f"{prefix}←{barcode}" for prefix, barcode in representatives.items()])
             log(f"发现 {len(representatives)} 个缺失前缀：{items}", 'info')
             log("将自动逐个查询代表条码补充条码匹配；离开本页面不会停止后台汇总，可返回移库页查看日志", 'dim')
@@ -4701,7 +5844,24 @@ def _run_summary_job(job_id, worker, barcodes, transfer_type, distributor, exclu
                 log(ready_message, 'error')
                 finish(False, ready_message)
                 return
-            auto_library = ensure_product_library_for_barcodes(barcodes, log, worker)
+            def _summary_state_cb(barcode, state, channel, message='', level='dim'):
+                if state in ('querying', 'ok', 'failed'):
+                    status_message = message or {
+                        'querying': '查询中…',
+                        'ok': '查询成功',
+                        'failed': '查询失败',
+                    }.get(state, '')
+                    with summary_job_lock:
+                        job = summary_jobs.get(job_id)
+                        if job is not None:
+                            job.setdefault('barcode_states', {})[barcode] = {
+                                'state': state,
+                                'channel': channel,
+                                'channel_label': channel,
+                                'message': _safe_log_text(status_message),
+                                'level': level,
+                            }
+            auto_library = ensure_product_library_for_barcodes(barcodes, log, worker, state_tracker=_summary_state_cb)
             if auto_library.get('failed'):
                 failed_items = "，".join([
                     f"{row.get('prefix')}←{row.get('barcode')}"
@@ -4790,6 +5950,309 @@ def _run_transfer_job(job_id, worker, summary, distributor, transfer_type, remar
                 job['error'] = _brief_batch_error(e, 800)
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"移库出错：{e}", 'error')
+
+
+def _run_inbound_job(job_id, worker):
+    def set_stage(stage):
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job['stage'] = stage
+
+    def log(message, level='dim'):
+        text = str(message or '')
+        if '正在打开' in text:
+            set_stage('navigation')
+        elif '正在查询' in text:
+            set_stage('search')
+        _inbound_job_log(job_id, text, level)
+
+    def progress(entry=None):
+        row = dict(entry or {})
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if not job:
+                return
+            job['stage'] = 'reading'
+            job['current_page'] = row.get('page') or job.get('current_page') or 0
+            if row:
+                job['page_counts'].append(row)
+
+    with inbound_job_lock:
+        job = inbound_jobs.get(job_id)
+        if not job:
+            return
+        packing_slip_no = job['packing_slip_no']
+        slot_id = job['slot_id']
+        job['stage'] = 'navigation'
+
+    try:
+        ok, raw_result = worker.extract_packing_slip(
+            packing_slip_no,
+            log=log,
+            progress=progress,
+        )
+        if not ok:
+            error = _brief_batch_error(raw_result, 800) or '读取装箱单失败'
+            with inbound_job_lock:
+                job = inbound_jobs.get(job_id)
+                if job:
+                    job.update({
+                        'stage': 'failed',
+                        'running': False,
+                        'done': True,
+                        'success': False,
+                        'error': error,
+                        'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    })
+            log(error, 'error')
+            return
+
+        set_stage('organizing')
+        source = raw_result if isinstance(raw_result, dict) else {}
+        result = build_inbound_result(
+            packing_slip_no,
+            source.get('rows') or [],
+            source.get('page_counts') or [],
+            shipment_rows=source.get('shipment_rows') or [],
+            packing_slip_type=source.get('packing_slip_type') or '',
+        )
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        upsert_inbound_history(result, finished_at)
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'success',
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'error': '',
+                    'current_page': (result.get('pages_read') or [0])[-1],
+                    'page_counts': list(result.get('page_counts') or []),
+                    'result': result,
+                    'finished_at': finished_at,
+                })
+        log('装箱单入库明细整理完成', 'success')
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or '读取装箱单失败'
+        with inbound_job_lock:
+            job = inbound_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'failed',
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log(message, 'error')
+    finally:
+        with inbound_job_lock:
+            if latest_inbound_job_by_slot.get(slot_id) == job_id:
+                latest_inbound_job_by_slot.pop(slot_id, None)
+
+
+def _run_inbound_gyj_job(job_id, worker, lines, lease=None):
+    def set_stage(stage):
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = stage
+
+    def log(message, level='dim'):
+        text = str(message or '')
+        if '预检查' in text or '预建' in text:
+            set_stage('pre_checking')
+        elif '新建' in text:
+            set_stage('creating')
+        elif '录入' in text:
+            set_stage('filling')
+        elif '核对' in text:
+            set_stage('verifying')
+        elif '保存' in text:
+            set_stage('saving')
+        _job_log(inbound_gyj_job_lock, inbound_gyj_jobs, job_id, text, level, 300)
+
+    def progress(entry=None):
+        row = dict(entry or {})
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job['stage'] = 'filling'
+                job['current_line'] = int(row.get('current_line') or job.get('current_line') or 0)
+                job['total_lines'] = int(row.get('total_lines') or job.get('total_lines') or 0)
+                line = row.get('line')
+                if not isinstance(line, dict):
+                    current_index = job['current_line'] - 1
+                    line = lines[current_index] if 0 <= current_index < len(lines) else None
+                if isinstance(line, dict):
+                    product = {
+                        'product_code': str(line.get('product_code') or ''),
+                        'description': str(line.get('description') or ''),
+                        'quantity': int(line.get('quantity') or 0),
+                        'serials': list(line.get('serials') or []),
+                        'record_type': str(line.get('record_type') or ''),
+                    }
+                    completed = job.setdefault('completed_products', [])
+                    if len(completed) < job['current_line']:
+                        completed.append(product)
+
+    with inbound_gyj_job_lock:
+        job = inbound_gyj_jobs.get(job_id)
+        if not job:
+            if lease is not None:
+                lease.release()
+            return
+        job['stage'] = 'creating'
+        packing_slip_no = job['packing_slip_no']
+        packing_slip_type = job.get('packing_slip_type') or ''
+
+    try:
+        ok, result = worker.save_purchase_inbound(
+            packing_slip_no, lines, packing_slip_type=packing_slip_type,
+            log=log, progress=progress,
+        )
+        if not ok:
+            raise GYJInboundError(_brief_batch_error(result, 800) or 'GYJ 采购入库保存失败')
+        saved_products = [
+            {
+                'product_code': str(line.get('product_code') or ''),
+                'description': str(line.get('description') or ''),
+                'quantity': int(line.get('quantity') or 0),
+                'serials': list(line.get('serials') or []),
+                'record_type': str(line.get('record_type') or ''),
+            }
+            for line in lines
+        ]
+        saved_result = dict(result) if isinstance(result, dict) else {}
+        saved_result['products'] = saved_products
+        finished_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with inbound_gyj_job_lock:
+            active_job = inbound_gyj_jobs.get(job_id) or {}
+            actor = str(active_job.get('actor') or active_job.get('owner') or '')
+        try:
+            upsert_gyj_inbound_history(
+                saved_result, packing_slip_no, actor, finished_at
+            )
+        except Exception as history_error:
+            log(
+                'GYJ 已入库，但历史记录保存失败：'
+                + (_brief_batch_error(history_error, 300) or '未知错误'),
+                'warn',
+            )
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'success',
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'error': '',
+                    'result': saved_result,
+                    'finished_at': finished_at,
+                })
+        log('GYJ 采购入库单已保存', 'success')
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库保存失败'
+        with inbound_gyj_job_lock:
+            job = inbound_gyj_jobs.get(job_id)
+            if job:
+                job.update({
+                    'stage': 'failed',
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
+        log(message, 'error')
+    finally:
+        if lease is not None:
+            lease.release()
+
+def _run_order_product_job(job_id, worker):
+    with order_product_job_lock:
+        job = order_product_jobs.get(job_id)
+        if not job:
+            return
+        service_no = job['service_no']
+
+    try:
+        def log(message, _level='info'):
+            with order_product_job_lock:
+                current = order_product_jobs.get(job_id)
+                if current and current.get('running'):
+                    current['message'] = _brief_batch_error(message, 800) or '正在查询订单产品明细'
+
+        ok, result = worker.query_related_order_products(service_no, log=log)
+        if not ok:
+            error = result.get('error') if isinstance(result, dict) else result
+            raise RuntimeError(_brief_batch_error(error, 800) or '订单产品明细查询失败')
+        if not isinstance(result, dict):
+            raise ValueError('订单产品明细返回格式不正确')
+
+        order_no = _clean_export_value(result.get('order_no'))
+        order_products = list(result.get('order_products') or [])
+        service_fields = list(result.get('service_fields') or [])
+        service_products = list(result.get('service_products') or [])
+        with _service_order_cache_lock(service_no):
+            filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as file:
+                    detail = json.load(file)
+            else:
+                detail = {'service_no': service_no, 'products': service_products}
+            if not isinstance(detail, dict):
+                raise ValueError('服务单详情格式不正确')
+            if service_products:
+                detail['products'] = service_products
+            detail['service_no'] = service_no
+            comparison = _build_service_order_product_comparison(
+                detail.get('products') or [],
+                order_products,
+            )
+            queried_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            detail['fields'] = service_fields
+            detail['order_lookup'] = {
+                'order_no': order_no,
+                'products': order_products,
+                'comparison': comparison,
+                'queried_at': queried_at,
+            }
+            detail_url = _write_service_order_detail(service_no, detail)
+            if not detail_url:
+                raise RuntimeError('服务单详情保存失败')
+
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            if current:
+                current.update({
+                    'order_no': order_no,
+                    'running': False,
+                    'done': True,
+                    'success': True,
+                    'stage': 'success',
+                    'message': '订单产品明细查询完成',
+                    'error': '',
+                    'finished_at': queried_at,
+                })
+    except Exception as error:
+        message = _brief_batch_error(error, 800) or '订单产品明细查询失败'
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            if current:
+                current.update({
+                    'running': False,
+                    'done': True,
+                    'success': False,
+                    'stage': 'failed',
+                    'message': message,
+                    'error': message,
+                    'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                })
 
 def _run_service_close_job(job_id, workers, orders):
     def log(message, level='dim'):
@@ -4940,6 +6403,7 @@ def _run_service_close_job(job_id, workers, orders):
         closed_count = 0
         already_closed_count = 0
         failed_count = 0
+        failed_service_nos = []
         order_map = {
             _clean_export_value(row.get("service_no")): row
             for row in (orders or [])
@@ -4967,6 +6431,8 @@ def _run_service_close_job(job_id, workers, orders):
                 _record_service_closed_for_barcodes(service_no, row.get("barcodes") or [])
             else:
                 failed_count += 1
+                if service_no not in failed_service_nos:
+                    failed_service_nos.append(service_no)
 
         general_error = "; ".join(worker_errors[:3])
         with service_close_job_lock:
@@ -4983,11 +6449,25 @@ def _run_service_close_job(job_id, workers, orders):
             job['already_closed_count'] = already_closed_count
             job['failed_count'] = failed_count
             job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        for service_no in failed_service_nos:
+            _job, created = _start_order_product_job(service_no, automatic=True)
+            log(
+                f"{service_no} 结单失败，订单产品明细{'已自动加入查询队列' if created else '已有查询任务'}",
+                "warn",
+            )
         elapsed = format_duration_seconds(time.time() - started)
         if failed_count:
             log(f"批量结单完成：新结单 {closed_count} 个，原本已结单 {already_closed_count} 个，失败 {failed_count} 个，总耗时 {elapsed}", "warn")
         else:
             log(f"批量结单完成：新结单 {closed_count} 个，原本已结单 {already_closed_count} 个，总耗时 {elapsed}", "success")
+        with service_close_job_lock:
+            job = service_close_jobs.get(job_id)
+            history_record = None
+            if job and not job.get('history_saved'):
+                job['history_saved'] = True
+                history_record = _service_close_history_record(job)
+        if history_record:
+            _append_service_close_history(history_record)
     except Exception as e:
         error = _brief_batch_error(e, 800)
         with service_close_job_lock:
@@ -4999,6 +6479,14 @@ def _run_service_close_job(job_id, workers, orders):
                 job['error'] = error
                 job['finished_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log(f"批量结单出错：{error}", "error")
+        with service_close_job_lock:
+            job = service_close_jobs.get(job_id)
+            history_record = None
+            if job and not job.get('history_saved'):
+                job['history_saved'] = True
+                history_record = _service_close_history_record(job)
+        if history_record:
+            _append_service_close_history(history_record)
 
 def _run_background_query_job(job_id, workers):
     with background_query_job_lock:
@@ -5088,6 +6576,9 @@ def _run_background_query_job(job_id, workers):
             else:
                 return
         while not stop_requested():
+            _yield_background_query_slot_to_priority_work(job_id, slot_id)
+            if stop_requested():
+                return
             try:
                 item_index = item_queue.get_nowait()
             except queue.Empty:
@@ -5299,6 +6790,7 @@ def _run_batch_job(job_id, worker, barcodes, retry_limit=DEFAULT_BATCH_RETRY_LIM
             _batch_job_log(job_id, error, 'error')
             return
     for idx, barcode in enumerate(barcodes, start=1):
+        _yield_batch_query_slot_to_priority_work(job_id, worker.slot_id)
         with batch_job_lock:
             job = batch_jobs.get(job_id)
             if not job:
@@ -5413,16 +6905,32 @@ BARCODE_DIR = os.path.join(DATA_BASE_DIR, "barcode")
 ARCHIVE_DIR = os.path.join(BARCODE_DIR, "archived")
 SERVICE_ORDER_DIR = os.path.join(DATA_BASE_DIR, "service_orders")
 DATA_FILE = os.path.join(CONFIG_DIR, "barcode_data.json")
+SERVICE_CLOSE_HISTORY_FILE = os.path.join(CONFIG_DIR, "service_close_history.json")
+SERVICE_CLOSE_HISTORY_LIMIT = 500
 PRODUCT_LIBRARY_FILE = os.path.join(CONFIG_DIR, "product_library.json")
 ACCOUNTS_FILE = os.path.join(CONFIG_DIR, "accounts.json")
 DISTRIBUTOR_HISTORY_FILE = os.path.join(CONFIG_DIR, "distributor_history.json")
 DISTRIBUTOR_HISTORY_DELETED_FILE = os.path.join(CONFIG_DIR, "distributor_history_deleted.json")
+DISTRIBUTOR_HISTORY_LOCK = threading.RLock()
+DISTRIBUTOR_HISTORY_LOCK_STATE = threading.local()
 TRANSFER_RECORDS_DB_FILE = os.path.join(CONFIG_DIR, "transfer_records.sqlite3")
+INBOUND_HISTORY_DB_FILE = os.path.join(CONFIG_DIR, "inbound_history.sqlite3")
+INVENTORY_DB_FILE = os.path.join(CONFIG_DIR, "inventory_stocktake.sqlite3")
 RESULTS_DIR = os.path.join(DATA_BASE_DIR, "results")
 TEMP_QUERY_DIR = os.path.join(DATA_BASE_DIR, "temp_queries")
 RUNTIME_CONFIG_FILE = _runtime_config_path()
 CRM_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "crm_credentials.json")
 crm_credentials_lock = threading.Lock()
+GYJ_CREDENTIALS_FILE = os.path.join(CONFIG_DIR, "gyj_credentials.json")
+gyj_credentials_lock = threading.Lock()
+inventory_store = InventoryStore(INVENTORY_DB_FILE)
+inventory_service = InventoryService(
+    inventory_store, lambda owner: gyj_business_worker_for_owner(owner)
+)
+inventory_sync_lock = threading.Lock()
+inventory_sync_threads = {}
+inventory_serial_prefetch_lock = threading.Lock()
+inventory_serial_prefetch_threads = {}
 DEFAULT_OWN_DEALER_NAME = "江西省天麓工贸有限公司"
 DEFAULT_FROZEN_WAREHOUSE_NAME = "江西天麓冻结仓库"
 OWN_DEALER_NAME = DEFAULT_OWN_DEALER_NAME
@@ -5493,6 +7001,7 @@ def _migrate_config_files_from_barcode_dir():
         "runtime_config.json",
         "crm_slot_state.json",
         "crm_credentials.json",
+        "gyj_credentials.json",
     ):
         _migrate_root_config_file(filename)
     for filename in (
@@ -5812,6 +7321,75 @@ def _clean_export_value(value):
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return html_mod.unescape(str(value)).replace('\xa0', ' ').strip()
+
+def _normalize_comparison_product_code(value):
+    return _clean_export_value(value).upper()
+
+RELATED_ORDER_FIELD_LABELS = ("关联订单", "关联订单号", "订单号", "销售订单号")
+
+def _related_order_no_from_service_fields(fields):
+    for wanted in RELATED_ORDER_FIELD_LABELS:
+        for field in fields or []:
+            if _clean_export_value((field or {}).get("label")).rstrip("：:") == wanted:
+                return _clean_export_value((field or {}).get("value"))
+    return ""
+
+def _parse_order_product_quantity(value):
+    text = _clean_export_value(value).replace(",", "")
+    try:
+        number = Decimal(text)
+    except (InvalidOperation, ValueError):
+        raise ValueError(f"订单产品数量无法解析：{value}")
+    if not number.is_finite() or number < 0 or number != number.to_integral_value():
+        raise ValueError(f"订单产品数量必须是非负整数：{value}")
+    return int(number)
+
+def _build_service_order_product_comparison(service_products, order_products):
+    service_counts = {}
+    service_names = {}
+    order_counts = {}
+    order_names = {}
+    service_order = []
+    order_order = []
+    for product in service_products or []:
+        code = _normalize_comparison_product_code((product or {}).get("product_code"))
+        if not code:
+            continue
+        if code not in service_counts:
+            service_order.append(code)
+        service_counts[code] = service_counts.get(code, 0) + 1
+        service_names.setdefault(code, _clean_export_value((product or {}).get("product_name")))
+    for product in order_products or []:
+        code = _normalize_comparison_product_code((product or {}).get("product_code"))
+        if not code:
+            raise ValueError("订单产品缺少产品编码")
+        if code not in order_counts:
+            order_order.append(code)
+        order_counts[code] = order_counts.get(code, 0) + _parse_order_product_quantity(
+            (product or {}).get("quantity")
+        )
+        order_names.setdefault(code, _clean_export_value((product or {}).get("product_name")))
+    rows = []
+    for code in [*service_order, *[code for code in order_order if code not in service_counts]]:
+        order_quantity = order_counts.get(code, 0)
+        service_quantity = service_counts.get(code, 0)
+        if not service_quantity:
+            status, label = "service_missing", "服务单缺少"
+        elif code not in order_counts:
+            status, label = "order_missing", "订单缺少"
+        elif order_quantity == service_quantity:
+            status, label = "matched", "一致"
+        else:
+            status, label = "quantity_mismatch", "数量不一致"
+        rows.append({
+            "product_code": code,
+            "product_name": service_names.get(code) or order_names.get(code) or "",
+            "order_quantity": order_quantity,
+            "service_quantity": service_quantity,
+            "status": status,
+            "status_label": label,
+        })
+    return rows
 
 def is_disassembly_barcode(barcode):
     barcode = _clean_export_value(barcode)
@@ -6350,7 +7928,19 @@ def _missing_product_library_representatives(selected_barcodes):
             groups[prefix] = barcode
     return groups
 
-def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None):
+def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None, state_tracker=None):
+    """Query each missing-prefix representative barcode through crm_pool.
+
+    A threaded ThreadPoolExecutor fans the queries out across the available
+    CRM query channels so the user sees parallel progress in the frontend
+    barcode table, not a sequential one-at-a-time crawl.
+
+    `state_tracker` is an optional callback invoked for each barcode with
+    (barcode, state, channel, message, level) where state is one of
+    {'querying','ok','failed'}. The transfer / summary callers pass a tracker
+    that updates the in-memory job's barcode_states dict so the polling
+    response can stream each query's latest step in a live per-barcode table.
+    """
     representatives = _missing_product_library_representatives(selected_barcodes)
     result = {'queried': [], 'failed': []}
     if not representatives:
@@ -6360,14 +7950,42 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
         if log:
             log(message, level)
 
-    total = len(representatives)
+    with crm_pool.pool_lock:
+        pool_slot_ids = list(crm_pool.query_slots)
+    if not pool_slot_ids:
+        pool_slot_ids = [(worker.slot_id if worker else crm_pool.default_slot('query'))]
+
+    def track(barcode, state, channel, message='', level='dim'):
+        if state_tracker:
+            try:
+                state_tracker(barcode, state, channel, message, level)
+            except Exception:
+                pass
+
+    items = list(representatives.items())
+    total = len(items)
     emit(f"发现 {total} 个产品前缀未维护，先各查询 1 个代表条码补充条码匹配")
-    for index, (prefix, barcode) in enumerate(representatives.items(), 1):
-        emit(f"自动补充 {index}/{total}：前缀 {prefix}，代表条码 {barcode}", "info")
-        emit(f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}", "dim")
+
+    # Snapshot the per-slot workers up front so we don't reallocate between
+    # rounds; `worker` argument still wins (single-shot legacy callers) but
+    # the new normal path uses the crm_pool channel pool.
+    slot_workers = {slot: crm_pool.get(slot, 'query') for slot in pool_slot_ids}
+
+    def run_one(index_0, slot_id, prefix, barcode):
+        worker_for_slot = slot_workers.get(slot_id) or worker or crm_pool.get(kind='query')
+        channel_label = _query_slot_label(slot_id)
         existing_paths = existing_barcode_result_paths(barcode)
         had_metadata = barcode_metadata_exists(barcode)
-        success, message = (worker or crm_pool.get(kind="query")).query_barcode(barcode, log, TEMP_QUERY_DIR)
+        emit(f"自动补充 {index_0 + 1}/{total}：前缀 {prefix}，代表条码 {barcode}（{channel_label}）", "info")
+        start_message = f"准备查询代表条码 {barcode}，用于补充前缀 {prefix}"
+        emit(start_message, "dim")
+        track(barcode, 'querying', channel_label, start_message, 'dim')
+
+        def row_log(message, level='dim'):
+            emit(message, level)
+            track(barcode, 'querying', channel_label, message, level)
+
+        success, message = worker_for_slot.query_barcode(barcode, row_log, TEMP_QUERY_DIR)
         if success:
             delete_temporary_query_result(
                 barcode,
@@ -6375,18 +7993,34 @@ def ensure_product_library_for_barcodes(selected_barcodes, log=None, worker=None
                 keep_paths=existing_paths,
                 keep_metadata=had_metadata,
             )
-        emit(f"代表条码 {barcode} 查询返回：{'成功' if success else '失败'}", "success" if success else "warn")
+        emit(f"代表条码 {barcode} 查询返回：{'成功' if success else '失败'}（{channel_label}）", "success" if success else "warn")
+        final_message = "查询成功" if success else f"查询失败：{_brief_batch_error(message, 300)}"
+        track(
+            barcode,
+            'ok' if success else 'failed',
+            channel_label,
+            final_message,
+            'success' if success else 'error',
+        )
         if success and match_product_library(barcode):
-            result['queried'].append({'prefix': prefix, 'barcode': barcode})
+            result['queried'].append({'prefix': prefix, 'barcode': barcode, 'channel': channel_label})
             matched = match_product_library(barcode) or {}
             emit(
-                f"前缀 {prefix} 已写入条码匹配：{matched.get('product_code', '')} / {matched.get('product_name', '')}",
+                f"前缀 {prefix} 已写入条码匹配：{matched.get('product_code', '')} / {matched.get('product_name', '')}（{channel_label}）",
                 'success'
             )
         else:
             error = _brief_batch_error(message, 300)
-            result['failed'].append({'prefix': prefix, 'barcode': barcode, 'error': error})
-            emit(f"前缀 {prefix} 条码匹配补充失败：{error}", 'warn')
+            result['failed'].append({'prefix': prefix, 'barcode': barcode, 'error': error, 'channel': channel_label})
+            emit(f"前缀 {prefix} 条码匹配补充失败：{error}（{channel_label}）", 'warn')
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(pool_slot_ids))) as ex:
+        futures = [
+            ex.submit(run_one, i, pool_slot_ids[i % len(pool_slot_ids)], prefix, barcode)
+            for i, (prefix, barcode) in enumerate(items)
+        ]
+        for f in concurrent.futures.as_completed(futures):
+            f.result()  # surface any exception that ran one of the queries
     emit(
         f"自动补充完成：成功 {len(result['queried'])} 个，失败 {len(result['failed'])} 个",
         "success" if not result['failed'] else "warn"
@@ -6424,14 +8058,170 @@ def _query_slot_has_running_batch(slot_id):
         job = batch_jobs.get(job_id)
         return bool(job and job.get('running'))
 
+
+def _query_slot_has_running_background_batch(slot_id):
+    with background_query_job_lock:
+        return any(
+            job.get('running') and slot_id in (job.get('slot_ids') or [])
+            for job in background_query_jobs.values()
+        )
+
 def _query_slot_has_running_service_close(slot_id):
     with service_close_job_lock:
         job_id = latest_service_close_job_by_slot.get(slot_id)
         job = service_close_jobs.get(job_id)
         return bool(job and job.get('running'))
 
+
+def _query_slot_has_running_inbound(slot_id):
+    with inbound_job_lock:
+        job_id = latest_inbound_job_by_slot.get(slot_id)
+        job = inbound_jobs.get(job_id)
+        return bool(job and job.get('running'))
+
+
+def _query_slot_has_priority_reservation(slot_id):
+    with priority_query_work_lock:
+        return slot_id in priority_query_slot_reservations
+
+
+def _release_priority_query_slot(slot_id):
+    with priority_query_work_lock:
+        priority_query_slot_reservations.pop(slot_id, None)
+    dispatch_priority_query_work()
+
+
+def enqueue_priority_query_work(kind, job_id, launch):
+    with priority_query_work_lock:
+        priority_query_waiters.append({
+            'kind': kind,
+            'job_id': str(job_id or ''),
+            'launch': launch,
+            'sequence': time.monotonic(),
+        })
+        priority_query_waiters.sort(
+            key=lambda row: (PRIORITY_QUERY_WORK_ORDER.get(row['kind'], 99), row['sequence'])
+        )
+    dispatch_priority_query_work()
+
+
+def _schedule_priority_query_wakeup():
+    global priority_query_wakeup_timer
+    with priority_query_work_lock:
+        if not priority_query_waiters:
+            if priority_query_wakeup_timer is not None:
+                priority_query_wakeup_timer.cancel()
+                priority_query_wakeup_timer = None
+        elif priority_query_wakeup_timer is None:
+            timer = threading.Timer(PRIORITY_QUERY_WAKEUP_SECONDS, _retry_priority_query_work)
+            timer.daemon = True
+            priority_query_wakeup_timer = timer
+            timer.start()
+
+
+def _retry_priority_query_work():
+    global priority_query_wakeup_timer
+    with priority_query_work_lock:
+        if priority_query_wakeup_timer is not threading.current_thread():
+            return
+    try:
+        dispatch_priority_query_work()
+    except Exception as error:
+        print(f"  [优先查询调度] 重试失败: {_brief_batch_error(error, 160)}")
+    finally:
+        with priority_query_work_lock:
+            if priority_query_wakeup_timer is threading.current_thread():
+                priority_query_wakeup_timer = None
+        _schedule_priority_query_wakeup()
+
+
+def dispatch_priority_query_work():
+    with query_slot_reservation_lock:
+        while True:
+            with priority_query_work_lock:
+                if not priority_query_waiters:
+                    _schedule_priority_query_wakeup()
+                    return
+            worker, slot_id, slot_label, _error = _select_idle_query_worker_desc()
+            if not worker:
+                _schedule_priority_query_wakeup()
+                return
+            with priority_query_work_lock:
+                if not priority_query_waiters or slot_id in priority_query_slot_reservations:
+                    continue
+                waiter = priority_query_waiters.pop(0)
+                priority_query_slot_reservations[slot_id] = waiter['job_id']
+            try:
+                waiter['launch'](worker, slot_id, slot_label)
+            except Exception:
+                _release_priority_query_slot(slot_id)
+                raise
+
+
+def _has_waiting_priority_query_work():
+    with priority_query_work_lock:
+        return bool(priority_query_waiters)
+
+
+def _yield_background_query_slot_to_priority_work(job_id, slot_id):
+    if not _has_waiting_priority_query_work():
+        return False
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if not job or not job.get('running') or slot_id not in (job.get('slot_ids') or []):
+            return False
+        job['slot_ids'] = [current for current in job.get('slot_ids') or [] if current != slot_id]
+    dispatch_priority_query_work()
+    if not _query_slot_has_priority_reservation(slot_id):
+        with background_query_job_lock:
+            job = background_query_jobs.get(job_id)
+            if job and job.get('running') and slot_id not in job.get('slot_ids', []):
+                job['slot_ids'].append(slot_id)
+        return False
+    while _query_slot_has_priority_reservation(slot_id):
+        with background_query_job_lock:
+            job = background_query_jobs.get(job_id)
+            if not job or job.get('stop_requested'):
+                return True
+        time.sleep(.05)
+    with background_query_job_lock:
+        job = background_query_jobs.get(job_id)
+        if job and job.get('running') and slot_id not in job.get('slot_ids', []):
+            job['slot_ids'].append(slot_id)
+    return True
+
+
+def _yield_batch_query_slot_to_priority_work(job_id, slot_id):
+    if not _has_waiting_priority_query_work():
+        return False
+    with batch_job_lock:
+        job = batch_jobs.get(job_id)
+        if not job or not job.get('running') or latest_batch_job_by_slot.get(slot_id) != job_id:
+            return False
+        latest_batch_job_by_slot.pop(slot_id, None)
+    dispatch_priority_query_work()
+    if not _query_slot_has_priority_reservation(slot_id):
+        with batch_job_lock:
+            job = batch_jobs.get(job_id)
+            if job and job.get('running'):
+                latest_batch_job_by_slot[slot_id] = job_id
+        return False
+    while _query_slot_has_priority_reservation(slot_id):
+        with batch_job_lock:
+            job = batch_jobs.get(job_id)
+            if not job or job.get('stop_requested'):
+                return True
+        time.sleep(.05)
+    with batch_job_lock:
+        job = batch_jobs.get(job_id)
+        if job and job.get('running'):
+            latest_batch_job_by_slot[slot_id] = job_id
+    return True
+
 query_slot_cooldown_lock = threading.Lock()
 query_slot_cooldowns = {}
+query_slot_round_robin_lock = threading.Lock()
+query_slot_round_robin_cursor = 0
 
 def _mark_query_slot_healthy(slot_id):
     if not slot_id:
@@ -6461,15 +8251,23 @@ def _query_slot_cooldown_message(slot_id):
         return f"{reason}，冷却 {remaining} 秒"
 
 def _select_idle_query_workers_desc(exclude_slot_ids=None):
+    global query_slot_round_robin_cursor
     exclude_slot_ids = set(exclude_slot_ids or [])
     with crm_pool.pool_lock:
         slots = list(crm_pool.query_slots)
+    with query_slot_round_robin_lock:
+        rotation_start = query_slot_round_robin_cursor % len(slots) if slots else 0
+    ordered_slots = slots[rotation_start:] + slots[:rotation_start]
     workers = []
     logged_in_count = 0
     busy_count = 0
     skipped_cooldown = 0
-    for slot_id in reversed(slots):
+    for slot_id in ordered_slots:
         if slot_id in exclude_slot_ids:
+            continue
+        if _query_slot_has_priority_reservation(slot_id):
+            continue
+        if _query_slot_has_running_inbound(slot_id):
             continue
         worker = crm_pool.get(slot_id, "query")
         if worker.busy:
@@ -6488,10 +8286,14 @@ def _select_idle_query_workers_desc(exclude_slot_ids=None):
             continue
         if _query_slot_has_running_batch(slot_id):
             continue
+        if _query_slot_has_running_background_batch(slot_id):
+            continue
         if _query_slot_has_running_service_close(slot_id):
             continue
         workers.append((worker, slot_id, _query_slot_label(slot_id)))
     if workers:
+        with query_slot_round_robin_lock:
+            query_slot_round_robin_cursor = (slots.index(workers[0][1]) + 1) % len(slots)
         return workers, ""
     if logged_in_count == 0:
         if busy_count:
@@ -6822,20 +8624,31 @@ def build_transfer_summary(selected_barcodes, transfer_type="移出", distributo
 
 def _merge_service_order_products(row, products, selected_barcodes=None):
     merged = dict(row or {})
-    selected = normalize_input_barcodes(
+    requested_barcodes = normalize_input_barcodes(
         selected_barcodes
         if selected_barcodes is not None
         else (merged.get("selected_barcodes") or merged.get("barcodes") or [])
     )
-    barcodes = normalize_input_barcodes([
-        *selected,
-        *(merged.get("barcodes") or []),
-        *[
-            product.get("barcode")
-            for product in (products or [])
-            if isinstance(product, dict)
-        ],
+    product_barcodes = normalize_input_barcodes([
+        product.get("barcode")
+        for product in (products or [])
+        if isinstance(product, dict)
     ])
+    if product_barcodes:
+        product_barcode_set = set(product_barcodes)
+        selected = [barcode for barcode in requested_barcodes if barcode in product_barcode_set]
+        unmatched_selected_barcodes = [
+            barcode for barcode in requested_barcodes
+            if barcode not in product_barcode_set
+        ]
+        barcodes = product_barcodes
+    else:
+        selected = requested_barcodes
+        unmatched_selected_barcodes = []
+        barcodes = normalize_input_barcodes([
+            *selected,
+            *(merged.get("barcodes") or []),
+        ])
     product_names = []
     for value in [
         *(merged.get("product_names") or []),
@@ -6851,6 +8664,7 @@ def _merge_service_order_products(row, products, selected_barcodes=None):
     selected_set = set(selected)
     merged.update({
         "selected_barcodes": selected,
+        "unmatched_selected_barcodes": unmatched_selected_barcodes,
         "barcodes": barcodes,
         "related_barcodes": [barcode for barcode in barcodes if barcode not in selected_set],
         "product_names": product_names,
@@ -6886,7 +8700,28 @@ def _normalize_service_order_detail(detail, service_no=""):
         )
         products.append(product)
     payload["products"] = products
+    order_lookup = payload.get("order_lookup")
+    if isinstance(order_lookup, dict):
+        order_lookup = dict(order_lookup)
+        order_lookup["products"] = (
+            list(order_lookup.get("products"))
+            if isinstance(order_lookup.get("products"), list)
+            else []
+        )
+        order_lookup["comparison"] = (
+            list(order_lookup.get("comparison"))
+            if isinstance(order_lookup.get("comparison"), list)
+            else []
+        )
+        payload["order_lookup"] = order_lookup
+    else:
+        payload["order_lookup"] = {}
     return payload
+
+def _service_order_cache_lock(service_no):
+    with service_order_cache_locks_guard:
+        return service_order_cache_locks.setdefault(service_no, threading.Lock())
+
 
 def _write_service_order_detail(service_no, detail):
     service_no = _clean_export_value(service_no)
@@ -6898,8 +8733,7 @@ def _write_service_order_detail(service_no, detail):
     os.makedirs(SERVICE_ORDER_DIR, exist_ok=True)
     filename = f"{service_no}.json"
     filepath = os.path.join(SERVICE_ORDER_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
+    _atomic_save_json_rows(filepath, payload)
     return f"/api/service-orders/{service_no}"
 
 
@@ -7106,6 +8940,7 @@ def queried_dealer_history():
     return list(dealers.keys())
 
 TRANSFER_RECORDS_LOCK = threading.RLock()
+INBOUND_HISTORY_LOCK = threading.RLock()
 TRANSFER_RECORDS_PROCESS_TOKEN = uuid.uuid4().hex
 transfer_records_revision_counter = 0
 
@@ -7149,6 +8984,253 @@ def _transfer_records_connection():
         """
     )
     return connection
+
+
+def _inbound_history_connection():
+    os.makedirs(os.path.dirname(INBOUND_HISTORY_DB_FILE), exist_ok=True)
+    connection = sqlite3.connect(INBOUND_HISTORY_DB_FILE)
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inbound_history (
+            packing_slip_no TEXT PRIMARY KEY,
+            read_at TEXT NOT NULL DEFAULT '',
+            page_counts_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            result_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gyj_inbound_history (
+            order_no TEXT PRIMARY KEY,
+            packing_slip_no TEXT NOT NULL DEFAULT '',
+            actor TEXT NOT NULL DEFAULT '',
+            saved_at TEXT NOT NULL DEFAULT '',
+            result_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    return connection
+
+
+def _inbound_history_summary(result):
+    result = result if isinstance(result, dict) else {}
+    items = result.get('items') or []
+    return {
+        'item_count': len(items),
+        'expected_total': result.get('expected_total') or 0,
+        'total_serials': result.get('total_serials') or 0,
+    }
+
+
+def _inbound_history_row_to_dict(row):
+    if not row:
+        return None
+    record = dict(row)
+    for key, default in (('page_counts', []), ('summary', {}), ('result', {})):
+        try:
+            record[key] = json.loads(record.pop(f'{key}_json') or json.dumps(default))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record[key] = default
+    return record
+
+
+def upsert_inbound_history(result, finished_at=''):
+    result = json.loads(json.dumps(result if isinstance(result, dict) else {}, ensure_ascii=False))
+    packing_slip_no = str(result.get('packing_slip_no') or '').strip()
+    if not packing_slip_no:
+        raise ValueError('装箱单号不能为空')
+    read_at = str(finished_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    page_counts = list(result.get('page_counts') or [])
+    summary = _inbound_history_summary(result)
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO inbound_history (
+                    packing_slip_no, read_at, page_counts_json, summary_json, result_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(packing_slip_no) DO UPDATE SET
+                    read_at=excluded.read_at,
+                    page_counts_json=excluded.page_counts_json,
+                    summary_json=excluded.summary_json,
+                    result_json=excluded.result_json
+                """,
+                (
+                    packing_slip_no, read_at, json.dumps(page_counts, ensure_ascii=False),
+                    json.dumps(summary, ensure_ascii=False), json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return {
+        'packing_slip_no': packing_slip_no,
+        'read_at': read_at,
+        'page_counts': page_counts,
+        'summary': summary,
+        'result': result,
+    }
+
+
+def load_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            rows = connection.execute(
+                'SELECT * FROM inbound_history ORDER BY datetime(read_at) DESC, rowid DESC'
+            ).fetchall()
+        finally:
+            connection.close()
+    records = []
+    for row in rows:
+        record = _inbound_history_row_to_dict(row)
+        if record:
+            record.pop('result', None)
+            records.append(record)
+    return records
+
+
+def get_inbound_history(packing_slip_no):
+    packing_slip_no = str(packing_slip_no or '').strip()
+    if not packing_slip_no:
+        return None
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            row = connection.execute(
+                'SELECT * FROM inbound_history WHERE packing_slip_no = ?', (packing_slip_no,)
+            ).fetchone()
+        finally:
+            connection.close()
+    return _inbound_history_row_to_dict(row)
+
+
+def delete_inbound_history(packing_slip_no):
+    packing_slip_no = str(packing_slip_no or '').strip()
+    if not packing_slip_no:
+        return False
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            deleted = connection.execute(
+                'DELETE FROM inbound_history WHERE packing_slip_no = ?', (packing_slip_no,)
+            ).rowcount > 0
+            connection.commit()
+            return deleted
+        finally:
+            connection.close()
+
+
+def clear_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute('DELETE FROM inbound_history')
+            connection.commit()
+        finally:
+            connection.close()
+
+
+def _gyj_inbound_history_row_to_dict(row):
+    if not row:
+        return None
+    record = dict(row)
+    try:
+        result = json.loads(record.pop('result_json') or '{}')
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result = {}
+    record['products'] = list(result.get('products') or [])
+    record['result'] = result
+    return record
+
+
+def upsert_gyj_inbound_history(result, packing_slip_no='', actor='', saved_at=''):
+    result = json.loads(json.dumps(
+        result if isinstance(result, dict) else {}, ensure_ascii=False
+    ))
+    order_no = str(result.get('order_no') or '').strip()
+    if not order_no:
+        raise ValueError('GYJ 入库单号不能为空')
+    packing_slip_no = str(
+        packing_slip_no or result.get('packing_slip_no') or ''
+    ).strip()
+    actor = str(actor or '').strip()
+    saved_at = str(saved_at or datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute(
+                """
+                INSERT INTO gyj_inbound_history (
+                    order_no, packing_slip_no, actor, saved_at, result_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(order_no) DO UPDATE SET
+                    packing_slip_no=excluded.packing_slip_no,
+                    actor=excluded.actor,
+                    saved_at=excluded.saved_at,
+                    result_json=excluded.result_json
+                """,
+                (
+                    order_no, packing_slip_no, actor, saved_at,
+                    json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return {
+        'order_no': order_no,
+        'packing_slip_no': packing_slip_no,
+        'actor': actor,
+        'saved_at': saved_at,
+        'products': list(result.get('products') or []),
+        'result': result,
+    }
+
+
+def load_gyj_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            rows = connection.execute(
+                'SELECT * FROM gyj_inbound_history '
+                'ORDER BY datetime(saved_at) DESC, rowid DESC'
+            ).fetchall()
+        finally:
+            connection.close()
+    return [
+        record for record in map(_gyj_inbound_history_row_to_dict, rows) if record
+    ]
+
+
+def delete_gyj_inbound_history(order_no):
+    order_no = str(order_no or '').strip()
+    if not order_no:
+        return False
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            deleted = connection.execute(
+                'DELETE FROM gyj_inbound_history WHERE order_no = ?', (order_no,)
+            ).rowcount > 0
+            connection.commit()
+            return deleted
+        finally:
+            connection.close()
+
+
+def clear_gyj_inbound_history():
+    with INBOUND_HISTORY_LOCK:
+        connection = _inbound_history_connection()
+        try:
+            connection.execute('DELETE FROM gyj_inbound_history')
+            connection.commit()
+        finally:
+            connection.close()
 
 
 def _normalize_transfer_record(record):
@@ -7343,126 +9425,182 @@ def _sync_transfer_record_from_job(job_id):
     })
 
 
+@contextmanager
+def _distributor_history_transaction():
+    with DISTRIBUTOR_HISTORY_LOCK:
+        depth = getattr(DISTRIBUTOR_HISTORY_LOCK_STATE, "depth", 0)
+        if depth:
+            DISTRIBUTOR_HISTORY_LOCK_STATE.depth = depth + 1
+            try:
+                yield
+            finally:
+                DISTRIBUTOR_HISTORY_LOCK_STATE.depth -= 1
+            return
+
+        lock_path = f"{DISTRIBUTOR_HISTORY_FILE}.lock"
+        os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+        with open(lock_path, "a+b") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            elif msvcrt is not None:
+                if os.fstat(lock_file.fileno()).st_size == 0:
+                    lock_file.write(b"\0")
+                    lock_file.flush()
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                raise RuntimeError("No supported file-locking API is available")
+            DISTRIBUTOR_HISTORY_LOCK_STATE.depth = 1
+            try:
+                yield
+            finally:
+                DISTRIBUTOR_HISTORY_LOCK_STATE.depth = 0
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                else:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def load_distributor_history():
-    own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        if os.path.exists(DISTRIBUTOR_HISTORY_FILE):
+            try:
+                with open(DISTRIBUTOR_HISTORY_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return [
+                    _clean_export_value(row)
+                    for row in (data if isinstance(data, list) else [])
+                    if _clean_export_value(row) and _clean_export_value(row) != own_dealer
+                ]
+            except Exception:
+                pass
+        return []
+
+def _atomic_save_json_rows(path, rows):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(rows, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 def _save_distributor_history_rows(rows):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_FILE, 'w', encoding='utf-8') as f:
-        json.dump(rows[:100], f, ensure_ascii=False, indent=2)
+    with _distributor_history_transaction():
+        _atomic_save_json_rows(DISTRIBUTOR_HISTORY_FILE, rows)
 
 def load_deleted_distributor_history():
-    own_dealer = own_dealer_name()
-    if os.path.exists(DISTRIBUTOR_HISTORY_DELETED_FILE):
-        try:
-            with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return [
-                _clean_export_value(row)
-                for row in (data if isinstance(data, list) else [])
-                if _clean_export_value(row) and _clean_export_value(row) != own_dealer
-            ]
-        except Exception:
-            pass
-    return []
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        if os.path.exists(DISTRIBUTOR_HISTORY_DELETED_FILE):
+            try:
+                with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return [
+                    _clean_export_value(row)
+                    for row in (data if isinstance(data, list) else [])
+                    if _clean_export_value(row) and _clean_export_value(row) != own_dealer
+                ]
+            except Exception:
+                pass
+        return []
 
 def save_deleted_distributor_history(rows):
-    clean_rows = []
-    seen = set()
-    own_dealer = own_dealer_name()
-    for row in rows:
-        row = _clean_export_value(row)
-        if row and row != own_dealer and row not in seen:
-            clean_rows.append(row)
-            seen.add(row)
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(DISTRIBUTOR_HISTORY_DELETED_FILE, 'w', encoding='utf-8') as f:
-        json.dump(clean_rows[:300], f, ensure_ascii=False, indent=2)
+    with _distributor_history_transaction():
+        clean_rows = []
+        seen = set()
+        own_dealer = own_dealer_name()
+        for row in rows:
+            row = _clean_export_value(row)
+            if row and row != own_dealer and row not in seen:
+                clean_rows.append(row)
+                seen.add(row)
+        _atomic_save_json_rows(DISTRIBUTOR_HISTORY_DELETED_FILE, clean_rows[:300])
 
 def restore_deleted_distributor_history(distributor):
-    distributor = _clean_export_value(distributor)
-    if not distributor:
-        return
-    deleted = [row for row in load_deleted_distributor_history() if row != distributor]
-    save_deleted_distributor_history(deleted)
+    with _distributor_history_transaction():
+        distributor = _clean_export_value(distributor)
+        if not distributor:
+            return
+        deleted = [row for row in load_deleted_distributor_history() if row != distributor]
+        save_deleted_distributor_history(deleted)
 
 def import_distributor_history_many(distributors):
-    own_dealer = own_dealer_name()
-    incoming = []
-    seen = set()
-    for distributor in distributors:
-        distributor = _clean_export_value(distributor)
-        if distributor and distributor != own_dealer and distributor not in seen:
-            incoming.append(distributor)
-            seen.add(distributor)
-    if not incoming:
-        return load_distributor_history()
-    deleted = [row for row in load_deleted_distributor_history() if row not in seen]
-    save_deleted_distributor_history(deleted)
-    rows = OrderedDict()
-    for distributor in incoming:
-        rows[distributor] = True
-    for distributor in load_distributor_history():
-        if distributor and distributor != own_dealer:
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        incoming = []
+        seen = set()
+        for distributor in distributors:
+            distributor = _clean_export_value(distributor)
+            if distributor and distributor != own_dealer and distributor not in seen:
+                incoming.append(distributor)
+                seen.add(distributor)
+        if not incoming:
+            return load_distributor_history()
+        deleted = [row for row in load_deleted_distributor_history() if row not in seen]
+        save_deleted_distributor_history(deleted)
+        rows = OrderedDict()
+        for distributor in incoming:
             rows[distributor] = True
-    _save_distributor_history_rows(list(rows.keys()))
-    return load_distributor_history()
+        for distributor in load_distributor_history():
+            if distributor and distributor != own_dealer:
+                rows[distributor] = True
+        _save_distributor_history_rows(list(rows.keys()))
+        return load_distributor_history()
 
 def save_distributor_history(distributor):
-    own_dealer = own_dealer_name()
-    distributor = _clean_export_value(distributor)
-    if not distributor or distributor == own_dealer:
-        return
-    restore_deleted_distributor_history(distributor)
-    rows = [distributor] + [row for row in load_distributor_history() if row != distributor]
-    _save_distributor_history_rows(rows)
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        distributor = _clean_export_value(distributor)
+        if not distributor or distributor == own_dealer:
+            return
+        restore_deleted_distributor_history(distributor)
+        rows = [distributor] + [row for row in load_distributor_history() if row != distributor]
+        _save_distributor_history_rows(rows)
 
 def save_distributor_history_many(distributors):
-    own_dealer = own_dealer_name()
-    deleted = set(load_deleted_distributor_history())
-    rows = OrderedDict()
-    for distributor in distributors:
-        distributor = _clean_export_value(distributor)
-        if distributor and distributor != own_dealer and distributor not in deleted:
-            rows[distributor] = True
-    for distributor in load_distributor_history():
-        if distributor and distributor != own_dealer and distributor not in deleted:
-            rows[distributor] = True
-    _save_distributor_history_rows(list(rows.keys()))
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        deleted = set(load_deleted_distributor_history())
+        rows = OrderedDict()
+        for distributor in distributors:
+            distributor = _clean_export_value(distributor)
+            if distributor and distributor != own_dealer and distributor not in deleted:
+                rows[distributor] = True
+        for distributor in load_distributor_history():
+            if distributor and distributor != own_dealer and distributor not in deleted:
+                rows[distributor] = True
+        _save_distributor_history_rows(list(rows.keys()))
 
 def delete_distributor_history(distributor):
-    own_dealer = own_dealer_name()
-    distributor = _clean_export_value(distributor)
-    if not distributor or distributor == own_dealer:
-        return False
-    rows = [row for row in load_distributor_history() if row != distributor]
-    _save_distributor_history_rows(rows)
-    deleted = [distributor] + [row for row in load_deleted_distributor_history() if row != distributor]
-    save_deleted_distributor_history(deleted)
-    return True
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        distributor = _clean_export_value(distributor)
+        if not distributor or distributor == own_dealer:
+            return False
+        rows = [row for row in load_distributor_history() if row != distributor]
+        _save_distributor_history_rows(rows)
+        deleted = [distributor] + [row for row in load_deleted_distributor_history() if row != distributor]
+        save_deleted_distributor_history(deleted)
+        return True
 
 def combined_distributor_history():
-    own_dealer = own_dealer_name()
-    save_distributor_history_many(queried_dealer_history())
-    deleted = set(load_deleted_distributor_history())
-    dealers = OrderedDict()
-    for dealer in load_distributor_history():
-        dealer = _clean_export_value(dealer)
-        if dealer and dealer != own_dealer and dealer not in deleted:
-            dealers[dealer] = True
-    return list(dealers.keys())
+    with _distributor_history_transaction():
+        own_dealer = own_dealer_name()
+        queried = queried_dealer_history()
+        if queried:
+            save_distributor_history_many(queried)
+        deleted = set(load_deleted_distributor_history())
+        dealers = OrderedDict()
+        for dealer in load_distributor_history():
+            dealer = _clean_export_value(dealer)
+            if dealer and dealer != own_dealer and dealer not in deleted:
+                dealers[dealer] = True
+        return list(dealers.keys())
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -7559,7 +9697,7 @@ def load_accounts():
         'username': 'admin',
         'display_name': '管理员',
         'password': '88293529',
-        'permissions': ['crm', 'results', 'transfer', 'accounts', 'product-library'],
+        'permissions': ['crm', 'results', 'transfer', 'inbound', 'inventory', 'accounts', 'product-library'],
         'updated_at': '',
     }
     if os.path.exists(ACCOUNTS_FILE):
@@ -7600,6 +9738,191 @@ def current_account():
 def current_account_public():
     row = current_account()
     return account_public(row) if row else None
+
+
+def _service_close_history_record(job):
+    job = job if isinstance(job, dict) else {}
+    job_id = _clean_export_value(job.get('job_id') or job.get('id'))
+    if not job_id:
+        return None
+    record = {
+        'id': job_id,
+        'job_id': job_id,
+        'actor': _clean_export_value(job.get('actor')),
+        'running': False,
+        'done': bool(job.get('done')),
+        'success': bool(job.get('success')),
+        'error': _clean_export_value(job.get('error')),
+        'total': int(job.get('total') or 0),
+        'current': int(job.get('current') or 0),
+        'closed_count': int(job.get('closed_count') or 0),
+        'already_closed_count': int(job.get('already_closed_count') or 0),
+        'failed_count': int(job.get('failed_count') or 0),
+        'selected_barcodes': list(job.get('selected_barcodes') or []),
+        'missing': list(job.get('missing') or []),
+        'no_service': list(job.get('no_service') or []),
+        'started_at': _clean_export_value(job.get('started_at')),
+        'finished_at': _clean_export_value(job.get('finished_at')),
+        'logs': list(job.get('logs') or []),
+        'service_rows': _service_close_rows_payload(job),
+        'results': list(job.get('results') or []),
+    }
+    try:
+        return json.loads(json.dumps(record, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+
+
+def _trim_service_close_history_record(record, service_nos):
+    record = _service_close_history_record(record)
+    if not record:
+        return None
+    service_rows = [
+        row for row in record.get('service_rows') or []
+        if _clean_export_value(row.get('service_no')) not in service_nos
+    ]
+    if not service_rows:
+        return None
+    if len(service_rows) == len(record.get('service_rows') or []):
+        return record
+    record['service_rows'] = service_rows
+    record['results'] = [
+        result for result in record.get('results') or []
+        if not isinstance(result, dict)
+        or _clean_export_value(result.get('service_no')) not in service_nos
+    ]
+    record['total'] = len(service_rows)
+    record['current'] = min(int(record.get('current') or 0), len(service_rows))
+    record['closed_count'] = sum(row.get('state') == 'closed' for row in service_rows)
+    record['already_closed_count'] = sum(row.get('state') == 'already_closed' for row in service_rows)
+    record['failed_count'] = sum(row.get('state') == 'failed' for row in service_rows)
+    return record
+
+
+def _deduplicate_service_close_history(records):
+    seen_service_nos = set()
+    deduplicated = []
+    for record in records:
+        retained = _trim_service_close_history_record(record, seen_service_nos)
+        if not retained:
+            continue
+        deduplicated.append(retained)
+        seen_service_nos.update(
+            _clean_export_value(row.get('service_no'))
+            for row in retained.get('service_rows') or []
+            if _clean_export_value(row.get('service_no'))
+        )
+    return deduplicated
+
+
+def load_service_close_history():
+    with service_close_history_lock:
+        try:
+            with open(SERVICE_CLOSE_HISTORY_FILE, encoding='utf-8') as history_file:
+                rows = json.load(history_file)
+        except (OSError, ValueError, TypeError):
+            return []
+        if not isinstance(rows, list):
+            return []
+        records = [
+            record for record in (_service_close_history_record(row) for row in rows)
+            if record
+        ]
+        records = sorted(
+            records,
+            key=lambda record: record.get('finished_at') or record.get('started_at') or '',
+            reverse=True,
+        )
+        return _deduplicate_service_close_history(records)
+
+
+def _save_service_close_history(records):
+    normalized = []
+    seen = set()
+    for row in sorted(
+        list(records or []),
+        key=lambda record: (record or {}).get('finished_at') or (record or {}).get('started_at') or '',
+        reverse=True,
+    ):
+        record = _service_close_history_record(row)
+        if not record or record['id'] in seen:
+            continue
+        normalized.append(record)
+        seen.add(record['id'])
+        if len(normalized) >= SERVICE_CLOSE_HISTORY_LIMIT:
+            break
+    with service_close_history_lock:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        temporary_file = f"{SERVICE_CLOSE_HISTORY_FILE}.{uuid.uuid4().hex}.tmp"
+        try:
+            with open(temporary_file, 'w', encoding='utf-8') as history_file:
+                json.dump(normalized, history_file, ensure_ascii=False, indent=2)
+                history_file.flush()
+                os.fsync(history_file.fileno())
+            os.replace(temporary_file, SERVICE_CLOSE_HISTORY_FILE)
+            return True
+        except OSError:
+            try:
+                os.unlink(temporary_file)
+            except OSError:
+                pass
+            return False
+
+
+def _append_service_close_history(job):
+    record = _service_close_history_record(job)
+    if not record:
+        return False
+    with service_close_history_lock:
+        records = load_service_close_history()
+        service_nos = {
+            _clean_export_value(row.get('service_no'))
+            for row in record.get('service_rows') or []
+            if _clean_export_value(row.get('service_no'))
+        }
+        records = [
+            retained for row in records
+            if row.get('id') != record['id']
+            for retained in [_trim_service_close_history_record(row, service_nos)]
+            if retained
+        ]
+        return _save_service_close_history([record, *records])
+
+
+def delete_service_close_history(job_id):
+    job_id = _clean_export_value(job_id)
+    with service_close_history_lock:
+        records = load_service_close_history()
+        remaining = [row for row in records if row.get('id') != job_id]
+        if len(remaining) == len(records):
+            return False
+        return _save_service_close_history(remaining)
+
+
+def delete_service_close_history_service(service_no):
+    service_no = _clean_export_value(service_no)
+    if not service_no:
+        return False
+    with service_close_history_lock:
+        removed = False
+        remaining = []
+        for record in load_service_close_history():
+            service_nos = {
+                _clean_export_value(row.get('service_no'))
+                for row in record.get('service_rows') or []
+            }
+            if service_no not in service_nos:
+                remaining.append(record)
+                continue
+            trimmed = _trim_service_close_history_record(record, {service_no})
+            removed = True
+            if trimmed:
+                remaining.append(trimmed)
+        return bool(removed and _save_service_close_history(remaining))
+
+
+def clear_service_close_history():
+    return _save_service_close_history([])
 
 def crm_credentials_owner_key():
     row = current_account()
@@ -7654,10 +9977,93 @@ def save_remembered_crm_credentials(remember, username="", password=""):
     save_crm_credentials_store(data)
     return True
 
+
+def gyj_credentials_owner_key():
+    return "admin"
+
+
+def gyj_worker_owner_key(owner=""):
+    owner = str(owner or "").strip()
+    if not owner:
+        return gyj_credentials_owner_key()
+    for row in load_accounts():
+        if owner in {str(row.get("id") or ""), str(row.get("username") or "")}:
+            return str(row.get("username") or "").strip()
+    return owner
+
+
+def gyj_worker_for_owner(owner=""):
+    return gyj_login_worker()
+
+
+def gyj_login_worker(slot_id="gyj-1"):
+    return gyj_worker.get(slot_id)
+
+
+def gyj_business_worker_for_owner(owner=""):
+    return GYJBusinessWorker(gyj_worker, gyj_worker_owner_key(owner))
+
+
+def load_gyj_credentials_store():
+    with gyj_credentials_lock:
+        try:
+            if not os.path.exists(GYJ_CREDENTIALS_FILE):
+                return {}
+            with open(GYJ_CREDENTIALS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+
+def save_gyj_credentials_store(data):
+    with gyj_credentials_lock:
+        os.makedirs(os.path.dirname(GYJ_CREDENTIALS_FILE), exist_ok=True)
+        with open(GYJ_CREDENTIALS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_remembered_gyj_credentials():
+    key = gyj_credentials_owner_key()
+    row = load_gyj_credentials_store().get(key) if key else None
+    if not isinstance(row, dict) or not row.get("remember"):
+        return {"remember": False, "username": ""}
+    return {"remember": True, "username": str(row.get("username") or "")}
+
+
+def get_remembered_gyj_credentials_secret():
+    row = load_gyj_credentials_store().get(gyj_credentials_owner_key()) or {}
+    if not isinstance(row, dict) or not row.get("remember"):
+        return {"username": "", "password": ""}
+    return {
+        "username": str(row.get("username") or ""),
+        "password": str(row.get("password") or ""),
+    }
+
+
+def save_remembered_gyj_credentials(remember, username="", password=""):
+    key = gyj_credentials_owner_key()
+    if not key:
+        return False
+    data = load_gyj_credentials_store()
+    if remember:
+        data[key] = {
+            "remember": True,
+            "username": str(username or "").strip(),
+            "password": str(password or ""),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    else:
+        data.pop(key, None)
+    save_gyj_credentials_store(data)
+    return True
+
 PAGE_LINKS = [
     {'permission': 'crm', 'label': '查询', 'href': '/crm'},
     {'permission': 'results', 'label': '结果', 'href': '/'},
     {'permission': 'transfer', 'label': '移库', 'href': '/transfer'},
+    {'permission': 'inbound', 'label': '入库', 'href': '/inbound'},
+    {'permission': 'inventory', 'label': '盘点', 'href': '/inventory'},
     {'permission': 'product-library', 'label': '匹配', 'href': '/product-library'},
     {'permission': 'accounts', 'label': '设置', 'href': '/accounts'},
 ]
@@ -7666,6 +10072,30 @@ DESKTOP_PAGE_LINKS = [
     {**link, 'label': '设置'} if link['permission'] == 'accounts' else dict(link)
     for link in PAGE_LINKS
 ]
+
+@app.context_processor
+def _aurora_asset_versions():
+    """Cache-bust CSS/JS by appending the file mtime as ?v= so deploys
+    bypass the browser's 12-hour static cache. Reads the timestamp lazily
+    and only once per process."""
+    cache = {}
+    def _stamp(path):
+        try:
+            if path not in cache:
+                cache[path] = int(os.path.getmtime(os.path.join(app.static_folder, path)))
+        except OSError:
+            return ""
+        return f"?v={cache[path]}"
+    return {
+        "aurora_css_v": _stamp("aurora.css"),
+        "aurora_js_v": _stamp("aurora.js"),
+        "app_css_v": _stamp("app_layout.css"),
+        "inventory_css_v": _stamp("inventory.css"),
+        "inventory_js_v": _stamp("inventory.js"),
+        "log_modal_css_v": _stamp("log_modal.css") if os.path.exists(os.path.join(app.static_folder, "log_modal.css")) else "",
+        "log_modal_js_v": _stamp("log_modal.js") if os.path.exists(os.path.join(app.static_folder, "log_modal.js")) else "",
+    }
+
 
 def visible_page_links():
     row = current_account()
@@ -7693,12 +10123,18 @@ def account_has_permission(permission):
     return permission in (row.get('permissions') or [])
 
 def required_permission_for_path(path):
-    if path == "/" or path.startswith("/barcode/") or path.startswith("/service-order/"):
+    if path in {"/", "/service-close"} or path.startswith("/barcode/") or path.startswith("/service-order/"):
         return "results"
     if path == "/crm":
         return "crm"
     if path == "/transfer" or path.startswith("/api/transfer") or path.startswith("/api/crm/transfer"):
         return "transfer"
+    if path.startswith("/api/gyj"):
+        return "account-self"
+    if path == "/inbound" or path.startswith("/api/inbound"):
+        return "inbound"
+    if path == "/inventory" or path.startswith("/api/inventory"):
+        return "inventory"
     if path.startswith("/api/distributor-history"):
         return "transfer"
     if path == "/product-library" or path.startswith("/api/product-library"):
@@ -7928,6 +10364,16 @@ def scan_archived():
 def index():
     return render_template("index.html", nav_links=visible_page_links(), business_config=business_config())
 
+
+@app.route("/service-close")
+def service_close():
+    return render_template(
+        "service_close.html",
+        nav_links=visible_page_links(),
+        business_config=business_config(),
+        can_manage_history=bool(current_account()),
+    )
+
 @app.route("/favicon.ico")
 def favicon():
     return send_from_directory(app.static_folder, "favicon.ico", mimetype="image/x-icon")
@@ -8112,15 +10558,9 @@ def api_service_close_start():
             reason += f"，未找到结果 {len(missing)} 个"
         return jsonify({'success': False, 'error': reason, **prepared})
 
-    workers, error = _select_idle_query_workers_desc()
-    if error:
-        return jsonify({'success': False, 'error': error})
-    slot_id, slot_label = workers[0][1], workers[0][2]
-    slot_ids = [row[1] for row in workers]
-    slot_label_text = "、".join(row[2] for row in workers)
-
+    global latest_service_close_job_id
     with service_close_job_lock:
-        job = _empty_service_close_job(slot_id, orders)
+        job = _empty_service_close_job('', orders)
         job.update({
             'running': True,
             'done': False,
@@ -8128,6 +10568,8 @@ def api_service_close_start():
             'error': '',
             'missing': prepared.get("missing") or [],
             'no_service': prepared.get("no_service") or [],
+            'selected_barcodes': barcodes,
+            'actor': _clean_export_value((current_account() or {}).get('username')),
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'finished_at': '',
         })
@@ -8135,26 +10577,88 @@ def api_service_close_start():
             _append_job_log_unlocked(job, f"已跳过未找到结果的条码 {len(job['missing'])} 个：{', '.join(job['missing'][:10])}", "warn", 1000)
         if job['no_service']:
             _append_job_log_unlocked(job, f"已跳过无服务单条码 {len(job['no_service'])} 个：{', '.join(job['no_service'][:10])}", "warn", 1000)
-        job['slot_ids'] = slot_ids
-        _append_job_log_unlocked(job, f"已分配查询通道：{slot_label_text}", "info", 1000)
+        job['slot_ids'] = []
+        _append_job_log_unlocked(job, '等待查询通道', "info", 1000)
         service_close_jobs[job['job_id']] = job
-        for selected_slot_id in slot_ids:
-            latest_service_close_job_by_slot[selected_slot_id] = job['job_id']
+        latest_service_close_job_id = job['job_id']
 
-    threading.Thread(target=_run_service_close_job, args=(job['job_id'], workers, orders), daemon=True).start()
+    def launch(worker, slot_id, slot_label):
+        worker_entries = [(worker, slot_id, slot_label)]
+        with query_slot_reservation_lock:
+            additional_workers, _error = _select_idle_query_workers_desc({slot_id})
+            with priority_query_work_lock:
+                for additional_worker, additional_slot_id, additional_slot_label in additional_workers:
+                    if additional_slot_id in priority_query_slot_reservations:
+                        continue
+                    priority_query_slot_reservations[additional_slot_id] = job['job_id']
+                    worker_entries.append((additional_worker, additional_slot_id, additional_slot_label))
+
+        slot_ids = [entry[1] for entry in worker_entries]
+        slot_labels = [entry[2] for entry in worker_entries]
+        with service_close_job_lock:
+            current = service_close_jobs.get(job['job_id'])
+            if not current:
+                for selected_slot_id in slot_ids:
+                    _release_priority_query_slot(selected_slot_id)
+                return
+            current['slot_id'] = slot_id
+            current['slot_ids'] = slot_ids
+            _append_job_log_unlocked(current, f"已分配查询通道：{'、'.join(slot_labels)}", 'info', 1000)
+            for selected_slot_id in slot_ids:
+                latest_service_close_job_by_slot[selected_slot_id] = job['job_id']
+
+        def run():
+            try:
+                _run_service_close_job(job['job_id'], worker_entries, orders)
+            finally:
+                with service_close_job_lock:
+                    for selected_slot_id in slot_ids:
+                        if latest_service_close_job_by_slot.get(selected_slot_id) == job['job_id']:
+                            latest_service_close_job_by_slot.pop(selected_slot_id, None)
+                for selected_slot_id in slot_ids:
+                    _release_priority_query_slot(selected_slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    threading.Thread(
+        target=enqueue_priority_query_work,
+        args=('service_close', job['job_id'], launch),
+        daemon=True,
+    ).start()
     return jsonify({
         'success': True,
         'job_id': job['job_id'],
-        'slot_id': slot_id,
-        'slot_ids': slot_ids,
-        'slot_label': slot_label_text,
+        'slot_id': '',
+        'slot_ids': [],
+        'slot_label': '等待查询通道',
         'orders': orders,
         'service_rows': _service_close_rows_payload(job),
         'total': len(orders),
         'missing': prepared.get("missing") or [],
         'no_service': prepared.get("no_service") or [],
-        'message': f'批量结单已开始，共 {len(orders)} 个服务单',
+        'message': f'批量结单已排队，共 {len(orders)} 个服务单',
     })
+
+@app.route("/api/service-close/history", methods=["GET"])
+def api_service_close_history():
+    return jsonify({'success': True, 'records': load_service_close_history()})
+
+@app.route("/api/service-close/history/<job_id>", methods=["DELETE"])
+def api_service_close_history_delete(job_id):
+    if not delete_service_close_history(job_id):
+        return jsonify({'success': False, 'error': '未找到结单记录'}), 404
+    return jsonify({'success': True, 'message': '已删除结单记录'})
+
+@app.route("/api/service-close/history/service/<service_no>", methods=["DELETE"])
+def api_service_close_history_service_delete(service_no):
+    if not delete_service_close_history_service(service_no):
+        return jsonify({'success': False, 'error': '未找到服务单记录'}), 404
+    return jsonify({'success': True, 'message': '已删除服务单记录'})
+
+@app.route("/api/service-close/history", methods=["DELETE"])
+def api_service_close_history_clear():
+    if not clear_service_close_history():
+        return jsonify({'success': False, 'error': '清空结单记录失败'}), 500
+    return jsonify({'success': True, 'message': '已清空结单记录'})
 
 @app.route("/api/service-close/status", methods=["GET"])
 def api_service_close_status():
@@ -8163,8 +10667,12 @@ def api_service_close_status():
     except (TypeError, ValueError):
         since = 0
     slot_id = crm_pool.normalize_slot(request.args.get("slot_id"), "query")
-    job_id = request.args.get("job_id") or _latest_job_id(latest_service_close_job_by_slot, slot_id)
+    requested_job_id = request.args.get("job_id")
+    latest_requested = request.args.get("latest") in {"1", "true", "yes"}
     with service_close_job_lock:
+        job_id = requested_job_id or (
+            latest_service_close_job_id if latest_requested else _latest_job_id(latest_service_close_job_by_slot, slot_id)
+        )
         job = service_close_jobs.get(job_id) or _empty_service_close_job(slot_id)
         return jsonify({
             'success': True,
@@ -8371,6 +10879,7 @@ def api_transfer_summary_status():
             'log_seq': job.get('log_seq') or 0,
             'started_at': job['started_at'],
             'finished_at': job['finished_at'],
+            'barcode_states': dict(job.get('barcode_states') or {}),
         })
 
 @app.route("/api/crm/transfer", methods=["POST"])
@@ -8555,6 +11064,98 @@ def api_service_order_detail(service_no):
     return jsonify(_normalize_service_order_detail(payload, service_no))
 
 
+def _order_product_job_status_payload(job, service_no):
+    current = job or {}
+    successful = bool(current.get('success'))
+    started_ts = float(current.get('_started_ts') or 0)
+    return {
+        'job_id': current.get('job_id') or '',
+        'service_no': current.get('service_no') or _clean_export_value(service_no),
+        'order_no': current.get('order_no') or '',
+        'slot_id': current.get('slot_id') or '',
+        'slot_label': current.get('slot_label') or '',
+        'running': bool(current.get('running')),
+        'done': bool(current.get('done')),
+        'success': successful,
+        'stage': current.get('stage') or 'idle',
+        'message': current.get('message') or '',
+        'error': current.get('error') or '',
+        'started_at': current.get('started_at') or '',
+        'elapsed': max(0, int(time.time() - started_ts)) if started_ts else 0,
+        'finished_at': current.get('finished_at') or '',
+        'detail_url': f"/api/service-orders/{service_no}" if successful else '',
+        'automatic': bool(current.get('automatic')),
+    }
+
+
+def _start_order_product_job(service_no, automatic=False):
+    service_no = _clean_export_value(service_no)
+    with order_product_job_lock:
+        running_id = latest_order_product_job_by_service.get(service_no)
+        running_job = order_product_jobs.get(running_id)
+        if running_job and running_job.get('running'):
+            return running_job, False
+        job = _empty_order_product_job(service_no)
+        job.update({
+            'automatic': bool(automatic),
+            'running': True,
+            'message': '正在等待可用查询通道' + ('（结单失败自动补查）' if automatic else ''),
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            '_started_ts': time.time(),
+        })
+        job_id = job['job_id']
+        order_product_jobs[job_id] = job
+        latest_order_product_job_by_service[service_no] = job_id
+
+    def launch(worker, slot_id, slot_label):
+        with order_product_job_lock:
+            current = order_product_jobs.get(job_id)
+            if not current:
+                return
+            current.update({
+                'slot_id': slot_id,
+                'slot_label': slot_label,
+                'stage': 'querying_service_order',
+                'message': f'已分配 {slot_label}，正在打开服务单',
+            })
+
+        def run():
+            try:
+                _run_order_product_job(job_id, worker)
+            finally:
+                _release_priority_query_slot(slot_id)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('order_products', job_id, launch)
+    return job, True
+
+
+@app.route("/api/service-orders/<service_no>/order-products/start", methods=["POST"])
+def api_service_order_products_start(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+    service_no = _clean_export_value(service_no)
+
+    job, created = _start_order_product_job(service_no)
+    payload = _order_product_job_status_payload(job, service_no)
+    payload['success'] = True
+    return jsonify(payload), (200 if created else 409)
+
+
+@app.route("/api/service-orders/<service_no>/order-products/status")
+def api_service_order_products_status(service_no):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
+        return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+    service_no = _clean_export_value(service_no)
+    with order_product_job_lock:
+        job_id = request.args.get('job_id') or latest_order_product_job_by_service.get(service_no)
+        job = order_product_jobs.get(job_id)
+        if job and job.get('service_no') != service_no:
+            job = None
+        return jsonify(_order_product_job_status_payload(job, service_no))
+
+
 @app.route("/api/service-orders/<service_no>/refresh-products", methods=["POST"])
 def api_service_order_refresh_products(service_no):
     if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
@@ -8584,21 +11185,24 @@ def api_service_order_refresh_products(service_no):
     elif isinstance(result, list):
         products = list(result)
 
-    filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
-    existing = {}
-    if os.path.exists(filepath):
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                existing = json.load(f) or {}
-        except Exception:
-            existing = {}
+    with _service_order_cache_lock(service_no):
+        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+        existing = {}
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or {}
+            except Exception:
+                existing = {}
 
-    if products:
         existing["products"] = products
-    else:
-        existing["products"] = []
-    existing["service_no"] = _clean_export_value(service_no)
-    _write_service_order_detail(service_no, existing)
+        order_lookup = existing.get("order_lookup")
+        if isinstance(order_lookup, dict) and order_lookup.get("order_no"):
+            order_lookup["comparison"] = _build_service_order_product_comparison(
+                products, order_lookup.get("products") or [],
+            )
+        existing["service_no"] = _clean_export_value(service_no)
+        _write_service_order_detail(service_no, existing)
 
     return jsonify({
         "success": True,
@@ -8675,6 +11279,1518 @@ def transfer_page():
         account=current_account_public(),
     )
 
+
+@app.route("/inbound")
+def inbound_page():
+    return render_template(
+        "inbound.html",
+        nav_links=visible_page_links(),
+        account=current_account_public(),
+    )
+
+
+@app.route("/inventory")
+def inventory_page():
+    return render_template(
+        "inventory.html",
+        nav_links=visible_page_links(),
+        account=current_account_public(),
+    )
+
+
+def _current_inbound_owner():
+    account = current_account() or {}
+    return str(account.get('id') or account.get('username') or '')
+
+
+def _current_inbound_actor():
+    account = current_account() or {}
+    return str(account.get('username') or account.get('display_name') or '').strip()
+
+
+def _inbound_status_payload(job, owner=''):
+    if not job:
+        return {
+            'job_id': '',
+            'owner': owner,
+            'packing_slip_no': '',
+            'slot_id': '',
+            'slot_label': '',
+            'stage': 'waiting',
+            'running': False,
+            'done': False,
+            'success': False,
+            'error': '',
+            'current_page': 0,
+            'page_counts': [],
+            'logs': [],
+            'started_at': '',
+            'finished_at': '',
+        }
+    payload = {
+        key: job.get(key)
+        for key in (
+            'job_id',
+            'owner',
+            'packing_slip_no',
+            'slot_id',
+            'slot_label',
+            'stage',
+            'running',
+            'done',
+            'success',
+            'error',
+            'current_page',
+            'started_at',
+            'finished_at',
+        )
+    }
+    payload['page_counts'] = list(job.get('page_counts') or [])
+    payload['logs'] = list(job.get('logs') or [])
+    if isinstance(job.get('result'), dict):
+        payload['result'] = job['result']
+        payload['download_url'] = f"/api/inbound/export?job_id={job['job_id']}"
+    return payload
+
+
+def _inbound_gyj_status_payload(job, owner=''):
+    if not job:
+        return {
+            'job_id': '', 'owner': owner, 'packing_slip_no': '', 'source_job_id': '',
+            'stage': 'waiting', 'running': False, 'done': False, 'success': False,
+            'error': '', 'current_line': 0, 'total_lines': 0, 'logs': [],
+            'started_at': '', 'finished_at': '',
+        }
+    payload = {
+        key: job.get(key)
+        for key in (
+            'job_id', 'owner', 'packing_slip_no', 'source_job_id', 'stage', 'running',
+            'done', 'success', 'error', 'current_line', 'total_lines', 'started_at',
+            'finished_at',
+        )
+    }
+    payload['logs'] = list(job.get('logs') or [])
+    if isinstance(job.get('result'), dict):
+        payload['result'] = job['result']
+    elif job.get('completed_products'):
+        payload['result'] = {
+            'packing_slip_no': job.get('packing_slip_no') or '',
+            'products': list(job.get('completed_products') or []),
+        }
+    return payload
+
+
+@app.route("/api/inbound/start", methods=["POST"])
+def api_inbound_start():
+    data = request.get_json(silent=True) or {}
+    try:
+        packing_slip_no = normalize_packing_slip_no(data.get('packing_slip_no'))
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+
+    owner = _current_inbound_owner()
+    with inbound_job_lock:
+        running_job_id = latest_inbound_job_by_owner.get(owner)
+        running_job = inbound_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有入库读取任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+
+        _purge_completed_inbound_jobs_for_owner_unlocked(owner)
+        job = _empty_inbound_job(owner, packing_slip_no, '', '')
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _append_job_log_unlocked(job, '等待查询通道', 'info', 300)
+        inbound_jobs[job['job_id']] = job
+        latest_inbound_job_by_owner[owner] = job['job_id']
+
+    def launch(worker, slot_id, slot_label):
+        with inbound_job_lock:
+            current = inbound_jobs.get(job['job_id'])
+            if not current:
+                _release_priority_query_slot(slot_id)
+                return
+            current.update({'slot_id': slot_id, 'slot_label': slot_label, 'stage': 'navigation'})
+            _append_job_log_unlocked(current, f'已分配查询通道：{slot_label}', 'info', 300)
+            latest_inbound_job_by_slot[slot_id] = job['job_id']
+
+        def run():
+            try:
+                _run_inbound_job(job['job_id'], worker)
+            finally:
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('inbound', job['job_id'], launch)
+
+    return jsonify({
+        'success': True,
+        'job_id': job['job_id'],
+        'packing_slip_no': packing_slip_no,
+        'slot_id': job.get('slot_id') or '',
+        'slot_label': job.get('slot_label') or '',
+        'stage': job.get('stage') or 'waiting',
+    })
+
+
+@app.route("/api/inbound/status", methods=["GET"])
+def api_inbound_status():
+    owner = _current_inbound_owner()
+    requested_job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
+    with inbound_job_lock:
+        job_id = requested_job_id
+        if prefer_latest or not job_id:
+            job_id = latest_inbound_job_by_owner.get(owner) or ''
+        job = inbound_jobs.get(job_id)
+        if requested_job_id and (not job or job.get('owner') != owner):
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        return jsonify(_inbound_status_payload(job, owner))
+
+
+@app.route("/api/inbound/history", methods=["GET"])
+def api_inbound_history():
+    return jsonify({'success': True, 'records': load_inbound_history()})
+
+
+@app.route("/api/inbound/history/<packing_slip_no>", methods=["GET", "DELETE"])
+def api_inbound_history_record(packing_slip_no):
+    if request.method == "DELETE":
+        if not delete_inbound_history(packing_slip_no):
+            return jsonify({'success': False, 'error': '装箱单历史不存在'}), 404
+        return jsonify({'success': True})
+    record = get_inbound_history(packing_slip_no)
+    if not record:
+        return jsonify({'success': False, 'error': '装箱单历史不存在'}), 404
+    return jsonify({'success': True, 'record': record})
+
+
+@app.route("/api/inbound/gyj/history", methods=["GET"])
+def api_inbound_gyj_history():
+    return jsonify({
+        'success': True,
+        'records': load_gyj_inbound_history(),
+        'can_delete': is_admin_account(),
+    })
+
+
+@app.route("/api/inbound/gyj/history/<order_no>", methods=["DELETE"])
+def api_inbound_gyj_history_record(order_no):
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可删除历史入库'}), 403
+    if not delete_gyj_inbound_history(order_no):
+        return jsonify({'success': False, 'error': 'GYJ 历史入库不存在'}), 404
+    return jsonify({'success': True})
+
+
+@app.route("/api/inbound/export", methods=["GET"])
+def api_inbound_export():
+    owner = _current_inbound_owner()
+    job_id = str(request.args.get('job_id') or '').strip()
+    with inbound_job_lock:
+        job = inbound_jobs.get(job_id)
+        if not job or job.get('owner') != owner:
+            return jsonify({'success': False, 'error': '入库任务不存在'}), 404
+        if not job.get('done') or not job.get('success') or not isinstance(job.get('result'), dict):
+            return jsonify({'success': False, 'error': '入库任务尚未成功完成'}), 409
+        packing_slip_no = job['packing_slip_no']
+        result = job['result']
+
+    workbook = build_inbound_workbook(result)
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"{packing_slip_no}_入库明细.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/api/gyj/credentials", methods=["GET", "POST"])
+@app.route("/api/inbound/gyj/credentials", methods=["GET", "POST"])
+def api_gyj_credentials():
+    if not is_admin_account():
+        return jsonify({"success": False, "error": "仅管理员可管理 GYJ 通道"}), 403
+    if request.method == "GET":
+        return jsonify({"success": True, **get_remembered_gyj_credentials()})
+    data = request.get_json(silent=True) or {}
+    remember = bool(data.get("remember"))
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    if remember and (not username or not password):
+        return jsonify({"success": False, "error": "请输入 GYJ 账号和密码"}), 400
+    if not save_remembered_gyj_credentials(remember, username, password):
+        return jsonify({"success": False, "error": "保存 GYJ 登录信息失败"}), 500
+    return jsonify({"success": True, "remember": remember})
+
+
+def _requested_gyj_slot_id(data=None):
+    raw_slot_id = ""
+    if isinstance(data, dict):
+        raw_slot_id = str(data.get("slot_id") or "").strip()
+    if not raw_slot_id:
+        raw_slot_id = str(request.args.get("slot_id") or "").strip()
+    return gyj_worker.validate_slot_id(raw_slot_id or "gyj-1")
+
+
+def _gyj_login_worker_from_request(data=None, require_idle=False):
+    slot_id = _requested_gyj_slot_id(data)
+    if require_idle and gyj_worker.slot_status(slot_id)["busy"]:
+        raise RuntimeError("该 GYJ 通道正在使用中，请稍后再试")
+    return slot_id, gyj_login_worker(slot_id)
+
+
+def _gyj_slots_response():
+    slots = gyj_worker.slots_payload()
+    logged_in_count = sum(1 for row in slots if row["logged_in"])
+    available_count = sum(
+        1 for row in slots if row["logged_in"] and not row["busy"]
+    )
+    return {
+        "success": True,
+        "total": len(slots),
+        "logged_in": logged_in_count > 0,
+        "logged_in_count": logged_in_count,
+        "available_count": available_count,
+        "slots": slots,
+    }
+
+
+@app.route("/api/gyj/slots", methods=["GET"])
+@app.route("/api/inbound/gyj/slots", methods=["GET"])
+def api_gyj_slots():
+    return jsonify(_gyj_slots_response())
+
+
+@app.route("/api/gyj/login", methods=["POST"])
+@app.route("/api/inbound/gyj/login", methods=["POST"])
+def api_gyj_login():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username") or "").strip()
+    password = str(data.get("password") or "")
+    remember = bool(data.get("remember"))
+    if data.get("use_saved") and (not username or not password):
+        saved = get_remembered_gyj_credentials_secret()
+        username = username or saved["username"]
+        password = password or saved["password"]
+    if not username or not password:
+        return jsonify({'success': False, 'error': '请输入 GYJ 账号和密码'}), 400
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    if not save_remembered_gyj_credentials(remember, username, password):
+        return jsonify({'success': False, 'error': '保存 GYJ 登录信息失败'}), 500
+    ok, message = worker.login_step1(username, password)
+    return jsonify({
+        'success': bool(ok), 'message': str(message or ''),
+        'slot_id': slot_id,
+        'logged_in': bool(worker.logged_in if hasattr(worker, 'logged_in') else ok),
+        'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False) or message == 'GYJ 等待验证码'),
+    }), (200 if ok else 409)
+
+
+@app.route("/api/gyj/login/captcha", methods=["POST"])
+@app.route("/api/inbound/gyj/login/captcha", methods=["POST"])
+def api_gyj_login_captcha():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    data = request.get_json(silent=True) or {}
+    captcha = str(data.get("captcha") or "").strip()
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    ok, message = worker.login_step2(captcha)
+    return jsonify({
+        'success': bool(ok), 'message': str(message or ''),
+        'slot_id': slot_id,
+        'logged_in': bool(getattr(worker, 'logged_in', ok)),
+        'waiting_captcha': bool(getattr(worker, 'waiting_captcha', False)),
+    }), (200 if ok else 409)
+
+
+@app.route("/api/gyj/captcha-preview", methods=["GET"])
+@app.route("/api/inbound/gyj/captcha-preview", methods=["GET"])
+def api_gyj_captcha_preview():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    return jsonify({
+        'success': True, 'slot_id': slot_id,
+        'captcha_image': worker.captcha_preview() or '',
+    })
+
+
+@app.route("/api/gyj/captcha/refresh", methods=["POST"])
+@app.route("/api/inbound/gyj/captcha/refresh", methods=["POST"])
+def api_gyj_captcha_refresh():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可管理 GYJ 通道'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        slot_id, worker = _gyj_login_worker_from_request(data, require_idle=True)
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    image = worker.refresh_captcha() or ''
+    if not image:
+        return jsonify({'success': False, 'error': '验证码刷新失败，请重新登录 GYJ'}), 409
+    return jsonify({'success': True, 'slot_id': slot_id, 'captcha_image': image})
+
+
+@app.route("/api/gyj/login-status", methods=["GET"])
+@app.route("/api/inbound/gyj/login-status", methods=["GET"])
+def api_gyj_login_status():
+    try:
+        slot_id, worker = _gyj_login_worker_from_request()
+    except ValueError as error:
+        return jsonify({'success': False, 'error': str(error)}), 400
+    message = ""
+    if not gyj_worker.slot_status(slot_id)["busy"]:
+        _ok, message = worker.check_login_status()
+    payload = _gyj_slots_response()
+    selected = next(row for row in payload["slots"] if row["id"] == slot_id)
+    payload.update({
+        "slot_id": slot_id,
+        "waiting_captcha": selected["waiting_captcha"],
+        "message": str(message or ("GYJ 已登录" if selected["logged_in"] else "请先登录 GYJ")),
+    })
+    return jsonify(payload)
+
+
+def _select_gyj_purchase_result(source_result, selected_items):
+    if not isinstance(selected_items, list) or not selected_items:
+        raise GYJInboundError('请至少选择一个入库产品')
+
+    source_by_code = {
+        str(item.get('product_code') or '').strip(): item
+        for item in (source_result.get('items') or [])
+        if str(item.get('product_code') or '').strip()
+    }
+    selected_result_items = []
+    seen_product_codes = set()
+    seen_serials = set()
+
+    for selected in selected_items:
+        if not isinstance(selected, dict):
+            raise GYJInboundError('入库产品选择格式不正确')
+        product_code = str(selected.get('product_code') or '').strip()
+        source_item = source_by_code.get(product_code)
+        if not source_item:
+            raise GYJInboundError(f'物料 {product_code or "（空）"} 不属于当前装箱单')
+        if product_code in seen_product_codes:
+            raise GYJInboundError(f'物料 {product_code} 被重复选择')
+        seen_product_codes.add(product_code)
+
+        source_serials = {
+            str(serial).strip()
+            for serial in (source_item.get('serials') or [])
+            if str(serial).strip()
+        }
+        selected_serials = []
+        for serial in selected.get('serials') or []:
+            serial = str(serial).strip()
+            if not serial:
+                continue
+            if serial not in source_serials:
+                raise GYJInboundError(f'条码 {serial} 不属于物料 {product_code}')
+            if serial in seen_serials:
+                raise GYJInboundError(f'条码 {serial} 被重复选择')
+            seen_serials.add(serial)
+            selected_serials.append(serial)
+
+        raw_quantity = selected.get('unbarcoded_quantity', 0)
+        if isinstance(raw_quantity, bool):
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量必须是整数')
+        if isinstance(raw_quantity, int):
+            selected_quantity = raw_quantity
+        elif isinstance(raw_quantity, float) and raw_quantity.is_integer():
+            selected_quantity = int(raw_quantity)
+        elif isinstance(raw_quantity, str) and re.fullmatch(r'-?\d+', raw_quantity.strip()):
+            selected_quantity = int(raw_quantity)
+        else:
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量必须是整数')
+        if selected_quantity < 0:
+            raise GYJInboundError(f'物料 {product_code} 的无条码数量不能小于 0')
+        available_quantity = max(0, int(source_item.get('unbarcoded_quantity') or 0))
+        if selected_quantity > available_quantity:
+            raise GYJInboundError(f'物料 {product_code} 的填写数量超过装箱单数量')
+        if not selected_serials and not selected_quantity:
+            raise GYJInboundError(f'物料 {product_code} 未选择条码或填写数量')
+
+        selected_item = dict(source_item)
+        selected_item.update({
+            'serials': selected_serials,
+            'serial_count': len(selected_serials),
+            'unbarcoded_quantity': selected_quantity,
+            'expected_quantity': len(selected_serials) + selected_quantity,
+            'quantity_mismatch': False,
+        })
+        selected_result_items.append(selected_item)
+
+    selected_result = dict(source_result)
+    selected_result['items'] = selected_result_items
+    return selected_result
+
+
+@app.route("/api/inbound/gyj/start", methods=["POST"])
+def api_inbound_gyj_start():
+    owner = _current_inbound_owner()
+    request_data = request.get_json(silent=True) or {}
+    requested_packing_slip_no = str(
+        request_data.get('packing_slip_no') or ''
+    ).strip()
+    if requested_packing_slip_no:
+        history = get_inbound_history(requested_packing_slip_no)
+        if not history or not isinstance(history.get('result'), dict):
+            return jsonify({'success': False, 'error': '所选装箱单历史不存在'}), 404
+        packing_slip_no = history.get('packing_slip_no') or requested_packing_slip_no
+        source_result = dict(history['result'])
+        source_job_id = f'history:{packing_slip_no}'
+    else:
+        with inbound_job_lock:
+            source_job_id = latest_inbound_job_by_owner.get(owner) or ''
+            source = inbound_jobs.get(source_job_id)
+            if not source or source.get('owner') != owner:
+                return jsonify({'success': False, 'error': '请先成功读取 CRM 装箱单'}), 409
+            if not source.get('done') or not source.get('success') or not isinstance(source.get('result'), dict):
+                return jsonify({'success': False, 'error': 'CRM 装箱单尚未成功读取完成'}), 409
+            packing_slip_no = source.get('packing_slip_no') or ''
+            source_result = dict(source['result'])
+
+    try:
+        raw_packing_slip_type = str(source_result.get('packing_slip_type') or '').strip()
+        if not raw_packing_slip_type:
+            raise GYJInboundError('装箱单历史缺少装箱单类型，请重新读取 CRM 装箱单')
+        try:
+            packing_slip_type = normalize_packing_slip_type(raw_packing_slip_type)
+        except ValueError as error:
+            raise GYJInboundError(str(error)) from error
+        if 'selected_items' in request_data:
+            source_result = _select_gyj_purchase_result(
+                source_result, request_data.get('selected_items')
+            )
+        lines = build_gyj_purchase_lines(source_result)
+    except GYJInboundError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+
+    with inbound_gyj_job_lock:
+        running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
+        running_job = inbound_gyj_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有 GYJ 采购入库任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+
+    try:
+        lease = gyj_worker.reserve(timeout=60)
+    except RuntimeError as error:
+        return jsonify({'success': False, 'error': str(error)}), 409
+    worker = lease.worker
+    logged_in, message = worker.check_login_status()
+    if not logged_in:
+        lease.release()
+        return jsonify({'success': False, 'error': message or '请先登录 GYJ'}), 409
+
+    with inbound_gyj_job_lock:
+        running_job_id = latest_inbound_gyj_job_by_owner.get(owner)
+        running_job = inbound_gyj_jobs.get(running_job_id)
+        if running_job and running_job.get('running'):
+            lease.release()
+            return jsonify({
+                'success': False,
+                'error': '当前账号已有 GYJ 采购入库任务正在运行',
+                'job_id': running_job_id,
+            }), 409
+        _purge_completed_inbound_gyj_jobs_for_owner_unlocked(owner)
+        job = _empty_inbound_gyj_job(
+            owner, packing_slip_no, source_job_id, lines, packing_slip_type,
+            actor=_current_inbound_actor(),
+        )
+        job.update({
+            'running': True,
+            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        _append_job_log_unlocked(job, f'使用装箱单号：{packing_slip_no}', 'info', 300)
+        _append_job_log_unlocked(job, '已通过 GYJ 登录校验，准备创建采购入库单', 'info', 300)
+        inbound_gyj_jobs[job['job_id']] = job
+        latest_inbound_gyj_job_by_owner[owner] = job['job_id']
+
+    thread = threading.Thread(
+        target=_run_inbound_gyj_job,
+        args=(job['job_id'], worker, lines, lease),
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception as error:
+        lease.release()
+        message = _brief_batch_error(error, 800) or 'GYJ 采购入库任务启动失败'
+        with inbound_gyj_job_lock:
+            job.update({
+                'stage': 'failed', 'running': False, 'done': True, 'success': False,
+                'error': message, 'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+        return jsonify({'success': False, 'error': message}), 500
+
+    return jsonify({
+        'success': True,
+        'job_id': job['job_id'],
+        'packing_slip_no': packing_slip_no,
+        'total_lines': len(lines),
+    })
+
+
+@app.route("/api/inbound/gyj/status", methods=["GET"])
+def api_inbound_gyj_status():
+    owner = _current_inbound_owner()
+    requested_job_id = str(request.args.get('job_id') or '').strip()
+    prefer_latest = str(request.args.get('latest') or '').lower() in {'1', 'true', 'yes'}
+    with inbound_gyj_job_lock:
+        job_id = requested_job_id
+        if prefer_latest or not job_id:
+            job_id = latest_inbound_gyj_job_by_owner.get(owner) or ''
+        job = inbound_gyj_jobs.get(job_id)
+        if requested_job_id and (not job or job.get('owner') != owner):
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        if job and job.get('owner') != owner:
+            return jsonify({'success': False, 'error': 'GYJ 采购入库任务不存在'}), 404
+        return jsonify(_inbound_gyj_status_payload(job, owner))
+
+def _inventory_identity():
+    account = current_account() or {}
+    actor = str(account.get("username") or "").strip()
+    if not actor:
+        raise InventoryPermissionDenied("请先登录工具账号")
+    admin_account = next(
+        (row for row in load_accounts() if row.get("username") == "admin"),
+        {},
+    )
+    owner = str(
+        admin_account.get("id") or admin_account.get("username") or "admin"
+    ).strip()
+    return owner, actor
+
+
+def _inventory_json_body():
+    data = request.get_json(silent=True)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError("请求内容格式不正确")
+    return data
+
+
+def _inventory_path_value(value, label):
+    value = str(value or "").strip()
+    if not value or len(value) > 512 or any(ord(char) < 32 for char in value):
+        raise ValueError(f"{label}格式不正确")
+    return value
+
+
+def _inventory_device_id(data):
+    return _inventory_path_value(data.get("device_id"), "设备标识")
+
+
+def _inventory_json_fields(data, allowed):
+    if set(data) - set(allowed):
+        raise ValueError("请求字段不正确")
+    return data
+
+
+def _inventory_carton_id(value):
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("箱组标识格式不正确")
+    return value
+
+
+def _inventory_expected_version(data):
+    if "expected_version" not in data:
+        raise ValueError("expected_version 不能为空")
+    raw = data.get("expected_version")
+    if isinstance(raw, bool):
+        raise ValueError("expected_version 格式不正确")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("expected_version 格式不正确")
+    if value < 1 or str(raw).strip() != str(value):
+        raise ValueError("expected_version 格式不正确")
+    return value
+
+
+def _inventory_entry_version(data):
+    if "entry_version" not in data:
+        raise ValueError("entry_version 不能为空")
+    raw = data.get("entry_version")
+    if isinstance(raw, bool):
+        raise ValueError("entry_version 格式不正确")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("entry_version 格式不正确")
+    if value < 1 or str(raw).strip() != str(value):
+        raise ValueError("entry_version 格式不正确")
+    return value
+
+
+def _inventory_mutation_response(key, value, owner=None, task_id=None):
+    public_value = dict(value) if isinstance(value, dict) else value
+    version = None
+    if isinstance(public_value, dict):
+        version = public_value.pop("task_version", None)
+        if version is None:
+            version = public_value.get("version")
+    if version is None and owner and task_id:
+        version = inventory_store.get_task_version(owner, task_id)
+    if not isinstance(version, int):
+        raise RuntimeError("盘点写入结果缺少任务版本")
+    return jsonify({"success": True, key: public_value, "version": version})
+
+
+def _inventory_lock_owner_label(value):
+    label = "".join(
+        character for character in str(value or "")
+        if ord(character) >= 32 and ord(character) != 127
+    ).strip()
+    return label[:80]
+
+
+def _inventory_api(handler):
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except InventoryPermissionDenied as exc:
+            return jsonify({"success": False, "error": str(exc)}), 403
+        except InventoryNotFound as exc:
+            return jsonify({"success": False, "error": str(exc)}), 404
+        except InventoryVersionConflict as exc:
+            return jsonify({
+                "success": False,
+                "error": str(exc),
+                "current_version": exc.current_version,
+            }), 409
+        except InventoryConfirmationRequired as exc:
+            return jsonify({
+                "success": False,
+                "confirmation_required": True,
+                "pending_serial_count": exc.pending_serial_count,
+                "error": str(exc),
+            }), 409
+        except InventoryConflict as exc:
+            payload = {"success": False, "error": str(exc)}
+            lock_owner = _inventory_lock_owner_label(
+                getattr(exc, "lock_owner", None)
+            )
+            if lock_owner:
+                payload["lock_owner"] = lock_owner
+            return jsonify(payload), 409
+        except (ValueError, TypeError) as exc:
+            return jsonify({"success": False, "error": str(exc) or "请求参数不正确"}), 400
+        except InventoryServiceError:
+            return jsonify({
+                "success": False,
+                "error": "GYJ 库存读取失败，请检查登录状态后重试",
+            }), 502
+        except Exception:
+            return jsonify({"success": False, "error": "库存盘点服务暂时不可用"}), 500
+    return wrapped
+
+
+def _inventory_owned_task(owner, task_id):
+    task_id = _inventory_path_value(task_id, "任务标识")
+    return inventory_store.get_task_snapshot(owner, task_id)
+
+
+def _inventory_sync_is_due(snapshot):
+    value = snapshot.get("last_sync_attempt_at") or snapshot.get("last_sync_at")
+    if not value:
+        return True
+    try:
+        last_sync = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return True
+    now = datetime.now(last_sync.tzinfo) if last_sync.tzinfo else datetime.now()
+    return (now - last_sync).total_seconds() >= 60
+
+
+def _run_inventory_sync(owner, task_id):
+    try:
+        inventory_service.sync_completed_items(owner, task_id)
+    except Exception:
+        # Never copy a worker/page exception into a response or application log.
+        pass
+    finally:
+        current_thread = threading.current_thread()
+        with inventory_sync_lock:
+            if inventory_sync_threads.get(task_id) is current_thread:
+                inventory_sync_threads.pop(task_id, None)
+
+
+def _ensure_inventory_sync(owner, task_id):
+    task_id = _inventory_path_value(task_id, "任务标识")
+    with inventory_sync_lock:
+        running = inventory_sync_threads.get(task_id)
+        if running is not None and running.is_alive():
+            return False
+        snapshot = inventory_store.get_task_snapshot(owner, task_id)
+        if snapshot.get("phase") == "completed" or not _inventory_sync_is_due(snapshot):
+            return False
+        thread = threading.Thread(
+            target=_run_inventory_sync,
+            args=(owner, task_id),
+            daemon=True,
+            name=f"inventory-sync-{task_id[:24]}",
+        )
+        inventory_sync_threads[task_id] = thread
+        try:
+            thread.start()
+        except Exception:
+            inventory_sync_threads.pop(task_id, None)
+            return False
+        return True
+
+
+def _run_inventory_serial_prefetch(owner, task_id, barcode, device_id):
+    key = (owner, task_id, barcode)
+    try:
+        inventory_service.refresh_serial_item(
+            owner, task_id, barcode, device_id, "system", force=False
+        )
+    except Exception:
+        # Manual refresh retries and exposes failure without blocking counting.
+        pass
+    finally:
+        current_thread = threading.current_thread()
+        with inventory_serial_prefetch_lock:
+            if inventory_serial_prefetch_threads.get(key) is current_thread:
+                inventory_serial_prefetch_threads.pop(key, None)
+
+
+def _ensure_inventory_serial_prefetch(owner, task_id, barcode, device_id):
+    key = (owner, task_id, barcode)
+    with inventory_serial_prefetch_lock:
+        running = inventory_serial_prefetch_threads.get(key)
+        if running is not None and running.is_alive():
+            return False
+        thread = threading.Thread(
+            target=_run_inventory_serial_prefetch,
+            args=(owner, task_id, barcode, device_id),
+            daemon=True,
+            name=f"inventory-serial-prefetch-{task_id[:16]}-{barcode[:16]}",
+        )
+        inventory_serial_prefetch_threads[key] = thread
+        try:
+            thread.start()
+        except Exception:
+            inventory_serial_prefetch_threads.pop(key, None)
+            return False
+        return True
+
+
+def _inventory_attach_serial_prefetch_status(owner, task_id, items):
+    with inventory_serial_prefetch_lock:
+        running_barcodes = {
+            barcode
+            for (item_owner, item_task_id, barcode), thread
+            in inventory_serial_prefetch_threads.items()
+            if item_owner == owner
+            and item_task_id == task_id
+            and thread.is_alive()
+        }
+    for item in items:
+        item["serial_syncing"] = bool(
+            item.get("has_serial")
+            and str(item.get("barcode") or "") in running_barcodes
+        )
+    return items
+
+
+def _schedule_inventory_serial_prefetch(owner, task_id, item, device_id):
+    if item.get("has_serial") and item.get("state") == "serial_pending":
+        _ensure_inventory_serial_prefetch(
+            owner, task_id, str(item.get("barcode") or ""), device_id
+        )
+    _inventory_attach_serial_prefetch_status(owner, task_id, [item])
+
+
+def _inventory_version_arg():
+    raw = request.args.get("version")
+    if raw in (None, ""):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError("任务版本格式不正确")
+    if value < 0:
+        raise ValueError("任务版本格式不正确")
+    return value
+
+
+def _inventory_filename_part(value, fallback):
+    cleaned = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "")).strip("-_")
+    return cleaned[:80] or fallback
+
+
+def _inventory_discrepancy_filters():
+    state = str(request.args.get("state") or "open").strip()
+    if state not in {"open", "archived"}:
+        raise ValueError("差异状态不正确")
+    return state, str(request.args.get("query") or "").strip()
+
+
+def _inventory_task_number(completed_at):
+    if completed_at:
+        try:
+            completed = datetime.fromisoformat(str(completed_at))
+            return completed.strftime("PD%Y%m%d-%H%M%S")
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _inventory_public_task(task):
+    if not isinstance(task, dict):
+        return task
+    public = dict(task)
+    task_number = _inventory_task_number(public.get("completed_at"))
+    if task_number:
+        public["task_number"] = task_number
+    if public.get("gyj_status") not in (None, "", "synced"):
+        public["gyj_status"] = "GYJ 库存读取失败，请检查登录状态后重试"
+    return public
+
+
+def _inventory_task_summary(items):
+    eligible_items = []
+    for item in items:
+        initial_stock = Decimal(normalize_quantity(item.get("initial_stock") or "0"))
+        actual_quantity = Decimal(normalize_quantity(item.get("completed_actual_qty") or "0"))
+        if initial_stock != 0 or actual_quantity > 0:
+            eligible_items.append(item)
+    summary = {
+        "total": len(eligible_items),
+        "completed": 0,
+        "pending": 0,
+        "matched": 0,
+        "surplus": 0,
+        "deficit": 0,
+        "serial_pending": 0,
+        "data_error": 0,
+    }
+    for item in eligible_items:
+        if item.get("state") == "data_error":
+            summary["data_error"] += 1
+        elif item.get("completed_actual_qty") is None:
+            summary["pending"] += 1
+        else:
+            summary["completed"] += 1
+        if item.get("state") == "matched":
+            summary["matched"] += 1
+        difference = str(item.get("diff_qty") or "0")
+        if difference.startswith("-"):
+            summary["deficit"] += 1
+        elif difference.strip("0."):
+            summary["surplus"] += 1
+        if item.get("state") == "serial_pending":
+            summary["serial_pending"] += 1
+    return summary
+
+
+def _inventory_attach_lock_owners(task_id, items):
+    lock_owners = {}
+    try:
+        with closing(inventory_store.connect()) as connection:
+            rows = connection.execute(
+                """SELECT barcode, actor FROM inventory_item_locks
+                   WHERE task_id = ? AND expires_at > ?""",
+                (task_id, datetime.now().isoformat()),
+            )
+            lock_owners = {
+                row["barcode"]: _inventory_lock_owner_label(row["actor"])
+                for row in rows
+            }
+    except Exception:
+        # Lock labels are supplementary; the task snapshot remains usable if
+        # an older store implementation cannot expose them.
+        pass
+    for item in items:
+        item["lock_actor"] = lock_owners.get(item.get("barcode"), "")
+    return items
+
+
+@app.route("/api/inventory/tasks/active", methods=["GET"])
+@_inventory_api
+def api_inventory_active_task():
+    owner, _actor = _inventory_identity()
+    known_version = _inventory_version_arg()
+    active = inventory_store.get_active_task(owner)
+    if not active:
+        return jsonify({"success": True, "task": None})
+    task_id = active["task_id"]
+    snapshot = inventory_store.get_task_snapshot(
+        owner, task_id, known_version=known_version
+    )
+    if not snapshot.get("unchanged"):
+        unfiltered_items = snapshot.get("items") or []
+        snapshot["summary"] = _inventory_task_summary(unfiltered_items)
+        visible_items = inventory_store.list_items(task_id)
+        snapshot["categories"] = sorted({
+            str(item.get("category") or "").strip()
+            for item in visible_items
+            if str(item.get("category") or "").strip()
+        })
+        query = str(request.args.get("query") or "").strip()
+        state = str(request.args.get("state") or "").strip()
+        snapshot["items"] = visible_items
+        if query or state:
+            snapshot["items"] = inventory_store.list_items(
+                task_id,
+                query=query,
+                state=state,
+                include_zero=bool(query),
+            )
+        _inventory_attach_lock_owners(task_id, snapshot["items"])
+        _inventory_attach_serial_prefetch_status(owner, task_id, snapshot["items"])
+    _ensure_inventory_sync(owner, task_id)
+    return jsonify({"success": True, "task": _inventory_public_task(snapshot)})
+
+
+@app.route("/api/inventory/tasks", methods=["POST"])
+@_inventory_api
+def api_inventory_create_task():
+    owner, actor = _inventory_identity()
+    task = inventory_service.create_task(owner, actor)
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task.get("task_id")
+    )
+
+
+@app.route("/api/inventory/tasks/history", methods=["GET"])
+@_inventory_api
+def api_inventory_task_history():
+    owner, _actor = _inventory_identity()
+    try:
+        limit = int(request.args.get("limit", 20))
+        offset = int(request.args.get("offset", 0))
+    except (TypeError, ValueError):
+        raise ValueError("历史任务分页参数不正确")
+    if not 1 <= limit <= 50 or offset < 0:
+        raise ValueError("历史任务分页参数不正确")
+    page = inventory_store.list_task_history(
+        owner, limit=limit, offset=offset
+    )
+    tasks = [
+        _inventory_public_task(task)
+        for task in page["tasks"]
+    ]
+    return jsonify({
+        "success": True,
+        "tasks": tasks,
+        "pagination": {
+            "limit": page["limit"],
+            "offset": page["offset"],
+            "total": page["total"],
+            "has_more": page["offset"] + len(tasks) < page["total"],
+        },
+    })
+
+
+@app.route("/api/inventory/tasks/<task_id>", methods=["GET"])
+@_inventory_api
+def api_inventory_task(task_id):
+    owner, _actor = _inventory_identity()
+    task = _inventory_owned_task(owner, task_id)
+    _inventory_attach_serial_prefetch_status(
+        owner, task_id, task.get("items") or []
+    )
+    return jsonify({"success": True, "task": _inventory_public_task(task)})
+
+
+@app.route("/api/inventory/tasks/<task_id>", methods=["DELETE"])
+@_inventory_api
+def api_inventory_delete_task(task_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以删除历史盘点任务")
+    owner, _actor = _inventory_identity()
+    deleted = inventory_store.delete_completed_task(
+        owner, _inventory_path_value(task_id, "任务标识")
+    )
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/inventory/tasks/<task_id>/history-detail", methods=["GET"])
+@_inventory_api
+def api_inventory_task_history_detail(task_id):
+    owner, _actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    scope = str(request.args.get("scope") or "differences").strip()
+    if scope not in {
+        "differences", "participants", "all", "counted", "uncounted",
+        "quantity", "serial",
+    }:
+        raise ValueError("历史详情类型不正确")
+    detail = inventory_store.get_task_history_detail(
+        owner, task_id, scope=scope
+    )
+    return jsonify({
+        "success": True,
+        "task": _inventory_public_task(detail["task"]),
+        "scope": detail.get("scope", scope),
+        "items": detail["items"],
+        "participants": detail.get("participants", []),
+    })
+
+
+@app.route("/api/inventory/tasks/<task_id>/audit", methods=["GET"])
+@_inventory_api
+def api_inventory_task_audit(task_id):
+    owner, _actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = str(request.args.get("barcode") or "").strip()
+    if barcode:
+        barcode = _inventory_path_value(barcode, "商品条码")
+    events = inventory_store.list_audit_events(
+        owner, task_id, barcode=barcode or None
+    )
+    return jsonify({"success": True, "events": events})
+
+
+@app.route("/api/inventory/tasks/<task_id>/reopen", methods=["POST"])
+@_inventory_api
+def api_inventory_reopen_task(task_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以继续历史盘点")
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    task = inventory_service.reopen_task(owner, task_id, actor)
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task_id
+    )
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/claim", methods=["POST"])
+@_inventory_api
+def api_inventory_claim_item(task_id, barcode):
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/heartbeat", methods=["POST"])
+@_inventory_api
+def api_inventory_heartbeat_item(task_id, barcode):
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/count", methods=["POST"])
+@_inventory_api
+def api_inventory_count_item(task_id, barcode):
+    return jsonify({
+        "success": False,
+        "error": "盘点页面已更新，请刷新后重试",
+        "refresh_required": True,
+    }), 409
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/count-entries",
+    methods=["GET", "POST"],
+)
+@_inventory_api
+def api_inventory_count_entries(task_id, barcode):
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if request.method == "GET":
+        item = inventory_service.open_count_item(
+            owner, task_id, barcode, actor
+        )
+    else:
+        data = _inventory_json_body()
+        device_id = _inventory_device_id(data)
+        item = inventory_service.add_count_entry(
+            owner, task_id, barcode, device_id, actor,
+            normalize_quantity(data.get("quantity")),
+        )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
+        )
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/count-entries/<int:entry_id>",
+    methods=["POST", "DELETE"],
+)
+@_inventory_api
+def api_inventory_count_entry(task_id, barcode, entry_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if entry_id < 1:
+        raise ValueError("分次盘点记录标识格式不正确")
+    entry_version = _inventory_entry_version(data)
+    device_id = _inventory_device_id(data)
+    if request.method == "POST":
+        item = inventory_service.update_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            device_id, actor, normalize_quantity(data.get("quantity")),
+        )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
+        )
+    else:
+        item = inventory_service.delete_count_entry(
+            owner, task_id, barcode, entry_id, entry_version,
+            device_id, actor,
+        )
+        _schedule_inventory_serial_prefetch(
+            owner, task_id, item, device_id
+        )
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/open", methods=["POST"])
+@_inventory_api
+def api_inventory_open_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.open_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/refresh", methods=["POST"])
+@_inventory_api
+def api_inventory_refresh_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.refresh_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        force=data.get("force") is True,
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials", methods=["POST"])
+@_inventory_api
+def api_inventory_scan_serial(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.scan_serial(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        _inventory_path_value(data.get("serial"), "序列号"),
+    )
+    return _inventory_mutation_response("scan", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serials/<path:serial>", methods=["DELETE"])
+@_inventory_api
+def api_inventory_delete_serial(task_id, barcode, serial):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.delete_serial_scan(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+        _inventory_path_value(serial, "序列号"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/carton-preset",
+    methods=["GET", "POST"],
+)
+@_inventory_api
+def api_inventory_carton_preset(task_id, barcode):
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    if request.method == "GET":
+        preset = inventory_store.get_carton_preset(owner, task_id, barcode)
+        return jsonify({"success": True, "preset": preset})
+    data = _inventory_json_fields(
+        _inventory_json_body(), {"device_id", "carton_quantity"}
+    )
+    preset = inventory_service.save_carton_preset(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        data.get("carton_quantity"),
+    )
+    return _inventory_mutation_response("preset", preset, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons",
+    methods=["POST"],
+)
+@_inventory_api
+def api_inventory_create_carton(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(
+        _inventory_json_body(),
+        {"device_id", "preset_quantity", "start_serial", "serials"},
+    )
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.create_serial_carton(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        data.get("preset_quantity"), data.get("start_serial"),
+        data.get("serials"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>/serials",
+    methods=["POST"],
+)
+@_inventory_api
+def api_inventory_add_carton_serial(task_id, barcode, carton_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id", "serial"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.add_carton_serial(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id), data.get("serial"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>/serials/<path:serial>",
+    methods=["DELETE"],
+)
+@_inventory_api
+def api_inventory_remove_carton_serial(task_id, barcode, carton_id, serial):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.remove_carton_serial(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id), _inventory_path_value(serial, "序列号"),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/cartons/"
+    "<int:carton_id>",
+    methods=["DELETE"],
+)
+@_inventory_api
+def api_inventory_delete_carton(task_id, barcode, carton_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_fields(_inventory_json_body(), {"device_id"})
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    result = inventory_service.delete_serial_carton(
+        owner, task_id, barcode, _inventory_device_id(data), actor,
+        _inventory_carton_id(carton_id),
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/serial/finish", methods=["POST"])
+@_inventory_api
+def api_inventory_finish_serial_item(task_id, barcode):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_service.finish_serial_item(
+        owner,
+        _inventory_path_value(task_id, "任务标识"),
+        _inventory_path_value(barcode, "商品条码"),
+        _inventory_device_id(data),
+        actor,
+    )
+    return _inventory_mutation_response("serial", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/complete", methods=["POST"])
+@_inventory_api
+def api_inventory_complete_task(task_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    allow_unverified_serials = data.get("allow_unverified_serials", False)
+    if not isinstance(allow_unverified_serials, bool):
+        raise ValueError("allow_unverified_serials 格式不正确")
+    task_id = _inventory_path_value(task_id, "任务标识")
+    task = inventory_service.complete_task(
+        owner, task_id, actor,
+        allow_unverified_serials=allow_unverified_serials,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response(
+        "task", _inventory_public_task(task), owner, task_id
+    )
+
+
+@app.route("/api/inventory/tasks/<task_id>/items/<path:barcode>/unlock", methods=["POST"])
+@_inventory_api
+def api_inventory_unlock_item(task_id, barcode):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以强制解锁")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    _inventory_owned_task(owner, task_id)
+    result = inventory_store.admin_unlock(
+        task_id, _inventory_path_value(barcode, "商品条码"), actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("result", result, owner, task_id)
+
+
+@app.route("/api/inventory/tasks/<task_id>/export", methods=["GET"])
+@_inventory_api
+def api_inventory_task_export(task_id):
+    owner, _actor = _inventory_identity()
+    task = _inventory_owned_task(owner, task_id)
+    if task.get("phase") != "completed":
+        raise InventoryConflict("盘点任务尚未完成")
+    discrepancies = []
+    for state in ("open", "archived"):
+        discrepancies.extend(
+            row for row in inventory_store.list_discrepancies(owner, state)
+            if row.get("task_id") == task.get("task_id")
+        )
+    workbook = build_inventory_workbook(task, task.get("items") or [], discrepancies)
+    safe_task_id = _inventory_filename_part(task.get("task_id"), "task")
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"inventory-{safe_task_id}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/api/inventory/discrepancies", methods=["GET"])
+@_inventory_api
+def api_inventory_discrepancies():
+    owner, _actor = _inventory_identity()
+    state, query = _inventory_discrepancy_filters()
+    rows = inventory_store.list_discrepancies(owner, state, query=query)
+    for row in rows:
+        task_number = _inventory_task_number(row.get("completed_at"))
+        if task_number:
+            row["task_number"] = task_number
+    return jsonify({"success": True, "discrepancies": rows})
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/notes", methods=["POST"])
+@_inventory_api
+def api_inventory_discrepancy_note(discrepancy_id):
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    serial = data.get("serial")
+    if serial is not None:
+        serial = _inventory_path_value(serial, "序列号")
+    note = inventory_store.add_discrepancy_note(
+        owner,
+        discrepancy_id,
+        actor,
+        str(data.get("note") or ""),
+        serial=serial,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("note", note)
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/archive", methods=["POST"])
+@_inventory_api
+def api_inventory_archive_discrepancy(discrepancy_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以归档差异")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_store.archive_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
+
+
+@app.route("/api/inventory/discrepancies/<int:discrepancy_id>/restore", methods=["POST"])
+@_inventory_api
+def api_inventory_restore_discrepancy(discrepancy_id):
+    if not is_admin_account():
+        raise InventoryPermissionDenied("只有管理员可以恢复差异")
+    owner, actor = _inventory_identity()
+    data = _inventory_json_body()
+    result = inventory_store.restore_discrepancy(
+        owner, discrepancy_id, actor, True,
+        expected_version=_inventory_expected_version(data),
+    )
+    return _inventory_mutation_response("discrepancy", result)
+
+
+@app.route("/api/inventory/discrepancies/export", methods=["GET"])
+@_inventory_api
+def api_inventory_discrepancy_export():
+    owner, _actor = _inventory_identity()
+    state, query = _inventory_discrepancy_filters()
+    rows = inventory_store.list_discrepancies(owner, state, query=query)
+    workbook = build_discrepancy_workbook(
+        rows, "待处理" if state == "open" else "已归档"
+    )
+    safe_state = _inventory_filename_part(state, "open")
+    return send_file(
+        workbook,
+        as_attachment=True,
+        download_name=f"inventory-discrepancies-{safe_state}.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/product-library")
 def product_library_page():
     return render_template(
@@ -8724,10 +12840,6 @@ def api_product_library_query_start():
         if library_query_job['running']:
             return jsonify({'success': False, 'error': '已有条码匹配查询正在执行'})
 
-    worker, slot_id, slot_label, error = _select_idle_query_worker_desc()
-    if error:
-        return jsonify({'success': False, 'error': error})
-
     with library_query_lock:
         if library_query_job['running']:
             return jsonify({'success': False, 'error': '已有条码匹配查询正在执行'})
@@ -8739,15 +12851,28 @@ def api_product_library_query_start():
             'error': '',
             'log_seq': 0,
             'logs': [],
-            'slot_id': slot_id,
-            'slot_label': slot_label,
+            'slot_id': '',
+            'slot_label': '',
             'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'finished_at': '',
         })
-    _library_query_log("准备启动 CRM 查询...", 'info')
-    _library_query_log(f"已分配查询通道：{slot_label}", 'info')
-    threading.Thread(target=_run_library_query_job, args=(barcode, worker, slot_id, slot_label), daemon=True).start()
-    return jsonify({'success': True, 'slot_id': slot_id, 'slot_label': slot_label, 'message': '条码查询已开始'})
+    _library_query_log("等待查询通道...", 'info')
+
+    def launch(worker, slot_id, slot_label):
+        with library_query_lock:
+            library_query_job['slot_id'] = slot_id
+            library_query_job['slot_label'] = slot_label
+        _library_query_log(f"已分配查询通道：{slot_label}", 'info')
+
+        def run():
+            try:
+                _run_library_query_job(barcode, worker, slot_id, slot_label)
+            finally:
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+
+    enqueue_priority_query_work('library', f'library:{barcode}', launch)
+    return jsonify({'success': True, 'slot_id': '', 'slot_label': '等待查询通道', 'message': '条码查询已排队'})
 
 @app.route("/api/product-library/query/status")
 def api_product_library_query_status():
@@ -8815,7 +12940,7 @@ def api_accounts_save():
         return jsonify({'success': False, 'error': '账号不能为空'})
     if not isinstance(permissions, list):
         permissions = []
-    allowed = {'crm', 'results', 'transfer', 'accounts', 'product-library'}
+    allowed = {'crm', 'results', 'transfer', 'inbound', 'inventory', 'accounts', 'product-library'}
     permissions = [p for p in permissions if p in allowed]
     accounts = load_accounts()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -9045,6 +13170,7 @@ def _bulk_login_status_payload(job):
         'error': job.get('error') or '',
         'waiting_captcha': bool(waiting),
         'captcha_received': bool(job.get('captcha')),
+        'captcha_submitting': bool(job.get('captcha_submitting')),
         'pending_slots': waiting,
         'active_slots': active,
         'slots': slots,
@@ -9063,6 +13189,11 @@ def api_crm_bulk_login_start():
     scope = str(data.get('scope') or data.get('kind') or 'query').strip() or 'query'
     username = str(data.get('username') or '').strip()
     password = str(data.get('password') or '')
+    if not username and not password:
+        remembered = get_remembered_crm_credentials()
+        if remembered.get('remember'):
+            username = str(remembered.get('username') or '').strip()
+            password = str(remembered.get('password') or '')
     if not username or not password:
         return jsonify({'success': False, 'error': '请输入 CRM 账号和密码'})
     scope, slots = _bulk_login_slots_for_scope(scope)
@@ -9112,7 +13243,11 @@ def api_crm_bulk_login_captcha():
         job = bulk_login_jobs.get(job_id)
         if not job:
             return jsonify({'success': False, 'error': '没有批量登录任务'})
+        if job.get('captcha_submitting'):
+            return jsonify(_bulk_login_status_payload(job))
         job['captcha'] = captcha
+        job['captcha_generation'] = int(job.get('captcha_generation') or 0) + 1
+        job['captcha_submitting'] = True
         _append_job_log_unlocked(job, '已收到验证码，正在同步提交到等待中的通道', 'info', 1000)
         payload = _bulk_login_status_payload(job)
     threading.Thread(target=_submit_bulk_login_pending, args=(job_id,), daemon=True).start()
@@ -9199,42 +13334,48 @@ def api_crm_background_batch_start():
             'excluded': excluded,
         }), 400
 
-    slot_ids = configured_query_slot_ids()
-    if not slot_ids:
-        return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
+    with query_slot_reservation_lock:
+        slot_ids = [
+            slot_id
+            for slot_id in configured_query_slot_ids()
+            if not _query_slot_has_running_inbound(slot_id)
+            and not _query_slot_has_running_batch(slot_id)
+            and not _query_slot_has_running_background_batch(slot_id)
+        ]
+        if not slot_ids:
+            return jsonify({'success': False, 'error': '暂无可用查询通道'}), 400
 
-    with background_query_job_lock:
-        running_job_id = latest_background_query_job_by_owner.get(owner)
-        running_job = background_query_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({
-                'success': False,
-                'error': '当前账号已有后台批量查询正在运行',
-                'job_id': running_job_id,
-            }), 409
+        with background_query_job_lock:
+            running_job_id = latest_background_query_job_by_owner.get(owner)
+            running_job = background_query_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({
+                    'success': False,
+                    'error': '当前账号已有后台批量查询正在运行',
+                    'job_id': running_job_id,
+                }), 409
 
-    workers = []
-    for slot_id in slot_ids:
-        worker = crm_pool.get(slot_id, 'query')
-        try:
-            worker.clear_stop()
-        except Exception:
-            pass
-        workers.append((worker, slot_id, _query_slot_label(slot_id)))
+            job = _empty_background_query_job(
+                owner,
+                barcodes,
+                slot_ids,
+                batch_retry_limit(),
+            )
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            background_query_jobs[job['job_id']] = job
+            latest_background_query_job_by_owner[owner] = job['job_id']
 
-    job = _empty_background_query_job(
-        owner,
-        barcodes,
-        slot_ids,
-        batch_retry_limit(),
-    )
-    job.update({
-        'running': True,
-        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    })
-    with background_query_job_lock:
-        background_query_jobs[job['job_id']] = job
-        latest_background_query_job_by_owner[owner] = job['job_id']
+        workers = []
+        for slot_id in slot_ids:
+            worker = crm_pool.get(slot_id, 'query')
+            try:
+                worker.clear_stop()
+            except Exception:
+                pass
+            workers.append((worker, slot_id, _query_slot_label(slot_id)))
 
     threading.Thread(
         target=_run_background_query_job,
@@ -9291,7 +13432,6 @@ def api_crm_background_batch_stop():
 def api_crm_batch_start():
     data = request.get_json()
     slot_id = _request_slot_id("query")
-    worker = crm_pool.get(slot_id, "query")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
@@ -9299,18 +13439,24 @@ def api_crm_batch_start():
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需查询' if excluded else '条码不能为空', 'excluded': excluded})
 
-    with batch_job_lock:
-        running_job_id = latest_batch_job_by_slot.get(slot_id)
-        running_job = batch_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
-        job = _empty_batch_job(slot_id, barcodes, retry_limit)
-        job.update({
-            'running': True,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        })
-        batch_jobs[job['job_id']] = job
-        latest_batch_job_by_slot[slot_id] = job['job_id']
+    with query_slot_reservation_lock:
+        if _query_slot_has_running_inbound(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 正在被入库读取任务占用'})
+        if _query_slot_has_running_background_batch(slot_id):
+            return jsonify({'success': False, 'error': f'{slot_id} 已有后台批量查询正在运行'})
+        worker = crm_pool.get(slot_id, "query")
+        with batch_job_lock:
+            running_job_id = latest_batch_job_by_slot.get(slot_id)
+            running_job = batch_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({'success': False, 'error': f'{slot_id} 已有批量查询正在运行'})
+            job = _empty_batch_job(slot_id, barcodes, retry_limit)
+            job.update({
+                'running': True,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            })
+            batch_jobs[job['job_id']] = job
+            latest_batch_job_by_slot[slot_id] = job['job_id']
 
     t = threading.Thread(target=_run_batch_job, args=(job['job_id'], worker, barcodes, retry_limit, excluded), daemon=True)
     t.start()

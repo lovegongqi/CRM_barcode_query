@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>怡口 CRM 结单管理</title>
+    <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
+    <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+    <style>
+        .close-card { padding:20px; } .close-card + .close-card { margin-top:14px; }
+        .close-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:14px; }
+        .close-card h2 { margin:0; font-size:16px; } .close-card p { margin:5px 0 0; color:var(--aurora-muted); font-size:12px; }
+        .close-placeholder { min-height:90px; padding:18px; border:1px dashed var(--aurora-line-strong); border-radius:12px; color:var(--aurora-muted); font-size:13px; }
+        .close-history-actions button { min-height:32px; padding:6px 10px; border:1px solid rgba(255,124,148,.3); border-radius:9px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
+        .service-close-record { padding:14px; border:1px solid #1e3a52; border-radius:10px; background:rgba(7,20,38,.72); }
+        .service-close-record + .service-close-record { margin-top:10px; }
+        .service-close-record.is-current { border-color:rgba(56,189,248,.5); }
+        .service-close-record-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#cbd5e1; font-size:12px; }
+        .service-close-record-head strong { color:#e2e8f0; }
+        .service-close-record-head button { min-height:30px; padding:5px 9px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
+        .service-close-status-list { display:grid; gap:6px; margin-top:10px; }
+        .service-close-status-row { display:grid; grid-template-columns:minmax(260px,2fr) 88px minmax(180px,1.2fr) 70px auto; gap:10px; align-items:center; padding:10px; border:1px solid #1e3a52; border-radius:9px; background:rgba(15,23,42,.72); color:#cbd5e1; }
+        .service-close-order-link { padding:0; border:0; background:transparent; color:#7dd3fc; cursor:pointer; font:inherit; font-weight:800; text-align:left; text-decoration:underline; text-underline-offset:3px; }
+        .service-close-order small { display:block; margin-top:3px; color:#94a3b8; line-height:1.45; overflow-wrap:anywhere; }
+        .service-close-barcodes { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
+        .service-close-barcode { display:inline-flex; gap:4px; padding:2px 6px; border:1px solid #334155; border-radius:999px; font:10px 'Courier New',monospace; color:#cbd5e1; }
+        .service-close-barcode em { color:#94a3b8; font:9px inherit; font-style:normal; }
+        .service-close-barcode.is-selected { border-color:rgba(56,189,248,.5); background:rgba(56,189,248,.12); color:#7dd3fc; }
+        .service-close-barcode.is-related { border-color:rgba(167,139,250,.42); background:rgba(167,139,250,.1); color:#c4b5fd; }
+        .service-close-channel,.service-close-elapsed { color:#94a3b8; font-size:11px; text-align:center; }
+        .service-close-row-actions button { min-height:28px; padding:4px 8px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; font-size:11px; }
+        .service-close-progress { min-width:0; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
+        .service-close-state,.service-detail-relation,.service-detail-comparison { display:inline-flex; width:fit-content; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:800; }
+        .is-running { border-color:rgba(56,189,248,.42); } .is-running .service-close-state { background:rgba(56,189,248,.16); color:#7dd3fc; }
+        .is-closed { border-color:rgba(34,197,94,.38); } .is-closed .service-close-state { background:rgba(34,197,94,.15); color:#86efac; }
+        .is-already-closed .service-close-state { background:rgba(148,163,184,.16); color:#cbd5e1; }
+        .is-failed { border-color:rgba(248,113,113,.42); } .is-failed .service-close-state { background:rgba(248,113,113,.15); color:#fca5a5; }
+        .modal-overlay { position:fixed; inset:0; display:none; justify-content:center; align-items:flex-start; z-index:1000; padding:20px 0; background:rgba(2,8,23,.72); }
+        .modal-overlay.overlay-show { display:flex; } .modal-content { width:95%; max-width:1200px; max-height:90vh; overflow-y:auto; border:1px solid #1e3a52; border-radius:12px; background:#071426; box-shadow:0 10px 40px rgba(0,0,0,.5); }
+        .modal-header { position:sticky; top:0; z-index:1; display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid #1e3a52; background:#0c1b2e; }
+        .modal-title-text { color:#e2e8f0; font-weight:800; } .modal-close { border:0; background:transparent; color:#cbd5e1; font-size:22px; cursor:pointer; }
+        .service-detail-content { min-height:240px; padding:18px; background:#071426; color:#e2e8f0; }
+        .service-detail-section { margin-top:14px; overflow:hidden; border:1px solid #1e3a52; border-radius:10px; background:#0c1b2e; } .service-detail-section:first-child { margin-top:0; }
+        .service-detail-section h3 { margin:0; padding:10px 14px; border-bottom:1px solid #1e3a52; background:#12243a; color:#dbeafe; font-size:14px; }
+        .service-detail-section-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-bottom:1px solid #1e3a52; background:#12243a; }
+        .service-detail-section-head h3 { padding:0; border:0; background:transparent; }
+        .service-detail-fields { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); } .service-detail-field { min-width:0; padding:10px 14px; border-right:1px solid #18324a; border-bottom:1px solid #18324a; }
+        .service-detail-field label { display:block; margin-bottom:4px; color:#7dd3fc; font-size:11px; } .service-detail-field div { color:#e2e8f0; font-size:13px; line-height:1.45; overflow-wrap:anywhere; }
+        .service-detail-table-wrap { overflow-x:auto; } .service-detail-table { width:100%; border-collapse:collapse; font-size:12px; }
+        .service-detail-table th,.service-detail-table td { padding:9px 11px; border-bottom:1px solid #18324a; text-align:left; white-space:nowrap; } .service-detail-table th { color:#93c5fd; background:#12243a; font-weight:800; } .service-detail-table td { color:#e2e8f0; background:#0c1b2e; }
+        .service-detail-relation.is-selected { color:#7dd3fc; background:rgba(14,165,233,.16); border:1px solid rgba(56,189,248,.35); } .service-detail-relation.is-related { color:#c4b5fd; background:rgba(139,92,246,.16); border:1px solid rgba(167,139,250,.35); }
+        .service-detail-comparison.is-matched { color:#86efac; background:rgba(34,197,94,.15); } .service-detail-comparison.is-mismatch { color:#fde68a; background:rgba(245,158,11,.15); } .service-detail-comparison.is-order-missing { color:#fca5a5; background:rgba(239,68,68,.15); }
+        .service-detail-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; } .service-detail-refresh { border:1px solid rgba(0,200,220,.4); border-radius:999px; background:rgba(0,200,220,.12); color:#67e8f9; padding:4px 12px; font-size:12px; cursor:pointer; } .service-detail-refresh:disabled { opacity:.6; cursor:wait; }
+        .service-detail-order-attempt { margin-top:5px; color:#fca5a5; font-size:11px; line-height:1.5; white-space:pre-line; } .service-detail-order-attempt.is-live { color:#7dd3fc; } .service-detail-empty { padding:28px; color:#94a3b8; text-align:center; }
+        @media (max-width:760px) { .service-close-status-row { grid-template-columns:1fr auto; } .service-close-progress { grid-column:1 / -1; } .service-close-channel { text-align:right; } .service-close-elapsed { display:none; } .service-detail-fields { grid-template-columns:1fr; } }
+    </style>
+</head>
+<body data-aurora-page="service-close">
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+    <div class="container">
+        <div class="app-header"><div class="app-title"><h1>怡口 CRM 结单管理</h1><div class="app-subtitle">批量结单进度与历史记录</div></div><div class="page-nav">{% for link in nav_links %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</div></div>
+        {% if not is_desktop_app %}<div class="status-bar aurora-account-status"><div class="aurora-workspace-links"><a href="/">条码列表</a><a class="active" href="/service-close">结单管理</a></div><div class="aurora-account-session"><span class="aurora-account-name" id="appAccountStatus">检测中</span><a class="aurora-account-logout" href="/logout">退出工具账号</a></div></div>{% endif %}
+        <section class="card close-card"><div class="close-card-head"><div><h2>结单记录</h2><p>批量结单请在条码列表页发起；最新任务与历史记录均直接显示在这里。</p></div>{% if can_manage_history %}<div class="close-history-actions"><button id="clearServiceCloseHistory" type="button">清空记录</button></div>{% endif %}</div><div class="close-placeholder" id="serviceCloseRecords">正在加载结单记录…</div></section>
+    </div>
+    <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><span class="modal-title-text" id="modalTitle">服务单详情</span><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
+    <script>
+        const canManageHistory = {{ 'true' if can_manage_history else 'false' }};
+        let closeLogSequence = 0, closeTimer = null, detailRequestId = 0, currentDetailServiceNo = '', historyRecords = [], currentCloseRecord = null;
+        const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+        const closeState = state => ({waiting:['等待','is-waiting'],running:['处理中','is-running'],closed:['新结单','is-closed'],already_closed:['原已结单','is-already-closed'],failed:['失败','is-failed']}[state] || [state || '等待','is-waiting']);
+        const duration = value => { const seconds = Math.max(0, Number(value || 0)); return seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`; };
+
+        function renderRows(rows, canDelete = false) {
+            return `<div class="service-close-status-list">${(rows || []).map(row => {
+                const [label, stateClass] = closeState(row.state); const serviceNo = String(row.service_no || '');
+                const detailUrl = String(row.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                const selected = new Set((row.selected_barcodes || row.barcodes || []).map(String));
+                const barcodes = Array.from(new Set((row.barcodes || []).map(String).filter(Boolean))).map(barcode => `<span class="service-close-barcode ${selected.has(barcode) ? 'is-selected' : 'is-related'}"><span>${escapeHtml(barcode)}</span><em>${selected.has(barcode) ? '已选' : '关联'}</em></span>`).join('') || '<span class="service-close-barcode">无关联条码</span>';
+                const customers = Array.isArray(row.customer_names) && row.customer_names.length ? `<small>客户 ${escapeHtml(row.customer_names.join('、'))}</small>` : '';
+                const deleteButton = canDelete && serviceNo ? `<div class="service-close-row-actions"><button type="button" data-history-service-no="${escapeHtml(serviceNo)}">删除记录</button></div>` : '';
+                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
+            }).join('')}</div>`;
+        }
+
+        function fieldValue(fields, labels) { for (const label of labels) { const found = fields.find(row => String(row.label || '') === label); if (found) return String(found.value || ''); } return '—'; }
+        function detailField(label, value) { return `<div class="service-detail-field"><label>${label}</label><div>${escapeHtml(value)}</div></div>`; }
+        function renderServiceOrderDetail(detail) {
+            const fields = (detail.fields || []).filter(row => row && row.label), selected = new Set((detail.selected_barcodes || []).map(String)), related = new Set((detail.related_barcodes || []).map(String));
+            const comparisons = new Map((detail.order_lookup?.comparison || []).map(row => [String(row.product_code || '').trim().toUpperCase(), row]));
+            const customer = `<section class="service-detail-section"><h3>客户信息</h3><div class="service-detail-fields">${detailField('客户姓名', fieldValue(fields,['客户名称','客户姓名','反馈人','联系人']))}${detailField('联系电话', fieldValue(fields,['联系电话','客户电话','反馈电话','联系人电话','手机号码']))}${detailField('联系地址',[fieldValue(fields,['所属省份','省份']),fieldValue(fields,['所属城市','城市']),fieldValue(fields,['所属县区','县区']),fieldValue(fields,['联系地址','客户地址','地址'])].filter(value => value !== '—').join(' ') || '—')}</div></section>`;
+            const service = `<section class="service-detail-section"><h3>服务信息</h3><div class="service-detail-fields">${detailField('受理时间',fieldValue(fields,['受理时间','受理日期']))}${detailField('客户预约时间',fieldValue(fields,['客户预约时间','预约时间']))}${detailField('服务人员',fieldValue(fields,['服务人员','安装人员','服务工程师']))}</div></section>`;
+            const productRows = (detail.products || []).map(product => { const barcode = String(product.barcode || ''), compare = comparisons.get(String(product.product_code || '').trim().toUpperCase()); const comparisonClass = {matched:'is-matched',quantity_mismatch:'is-mismatch',order_missing:'is-order-missing'}[compare?.status] || ''; return `<tr><td>${escapeHtml(product.product_name || '—')}</td><td>${escapeHtml(product.product_code || '—')}</td><td>${escapeHtml(barcode || '—')}</td><td><span class="service-detail-relation ${selected.has(barcode) ? 'is-selected' : 'is-related'}">${selected.has(barcode) ? '已选' : (related.has(barcode) ? '关联' : '服务单')}</span></td><td>${escapeHtml(compare?.order_quantity ?? '—')}</td><td>${escapeHtml(compare?.service_quantity ?? '—')}</td><td><span class="service-detail-comparison ${comparisonClass}">${escapeHtml(compare?.status_label || '—')}</span></td></tr>`; }).join('') || '<tr><td colspan="7">未读取到产品明细</td></tr>';
+            const directOrderNo = fieldValue(fields,['关联订单','关联订单号','订单号','销售订单号']); const orderNo = detail.order_lookup?.order_no || directOrderNo; const orderNote = orderNo && orderNo !== '—' ? `关联订单：${escapeHtml(orderNo)}` : ''; const error = detail.order_lookup?.error ? `<div class="service-detail-order-attempt">查询失败：${escapeHtml(detail.order_lookup.error)}</div>` : '';
+            const products = `<section class="service-detail-section"><div class="service-detail-section-head"><div><h3>产品明细</h3>${orderNote}${error}<div id="serviceOrderQueryStatus" class="service-detail-order-attempt" hidden></div></div><div class="service-detail-actions"><button type="button" class="service-detail-refresh" onclick="refreshServiceOrderProducts('${escapeHtml(detail.service_no || '')}')">↻ 重查产品明细</button><button type="button" class="service-detail-refresh service-detail-order-query" data-service-no="${escapeHtml(detail.service_no || '')}" onclick="startOrderProductQuery(this.dataset.serviceNo)">查询订单产品明细</button></div></div><div class="service-detail-table-wrap"><table class="service-detail-table"><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th><th>关系</th><th>订单数量</th><th>服务单数量</th><th>对比结果</th></tr></thead><tbody>${productRows}</tbody></table></div></section>`;
+            document.getElementById('serviceDetailContent').innerHTML = customer + service + products;
+        }
+
+        async function showServiceOrderDetail(serviceNo, detailUrl) {
+            if (!serviceNo || !detailUrl) return; const requestId = ++detailRequestId; currentDetailServiceNo = serviceNo;
+            document.getElementById('modalTitle').textContent = `服务单详情 - ${serviceNo}`; document.getElementById('serviceDetailContent').innerHTML = '<div class="service-detail-empty">正在读取服务单详情…</div>'; document.getElementById('detailModal').classList.add('overlay-show');
+            try { const response = await fetch(detailUrl), detail = await response.json(); if (requestId !== detailRequestId) return; if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在'); renderServiceOrderDetail(detail); await resumeOrderProductQuery(serviceNo); }
+            catch (error) { if (requestId === detailRequestId) document.getElementById('serviceDetailContent').innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`; }
+        }
+        async function refreshServiceOrderProducts(serviceNo) { const button = document.querySelector('.service-detail-refresh:not(.service-detail-order-query)'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '重查中…'; } try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`,{method:'POST'}), data = await response.json(); if (!response.ok || data.success === false) throw new Error(data.error || '重查失败'); await showServiceOrderDetail(serviceNo,data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`); } catch (error) { if (button) { button.disabled = false; button.textContent = '↻ 重查产品明细'; } alert(error.message || '重查失败'); } }
+        function setOrderProductQueryStatus(data) { const element = document.getElementById('serviceOrderQueryStatus'); if (!element) return; if (!data) { element.hidden = true; element.textContent = ''; element.className = 'service-detail-order-attempt'; return; } const elapsed = duration(data.elapsed); const channel = data.slot_label ? ` · ${data.slot_label}` : ''; const message = data.message || (data.stage === 'waiting' ? '正在等待可用查询通道' : '正在查询订单产品明细'); element.hidden = false; element.className = data.running ? 'service-detail-order-attempt is-live' : 'service-detail-order-attempt'; element.textContent = `本次查询：${data.started_at || '—'}\n状态：${message}${channel}\n已等待：${elapsed}`; }
+        function resetOrderProductQueryButton() { const button = document.querySelector('.service-detail-order-query'); if (button) { button.disabled = false; button.textContent = '查询订单产品明细'; } }
+        async function resumeOrderProductQuery(serviceNo) { if (!serviceNo || serviceNo !== currentDetailServiceNo) return; try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status`), data = await response.json(); if (!response.ok || !data.job_id || serviceNo !== currentDetailServiceNo) return; if (data.running) { const button = document.querySelector('.service-detail-order-query'); if (button) { button.disabled = true; button.textContent = data.stage === 'waiting' ? '等待通道…' : '查询中…'; } setOrderProductQueryStatus(data); await pollOrderProductQuery(serviceNo, data.job_id); } else if (!data.success && data.done) { resetOrderProductQueryButton(); setOrderProductQueryStatus(data); } } catch (_) {} }
+        async function startOrderProductQuery(serviceNo) { const button = document.querySelector('.service-detail-order-query'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '查询中…'; } setOrderProductQueryStatus({running:true, stage:'waiting', message:'正在提交查询任务', elapsed:0}); try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`,{method:'POST'}), data = await response.json(); if (response.status !== 409 && (!response.ok || !data.success)) throw new Error(data.error || '订单产品明细查询失败'); await pollOrderProductQuery(serviceNo,data.job_id); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询失败', elapsed:0}); } }
+        async function pollOrderProductQuery(serviceNo,jobId) { if (!serviceNo || serviceNo !== currentDetailServiceNo || !jobId) return; try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`), data = await response.json(); if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败'); if (data.running) { const button = document.querySelector('.service-detail-order-query'); if (button) button.textContent = data.stage === 'waiting' ? '等待通道…' : '查询中…'; setOrderProductQueryStatus(data); setTimeout(() => pollOrderProductQuery(serviceNo,jobId),1000); return; } if (!data.success) { resetOrderProductQueryButton(); setOrderProductQueryStatus(data); return; } setOrderProductQueryStatus(null); await showServiceOrderDetail(serviceNo,`/api/service-orders/${encodeURIComponent(serviceNo)}`); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询状态读取失败', elapsed:0}); } }
+        function closeDetailModal() { detailRequestId += 1; currentDetailServiceNo = ''; document.getElementById('detailModal').classList.remove('overlay-show'); document.getElementById('serviceDetailContent').innerHTML = ''; }
+        function renderRecord(record, isCurrent = false) {
+            const time = record.finished_at || record.started_at || '—';
+            const title = isCurrent ? `本次结单 · ${record.current || 0}/${record.total || 0}` : `${time} · ${record.actor || '—'} · 新结单 ${record.closed_count || 0} / 失败 ${record.failed_count || 0}`;
+            return `<article class="service-close-record ${isCurrent ? 'is-current' : ''}"><div class="service-close-record-head"><strong>${escapeHtml(title)}</strong></div>${renderRows(record.service_rows, canManageHistory && !isCurrent)}</article>`;
+        }
+        function renderRecords() {
+            const root = document.getElementById('serviceCloseRecords');
+            const records = historyRecords.slice();
+            if (currentCloseRecord) { const currentRecord = currentCloseRecord; records.unshift(currentRecord); }
+            root.innerHTML = records.length ? records.map(record => renderRecord(record, record === currentCloseRecord)).join('') : '暂无结单记录。';
+            root.querySelectorAll('[data-history-service-no]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条服务单记录？')) return; await fetch(`/api/service-close/history/service/${encodeURIComponent(button.dataset.historyServiceNo)}`, {method:'DELETE'}); loadHistory(); }));
+        }
+        async function loadHistory() {
+            const data = await fetch('/api/service-close/history').then(response => response.json());
+            historyRecords = (data.records || []).slice().sort((a, b) => String(b.finished_at || b.started_at || '').localeCompare(String(a.finished_at || a.started_at || '')));
+            renderRecords();
+        }
+        async function pollCurrentJob() {
+            const data = await fetch(`/api/service-close/status?latest=1&since=${closeLogSequence}`).then(response => response.json());
+            closeLogSequence = Math.max(closeLogSequence, Number(data.log_seq || 0));
+            currentCloseRecord = data.job_id && data.running ? data : null;
+            renderRecords();
+            if (data.running) {
+                if (!closeTimer) closeTimer = setInterval(() => pollCurrentJob().catch(() => {}), 1200);
+            } else {
+                if (closeTimer) clearInterval(closeTimer);
+                closeTimer = null;
+                loadHistory();
+            }
+        }
+        const clearButton = document.getElementById('clearServiceCloseHistory'); if (clearButton) clearButton.addEventListener('click',async () => { if (!confirm('确定清空全部结单记录？')) return; await fetch('/api/service-close/history',{method:'DELETE'}); loadHistory(); });
+        fetch('/api/app-auth/status').then(response => response.json()).then(data => { document.getElementById('appAccountStatus').textContent = data.account ? data.account.username : '未登录'; }); loadHistory(); pollCurrentJob();
+    </script>
+</body>
+</html>

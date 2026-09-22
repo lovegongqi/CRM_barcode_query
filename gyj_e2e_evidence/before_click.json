@@ -1,0 +1,293 @@
+{
+  "url": "https://cloud.gyjerp.com/bill/purchase_in",
+  "allButtons": [
+    {
+      "text": "",
+      "title": "",
+      "className": "close-all-btn ant-btn ant-btn-sm ant-dropdown-trigger"
+    },
+    {
+      "text": "查 询",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "重 置",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "新增",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "删除",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "审核",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "反审核",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "转采购退货",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "修正欠款",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "导出",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "列设置",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "插入行",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "扫码录入",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "历史单据",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "导入明细",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-btn ant-btn-icon-only"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-btn ant-btn-icon-only"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-btn ant-btn-icon-only"
+    },
+    {
+      "text": "点击上传",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "取 消",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "三联打印-新版",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "三联打印",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "保存并审核",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "保存（Ctrl+S）",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-switch ant-switch-checked ant-switch-small"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-switch ant-switch-small"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-switch ant-switch-checked ant-switch-small"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-switch ant-switch-small"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close"
+    },
+    {
+      "text": "查 询",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "重 置",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "新 增",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "",
+      "title": "",
+      "className": "ant-modal-close ant-modal-close-x ant-btn ant-btn-link ant-b"
+    },
+    {
+      "text": "插入行",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "采购价-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "零售价-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "销售价-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "最低售价-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "期初库存-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "最低安全库存-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "最高安全库存-批量",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "取 消",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "保存（Ctrl+S）",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    },
+    {
+      "text": "关闭(ESC)",
+      "title": "",
+      "className": "ant-btn"
+    },
+    {
+      "text": "确 定",
+      "title": "",
+      "className": "ant-btn ant-btn-primary"
+    }
+  ],
+  "modals": [
+    {
+      "visible": true,
+      "buttonCount": 16,
+      "header": "新增"
+    },
+    {
+      "visible": false,
+      "buttonCount": 0,
+      "header": "选择商品【再次回车可以直接选中】"
+    },
+    {
+      "visible": false,
+      "buttonCount": 0,
+      "header": "录入序列号"
+    },
+    {
+      "visible": false,
+      "buttonCount": 0,
+      "header": "选择商品【再次回车可以直接选中】"
+    },
+    {
+      "visible": false,
+      "buttonCount": 0,
+      "header": "录入序列号"
+    },
+    {
+      "visible": true,
+      "buttonCount": 19,
+      "header": "选择商品"
+    },
+    {
+      "visible": true,
+      "buttonCount": 13,
+      "header": "新增商品"
+    }
+  ],
+  "remark": "装箱单号：SH202607230016"
+}

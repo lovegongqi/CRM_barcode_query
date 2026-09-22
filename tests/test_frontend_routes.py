@@ -30,7 +30,7 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
     def test_startup_requires_tool_account_login(self):
         client = app_module.app.test_client()
-        for route in ("/", "/crm", "/transfer", "/accounts"):
+        for route in ("/", "/crm", "/transfer", "/inbound", "/inventory", "/service-close", "/accounts"):
             with self.subTest(route=route):
                 response = client.get(route, follow_redirects=False)
                 self.assertEqual(response.status_code, 302)
@@ -108,17 +108,58 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertNotIn('os.environ.setdefault("CRM_DESKTOP_APP", "1")', source)
 
     def test_every_work_page_shows_tool_account_logout(self):
-        for route in ("/", "/crm", "/transfer", "/product-library", "/accounts"):
+        # /inbound is intentionally excluded: the inbound workspace keeps the
+        # user on the page through long GYJ login flows, so a logout link
+        # competing for the same screen real estate is hidden there. Every
+        # other work page still surfaces the logout button.
+        for route in ("/", "/crm", "/transfer", "/inventory", "/service-close", "/product-library", "/accounts"):
             with self.subTest(route=route):
                 response = self.client.get(route)
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(b'href="/logout"', response.data)
+
+    def test_service_close_page_requires_results_permission(self):
+        accounts = app_module.load_accounts()
+        accounts.append({
+            "id": "service-close-viewer",
+            "username": "service-close-viewer",
+            "display_name": "结单查看者",
+            "password": "viewer-pass",
+            "permissions": ["results"],
+            "updated_at": "",
+        })
+        accounts.append({
+            "id": "service-close-denied",
+            "username": "service-close-denied",
+            "display_name": "无结果权限",
+            "password": "denied-pass",
+            "permissions": ["crm"],
+            "updated_at": "",
+        })
+        app_module.save_accounts(accounts)
+
+        viewer = app_module.app.test_client()
+        viewer.post("/api/app-auth/login", json={"username": "service-close-viewer", "password": "viewer-pass"})
+        viewer_page = viewer.get("/service-close")
+        self.assertEqual(viewer_page.status_code, 200)
+        self.assertIn(b'id="clearServiceCloseHistory"', viewer_page.data)
+
+        denied = app_module.app.test_client()
+        denied.post("/api/app-auth/login", json={"username": "service-close-denied", "password": "denied-pass"})
+        self.assertEqual(denied.get("/service-close").status_code, 403)
+
+    def test_inbound_does_not_render_the_tool_account_logout_link(self):
+        response = self.client.get("/inbound")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b'href="/logout"', response.data)
 
     def test_primary_pages_render_with_aurora_shell(self):
         expected_pages = {
             "/": "results",
             "/crm": "query",
             "/transfer": "transfer",
+            "/inbound": "inbound",
+            "/inventory": "inventory",
             "/product-library": "product-library",
             "/accounts": "settings",
         }
@@ -128,6 +169,11 @@ class FrontendRouteSmokeTest(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertIn(f'data-aurora-page="{page}"'.encode(), response.data)
                 self.assertIn(b'/static/aurora.css', response.data)
+
+    def test_admin_can_open_inbound_extraction_page(self):
+        response = self.client.get("/inbound")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'id="packingSlipInput"', response.data)
 
     def test_shared_assets_are_served(self):
         for path, mimetypes in (

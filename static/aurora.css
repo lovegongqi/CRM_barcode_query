@@ -80,9 +80,13 @@ body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no
     position: static !important;
     z-index: auto;
     width: 100% !important;
-    height: var(--aurora-nav-height);
+    height: auto;
+    min-height: var(--aurora-nav-height);
     display: grid !important;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    /* auto-fit so accounts with limited permissions (fewer than 6 visible tabs)
+       get a row that hugs the visible count instead of leaving empty cells. */
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    justify-content: stretch;
     gap: 6px !important;
     padding: 5px !important;
     border-radius: 16px;
@@ -141,7 +145,7 @@ body[data-aurora-page] .page-nav a.active::before {
     box-shadow: 0 0 12px rgba(87, 227, 255, .65);
 }
 
-.aurora-nav-glyph { font-size: 17px; font-weight: 750; line-height: 1; transform: translateY(-1px); }
+.aurora-nav-glyph { display:inline-block; width:1em; font-size: 17px; font-weight: 750; line-height: 1; text-align:center; transform: translateY(-1px); }
 .aurora-nav-label { display: block; overflow: hidden; font-size: 11px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
 
 body[data-aurora-page] .header,
@@ -157,7 +161,8 @@ body[data-aurora-page] .app-header {
 }
 
 body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child,
-body[data-aurora-page="results"] .app-header > .app-title {
+body[data-aurora-page="results"] .app-header > .app-title,
+body[data-aurora-page="service-close"] .app-header > .app-title {
     min-height: 58px;
     padding-left: 76px;
 }
@@ -216,11 +221,15 @@ body[data-aurora-page] .aurora-account-logout:focus-visible {
 }
 
 body[data-aurora-page] .aurora-account-status {
+    height: 50px;
     min-height: 50px;
+    max-height: 50px;
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: flex-start;
     gap: 12px;
+    flex: 0 0 auto;
 }
 
 body[data-aurora-page] .aurora-account-session {
@@ -230,6 +239,34 @@ body[data-aurora-page] .aurora-account-session {
     align-items: center;
     justify-content: flex-end;
     gap: 8px;
+}
+
+body[data-aurora-page] .aurora-workspace-links {
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+body[data-aurora-page] .aurora-workspace-links a {
+    min-height: 28px;
+    padding: 5px 10px;
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid rgba(139, 190, 220, .18);
+    border-radius: 9px;
+    color: #9fb4c4;
+    background: rgba(7, 19, 34, .42);
+    font-size: 11px;
+    font-weight: 700;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+body[data-aurora-page] .aurora-workspace-links a.active {
+    color: #e9fcff;
+    border-color: rgba(87, 227, 255, .32);
+    background: rgba(72, 212, 246, .16);
 }
 
 body[data-aurora-page] .aurora-account-name {
@@ -637,6 +674,28 @@ body[data-aurora-page] #detailFrame {
 .aurora-live-dot { display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--aurora-cyan); box-shadow: 0 0 9px rgba(95, 229, 255, .7); animation: aurora-pulse 1.5s ease-in-out infinite; }
 @keyframes aurora-pulse { 50% { opacity: .35; transform: scale(.78); } }
 .aurora-raw-log { display: none !important; }
+
+/* Live log embedded in the transfer-summary card. Mirrors the styling of
+   .aurora-raw-log but with explicit display (NOT .aurora-raw-log which is
+   always hidden via !important). */
+.summary-log {
+    margin-top: 8px;
+    padding: 10px 14px;
+    max-height: 180px;
+    overflow-y: auto;
+    border: 1px solid rgba(139, 190, 220, .16);
+    border-radius: 10px;
+    background: rgba(8, 18, 32, .55);
+    color: #b8c9d4;
+    font: 12px/1.45 "SFMono-Regular", Consolas, monospace;
+}
+.summary-log > div { margin-bottom: 2px; }
+.summary-log > div:last-child { margin-bottom: 0; }
+.summary-log > div.info { color: #b9ceda; }
+.summary-log > div.warn { color: #ffd58a; }
+.summary-log > div.error { color: #ff9aa8; }
+.summary-log > div.success { color: #8eefff; }
+.summary-log > div.dim { color: #7890a3; }
 .aurora-query-table-wrap { flex: 1; min-height: 0; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .aurora-query-table { width: 100%; min-width: 1000px; table-layout: fixed; }
 .aurora-query-table thead th { position: sticky; top: 0; z-index: 2; background: #091829; box-shadow: 0 1px 0 rgba(139, 190, 220, .14); }
@@ -769,6 +828,7 @@ body[data-aurora-page="settings"] .settings-primary-grid {
 }
 body[data-aurora-page="settings"] #runtimeConfigCard,
 body[data-aurora-page="settings"] #bulkCrmLoginCard { width: 100%; min-height: 330px; margin: 0 !important; }
+body[data-aurora-page="settings"] #gyjChannelCard { grid-column: 1 / -1; width: 100%; min-width: 0; margin: 0 !important; }
 body[data-aurora-page="settings"] .slot-status-list { display: grid !important; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px !important; }
 body[data-aurora-page="settings"] .slot-pill { min-width: 0; min-height: 44px; justify-content: flex-start; padding: 6px 7px !important; border-radius: 8px !important; font-size: 10px !important; }
 body[data-aurora-page="settings"] .slot-pill-copy { width: calc(100% - 16px); text-align: left; }
@@ -911,7 +971,7 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     html,
     body[data-aurora-page] { max-width: 100%; overflow-x: hidden; }
     body[data-aurora-page] { background-attachment: fixed; }
-    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(92px + env(safe-area-inset-bottom)); }
+    body[data-aurora-page] .container { width: 100%; max-width: 100%; padding: 18px 12px calc(84px + env(safe-area-inset-bottom)); }
     .aurora-logo {
         position: absolute;
         top: 18px;
@@ -928,16 +988,28 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
         position: fixed !important;
         z-index: 850;
         top: auto;
-        right: 12px;
-        left: 12px;
+        right: 8px;
+        left: 8px;
         bottom: max(10px, env(safe-area-inset-bottom));
         width: auto !important;
-        height: 62px;
-        display: grid !important;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
-        gap: 3px !important;
-        padding: 6px 7px !important;
-        border-radius: 18px;
+        height: auto;
+        min-height: 56px;
+        padding: 6px 8px !important;
+        display: flex !important;
+        /* Flex (not grid) so 6 admin tabs always fit on a 430px phone —
+           grid auto-fit minmax at 64px was wider than the available
+           width and clipped the last tab off-screen. Flex distributes
+           the surplus to every visible tab. */
+        justify-content: space-between;
+        align-items: stretch;
+        flex-wrap: nowrap;
+        gap: 4px !important;
+        border-radius: 14px;
+    }
+    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .page-nav > a {
+        min-width: 0 !important;
+        flex: 1 1 0 !important;
+        width: auto !important;
     }
 
     body[data-aurora-page] .page-nav a {
@@ -957,9 +1029,10 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     .aurora-nav-label { display: block; max-width: 100%; overflow: hidden; color: inherit; font-size: 8px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
 
     body[data-aurora-page] .header,
-    body[data-aurora-page] .app-header { min-height: auto; margin-bottom: 12px !important; align-items: flex-start !important; }
+    body[data-aurora-page] .app-header { min-height: auto; margin-bottom: 14px !important; align-items: flex-start !important; }
     body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child,
-    body[data-aurora-page="results"] .app-header > .app-title {
+    body[data-aurora-page="results"] .app-header > .app-title,
+    body[data-aurora-page="service-close"] .app-header > .app-title {
         min-height: 50px;
         padding-left: 50px;
         padding-right: 82px;
@@ -1121,17 +1194,22 @@ body[data-aurora-page="results"] .stats-grid {
 body[data-aurora-page="results"] .action-groups {
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 5px;
 }
 body[data-aurora-page="results"] .action-groups .btn {
     width: 100%;
     min-width: 0;
-    min-height: 38px;
-    padding: 6px 3px;
-    font-size: 11px !important;
-    line-height: 1;
-    white-space: nowrap;
+    min-height: 42px;
+    padding: 5px 2px;
+    font-size: 9px !important;
+    line-height: 1.15;
+    white-space: normal;
+    word-break: keep-all;
+}
+body[data-aurora-page="results"] .filter-area {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
 }
 body[data-aurora-page="results"] .date-filter-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1149,4 +1227,96 @@ body[data-aurora-page="results"] .date-clear-btn {
     width: 100%;
     grid-column: 1 / -1;
 }
+}
+
+/* ============================================================================
+ * Mobile (<= 720px): 修复标题竖排、form/工作区按钮栈式、logo 缩放
+ * ========================================================================== */
+@media (max-width: 720px) {
+    .aurora-logo {
+        width: 36px;
+        top: 12px;
+        left: 12px;
+    }
+
+    body[data-aurora-page="inbound"] .container,
+    body[data-aurora-page="crm"] .container,
+    body[data-aurora-page="index"] .container {
+        /* 84px bottom padding: 62px nav + 12px bottom offset + 10px breathing
+           room. The previous 116px was too generous and left an awkward gap
+           above the floating tab bar. */
+        padding: 12px 12px calc(84px + env(safe-area-inset-bottom));
+    }
+
+    /* Title strip: stack, drop the 76px logo reservation */
+    body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .header > div:first-child {
+        /* Sit the title NEXT TO the 36px logo on phones, the same way
+           /crm does on desktop. 48px = 36px logo + 12px gap. */
+        padding-left: 48px;
+        margin-top: 0;
+        min-height: 0;
+    }
+
+    /* The "BARCODE OPERATIONS CENTER" eyebrow is unreadable at 10px on phones — hide it */
+    body[data-aurora-page] .header > div:first-child::before,
+    body[data-aurora-page="results"] .app-header > .app-title::before {
+        display: none;
+    }
+
+    /* Let h1 wrap onto one or two normal lines instead of stacking char-by-char */
+    body[data-aurora-page] h1 {
+        font-size: 22px !important;
+        line-height: 1.25;
+        word-break: keep-all;
+        overflow-wrap: normal;
+        hyphens: none;
+        white-space: normal;
+    }
+
+    /* Single-column for every grid the inbound page uses */
+    body[data-aurora-page="inbound"] .inbound-form,
+    body[data-aurora-page="inbound"] .inbound-progress,
+    body[data-aurora-page="inbound"] .inbound-history {
+        grid-template-columns: minmax(0, 1fr) !important;
+    }
+
+    /* Tab strip with the workspace tabs + account name all on one row, wrap if needed */
+    body[data-aurora-page="inbound"] .status-bar {
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tabs {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tab {
+        flex: 1 1 auto;
+        min-width: 0;
+        font-size: 13px;
+        padding: 8px 10px;
+    }
+
+    /* "补建缺失物料" log row is wordy — keep the log box readable */
+    body[data-aurora-page="inbound"] .inbound-box {
+        padding: 12px;
+        font-size: 12px;
+        line-height: 1.45;
+    }
+
+    /* p .muted subtitle: shrink so it doesn't shove h1 off-screen */
+    body[data-aurora-page="inbound"] .header p.muted {
+        font-size: 12px;
+        line-height: 1.4;
+    }
+}
+
+@media (max-width: 420px) {
+    body[data-aurora-page="inbound"] .status-bar {
+        padding: 10px;
+    }
+    body[data-aurora-page="inbound"] .inbound-workspace-tab {
+        font-size: 12px;
+        padding: 7px 8px;
+    }
+
 }
