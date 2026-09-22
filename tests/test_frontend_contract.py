@@ -430,7 +430,6 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             'body[data-aurora-page="results"] .date-filter-row {',
             'body[data-aurora-page="results"] .date-filter-row label,\nbody[data-aurora-page="results"] .date-filter-row > span {',
             'body[data-aurora-page="results"] .date-filter-row input {',
-            'body[data-aurora-page="results"] .date-clear-btn {',
         ):
             self.assertNotIn(selector, before_mobile)
             self.assertNotIn(selector, after_mobile)

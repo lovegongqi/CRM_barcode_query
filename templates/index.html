@@ -1135,9 +1135,21 @@
             justify-content: flex-end;
         }
         .filter-shell {
-            padding: 18px 20px 20px;
+            padding: 14px 20px 18px;
             background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
         }
+        .filter-collapse { margin: 0; }
+        .filter-collapse-summary {
+            list-style: none;
+            cursor: default;
+        }
+        .filter-collapse-summary::-webkit-details-marker { display: none; }
+        .filter-collapse-meta {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .filter-collapse-arrow { display: none; }
         .section-label {
             display: flex;
             align-items: center;
@@ -1149,10 +1161,17 @@
             font-weight: 800;
             letter-spacing: .02em;
         }
+        .filter-controls-row {
+            display: grid;
+            grid-template-columns: minmax(600px, 760px) auto;
+            align-items: end;
+            justify-content: space-between;
+            gap: 16px;
+        }
         .filter-area {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 12px;
+            gap: 8px;
             padding-top: 0;
             margin: 0;
         }
@@ -1165,8 +1184,8 @@
             font-size: 12px;
         }
         .multi-select-trigger {
-            min-height: 40px;
-            padding: 8px 34px 8px 12px;
+            min-height: 34px;
+            padding: 6px 30px 6px 10px;
             border-radius: 8px;
         }
         .multi-select-arrow {
@@ -1193,22 +1212,28 @@
         }
         .date-filter-row {
             display: grid;
-            grid-template-columns: auto minmax(150px, 180px) auto minmax(150px, 180px) auto;
+            grid-template-columns: minmax(118px, 132px) auto minmax(118px, 132px) auto;
             align-items: center;
-            gap: 10px;
-            margin: 16px 0;
+            gap: 6px;
+            margin: 0;
         }
-        .date-filter-row label {
+        .date-filter-item > label {
+            display: block;
             color: var(--muted);
             font-size: 12px;
             font-weight: 800;
+            margin-bottom: 7px;
         }
         .date-filter-row input {
-            min-height: 40px;
-            padding: 8px 12px !important;
-            font-size: 13px !important;
+            min-height: 34px;
+            height: 34px;
+            padding: 6px 9px !important;
+            font-size: 12px !important;
         }
         .date-clear-btn {
+            min-height: 34px;
+            height: 34px;
+            padding: 6px 10px;
             background: #f8fafc;
             color: #334155;
             border-color: var(--line);
@@ -1265,6 +1290,7 @@
             .action-groups { justify-content: flex-start; }
             .barcode-item { grid-template-columns: 1fr; }
             .bc-right { justify-content: flex-start; margin-left: 0; }
+            .filter-controls-row { grid-template-columns: 1fr; align-items: stretch; }
             .filter-area { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 640px) {
@@ -1403,19 +1429,24 @@
                 </div>
             </div>
             <div class="filter-shell">
-                <div class="section-label">
-                    <span>条件筛选</span>
-                    <span>支持多选联动</span>
-                </div>
-                <div class="filter-area" id="filterArea" data-filter-labels="归属经销商,服务经销商,是否结单,有无服务单"></div>
-
-                <div class="date-filter-row">
-                    <label>查询日期</label>
-                    <input type="date" id="dateStart" onchange="applyFilters()">
-                    <span style="color:#94a3b8;font-size:13px;">至</span>
-                    <input type="date" id="dateEnd" onchange="applyFilters()">
-                    <button class="date-clear-btn" onclick="clearDateFilter()">清空日期</button>
-                </div>
+                <details class="filter-collapse" id="resultsFilterCollapse" open>
+                    <summary class="section-label filter-collapse-summary">
+                        <span>条件筛选</span>
+                        <span class="filter-collapse-meta">支持多选联动 <span class="filter-collapse-arrow" aria-hidden="true">⌄</span></span>
+                    </summary>
+                    <div class="filter-controls-row">
+                        <div class="filter-area" id="filterArea" data-filter-labels="归属经销商,服务经销商,是否结单,有无服务单"></div>
+                        <div class="date-filter-item">
+                            <label>查询日期</label>
+                            <div class="date-filter-row">
+                                <input type="date" id="dateStart" onchange="applyFilters()">
+                                <span style="color:#94a3b8;font-size:12px;">至</span>
+                                <input type="date" id="dateEnd" onchange="applyFilters()">
+                                <button class="date-clear-btn" onclick="clearDateFilter()">清空日期</button>
+                            </div>
+                        </div>
+                    </div>
+                </details>
 
                 <div class="section-label">
                     <span>快速搜索</span>

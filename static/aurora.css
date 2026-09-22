@@ -448,6 +448,11 @@ body[data-aurora-page="results"] .btn-danger-soft {
     border-color: rgba(255, 112, 137, .24) !important;
 }
 
+body[data-aurora-page="results"] .date-clear-btn {
+    min-height: 34px !important;
+    height: 34px;
+}
+
 body[data-aurora-page="transfer"] .slot-tab {
     color: #9eb5c4 !important;
     background: rgba(6, 17, 30, .78) !important;
@@ -1190,6 +1195,24 @@ body[data-aurora-page="results"] .stats-grid {
     width: 100%;
     min-width: 0;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 5px;
+}
+body[data-aurora-page="results"] .stat-card {
+    min-height: 0;
+    padding: 8px 9px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px;
+}
+body[data-aurora-page="results"] .stat-card span,
+body[data-aurora-page="results"] .stat-card strong {
+    display: inline-block;
+    margin: 0;
+    line-height: 1;
+}
+body[data-aurora-page="results"] .stat-card strong {
+    font-size: 17px;
 }
 body[data-aurora-page="results"] .action-groups {
     width: 100%;
@@ -1210,6 +1233,25 @@ body[data-aurora-page="results"] .action-groups .btn {
 body[data-aurora-page="results"] .filter-area {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
+}
+body[data-aurora-page="results"] .filter-collapse-summary {
+    min-height: 38px;
+    margin: 0;
+    padding: 8px 0;
+    cursor: pointer;
+}
+body[data-aurora-page="results"] .filter-collapse[open] .filter-collapse-summary {
+    margin-bottom: 8px;
+}
+body[data-aurora-page="results"] .filter-collapse-arrow {
+    display: inline-block;
+    transition: transform .15s ease;
+}
+body[data-aurora-page="results"] .filter-collapse[open] .filter-collapse-arrow {
+    transform: rotate(180deg);
+}
+body[data-aurora-page="results"] .date-filter-item > label {
+    display: none;
 }
 body[data-aurora-page="results"] .date-filter-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));

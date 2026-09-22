@@ -35,6 +35,12 @@
         });
     }
 
+    function collapseMobileResultsFilters() {
+        const filters = document.getElementById('resultsFilterCollapse');
+        if (!filters || !window.matchMedia('(max-width: 640px)').matches) return;
+        filters.open = false;
+    }
+
     function ensureDialog() {
         let dialog = document.getElementById('auroraLogDialog');
         if (dialog) return dialog;
@@ -125,6 +131,7 @@
     });
     document.addEventListener('DOMContentLoaded', () => {
         enhanceNavigation();
+        collapseMobileResultsFilters();
         ensureDialog();
     });
 })();
