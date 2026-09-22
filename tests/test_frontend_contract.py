@@ -92,6 +92,11 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("await resumeOrderProductQuery(serviceNo)", html)
         self.assertIn("/order-products/status", html)
 
+    def test_close_management_deletes_individual_service_orders_not_batches(self):
+        html = self.source("service_close.html")
+        self.assertIn("data-history-service-no", html)
+        self.assertIn("/api/service-close/history/service/", html)
+
     def test_service_detail_order_product_query_resumes_and_guards_modal_identity(self):
         """A duplicate start must resume polling without updating a replaced modal."""
         html = self.source("index.html")

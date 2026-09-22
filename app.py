@@ -9898,6 +9898,28 @@ def delete_service_close_history(job_id):
         return _save_service_close_history(remaining)
 
 
+def delete_service_close_history_service(service_no):
+    service_no = _clean_export_value(service_no)
+    if not service_no:
+        return False
+    with service_close_history_lock:
+        removed = False
+        remaining = []
+        for record in load_service_close_history():
+            service_nos = {
+                _clean_export_value(row.get('service_no'))
+                for row in record.get('service_rows') or []
+            }
+            if service_no not in service_nos:
+                remaining.append(record)
+                continue
+            trimmed = _trim_service_close_history_record(record, {service_no})
+            removed = True
+            if trimmed:
+                remaining.append(trimmed)
+        return bool(removed and _save_service_close_history(remaining))
+
+
 def clear_service_close_history():
     return _save_service_close_history([])
 
@@ -10626,6 +10648,14 @@ def api_service_close_history_delete(job_id):
     if not delete_service_close_history(job_id):
         return jsonify({'success': False, 'error': '未找到结单记录'}), 404
     return jsonify({'success': True, 'message': '已删除结单记录'})
+
+@app.route("/api/service-close/history/service/<service_no>", methods=["DELETE"])
+def api_service_close_history_service_delete(service_no):
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '仅管理员可以删除结单记录'}), 403
+    if not delete_service_close_history_service(service_no):
+        return jsonify({'success': False, 'error': '未找到服务单记录'}), 404
+    return jsonify({'success': True, 'message': '已删除服务单记录'})
 
 @app.route("/api/service-close/history", methods=["DELETE"])
 def api_service_close_history_clear():

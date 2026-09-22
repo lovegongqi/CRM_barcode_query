@@ -190,6 +190,33 @@ class ServiceCloseHistoryTests(unittest.TestCase):
         self.assertEqual(admin.delete("/api/service-close/history").status_code, 200)
         self.assertEqual(app_module.load_service_close_history(), [])
 
+    def test_admin_can_delete_one_service_order_without_removing_its_batch(self):
+        record = self.completed_job("close-batch", "2026-09-22 10:00:00", "FWD-ONE")
+        record["service_rows"].append({
+            "service_no": "FWD-TWO",
+            "barcodes": ["870000000002"],
+            "customer_names": ["李四"],
+            "product_names": ["滤芯"],
+            "slot_label": "查询2",
+            "state": "closed",
+            "message": "已结单",
+            "detail_url": "/api/service-orders/FWD-TWO",
+        })
+        record["results"].append({"service_no": "FWD-TWO", "success": True})
+        record.update({"total": 2, "current": 2, "closed_count": 2})
+        app_module._append_service_close_history(record)
+
+        admin = self.login("admin")
+        response = admin.delete("/api/service-close/history/service/FWD-ONE")
+
+        self.assertEqual(response.status_code, 200)
+        records = app_module.load_service_close_history()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            [row["service_no"] for row in records[0]["service_rows"]],
+            ["FWD-TWO"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

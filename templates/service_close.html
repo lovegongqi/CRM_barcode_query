@@ -20,7 +20,7 @@
         .service-close-record-head strong { color:#e2e8f0; }
         .service-close-record-head button { min-height:30px; padding:5px 9px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
         .service-close-status-list { display:grid; gap:6px; margin-top:10px; }
-        .service-close-status-row { display:grid; grid-template-columns:minmax(260px,2fr) 88px minmax(180px,1.2fr) 70px; gap:10px; align-items:center; padding:10px; border:1px solid #1e3a52; border-radius:9px; background:rgba(15,23,42,.72); color:#cbd5e1; }
+        .service-close-status-row { display:grid; grid-template-columns:minmax(260px,2fr) 88px minmax(180px,1.2fr) 70px auto; gap:10px; align-items:center; padding:10px; border:1px solid #1e3a52; border-radius:9px; background:rgba(15,23,42,.72); color:#cbd5e1; }
         .service-close-order-link { padding:0; border:0; background:transparent; color:#7dd3fc; cursor:pointer; font:inherit; font-weight:800; text-align:left; text-decoration:underline; text-underline-offset:3px; }
         .service-close-order small { display:block; margin-top:3px; color:#94a3b8; line-height:1.45; overflow-wrap:anywhere; }
         .service-close-barcodes { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
@@ -29,6 +29,7 @@
         .service-close-barcode.is-selected { border-color:rgba(56,189,248,.5); background:rgba(56,189,248,.12); color:#7dd3fc; }
         .service-close-barcode.is-related { border-color:rgba(167,139,250,.42); background:rgba(167,139,250,.1); color:#c4b5fd; }
         .service-close-channel,.service-close-elapsed { color:#94a3b8; font-size:11px; text-align:center; }
+        .service-close-row-actions button { min-height:28px; padding:4px 8px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; font-size:11px; }
         .service-close-progress { min-width:0; font-size:11px; line-height:1.45; overflow-wrap:anywhere; }
         .service-close-state,.service-detail-relation,.service-detail-comparison { display:inline-flex; width:fit-content; padding:2px 7px; border-radius:999px; font-size:10px; font-weight:800; }
         .is-running { border-color:rgba(56,189,248,.42); } .is-running .service-close-state { background:rgba(56,189,248,.16); color:#7dd3fc; }
@@ -70,14 +71,15 @@
         const closeState = state => ({waiting:['等待','is-waiting'],running:['处理中','is-running'],closed:['新结单','is-closed'],already_closed:['原已结单','is-already-closed'],failed:['失败','is-failed']}[state] || [state || '等待','is-waiting']);
         const duration = value => { const seconds = Math.max(0, Number(value || 0)); return seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`; };
 
-        function renderRows(rows) {
+        function renderRows(rows, canDelete = false) {
             return `<div class="service-close-status-list">${(rows || []).map(row => {
                 const [label, stateClass] = closeState(row.state); const serviceNo = String(row.service_no || '');
                 const detailUrl = String(row.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
                 const selected = new Set((row.selected_barcodes || row.barcodes || []).map(String));
                 const barcodes = Array.from(new Set((row.barcodes || []).map(String).filter(Boolean))).map(barcode => `<span class="service-close-barcode ${selected.has(barcode) ? 'is-selected' : 'is-related'}"><span>${escapeHtml(barcode)}</span><em>${selected.has(barcode) ? '已选' : '关联'}</em></span>`).join('') || '<span class="service-close-barcode">无关联条码</span>';
                 const customers = Array.isArray(row.customer_names) && row.customer_names.length ? `<small>客户 ${escapeHtml(row.customer_names.join('、'))}</small>` : '';
-                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div></div>`;
+                const deleteButton = canDelete && serviceNo ? `<div class="service-close-row-actions"><button type="button" data-history-service-no="${escapeHtml(serviceNo)}">删除记录</button></div>` : '';
+                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
             }).join('')}</div>`;
         }
 
@@ -110,15 +112,14 @@
         function renderRecord(record, isCurrent = false) {
             const time = record.finished_at || record.started_at || '—';
             const title = isCurrent ? `本次结单 · ${record.current || 0}/${record.total || 0}` : `${time} · ${record.actor || '—'} · 新结单 ${record.closed_count || 0} / 失败 ${record.failed_count || 0}`;
-            const deleteButton = canManageHistory && !isCurrent ? `<button type="button" data-history-id="${escapeHtml(record.id)}">删除记录</button>` : '';
-            return `<article class="service-close-record ${isCurrent ? 'is-current' : ''}"><div class="service-close-record-head"><strong>${escapeHtml(title)}</strong>${deleteButton}</div>${renderRows(record.service_rows)}</article>`;
+            return `<article class="service-close-record ${isCurrent ? 'is-current' : ''}"><div class="service-close-record-head"><strong>${escapeHtml(title)}</strong></div>${renderRows(record.service_rows, canManageHistory && !isCurrent)}</article>`;
         }
         function renderRecords() {
             const root = document.getElementById('serviceCloseRecords');
             const records = historyRecords.slice();
             if (currentCloseRecord) { const currentRecord = currentCloseRecord; records.unshift(currentRecord); }
             root.innerHTML = records.length ? records.map(record => renderRecord(record, record === currentCloseRecord)).join('') : '暂无结单记录。';
-            root.querySelectorAll('[data-history-id]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条结单记录？')) return; await fetch(`/api/service-close/history/${encodeURIComponent(button.dataset.historyId)}`, {method:'DELETE'}); loadHistory(); }));
+            root.querySelectorAll('[data-history-service-no]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条服务单记录？')) return; await fetch(`/api/service-close/history/service/${encodeURIComponent(button.dataset.historyServiceNo)}`, {method:'DELETE'}); loadHistory(); }));
         }
         async function loadHistory() {
             const data = await fetch('/api/service-close/history').then(response => response.json());
