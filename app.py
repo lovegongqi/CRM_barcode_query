@@ -2311,6 +2311,7 @@ class CRMSession:
                     const values = [];
                     for (const control of node.querySelectorAll('input:not([type="hidden"]), textarea, select')) {
                         const type = (control.getAttribute('type') || '').toLowerCase();
+                        if (['button', 'submit', 'reset', 'image', 'file'].includes(type)) continue;
                         if ((type === 'radio' || type === 'checkbox') && !control.checked) continue;
                         let value = '';
                         if (control.tagName === 'SELECT') {
@@ -10370,7 +10371,7 @@ def service_close():
         "service_close.html",
         nav_links=visible_page_links(),
         business_config=business_config(),
-        can_manage_history=is_admin_account(),
+        can_manage_history=bool(current_account()),
     )
 
 @app.route("/favicon.ico")
@@ -10643,24 +10644,18 @@ def api_service_close_history():
 
 @app.route("/api/service-close/history/<job_id>", methods=["DELETE"])
 def api_service_close_history_delete(job_id):
-    if not is_admin_account():
-        return jsonify({'success': False, 'error': '仅管理员可以删除结单记录'}), 403
     if not delete_service_close_history(job_id):
         return jsonify({'success': False, 'error': '未找到结单记录'}), 404
     return jsonify({'success': True, 'message': '已删除结单记录'})
 
 @app.route("/api/service-close/history/service/<service_no>", methods=["DELETE"])
 def api_service_close_history_service_delete(service_no):
-    if not is_admin_account():
-        return jsonify({'success': False, 'error': '仅管理员可以删除结单记录'}), 403
     if not delete_service_close_history_service(service_no):
         return jsonify({'success': False, 'error': '未找到服务单记录'}), 404
     return jsonify({'success': True, 'message': '已删除服务单记录'})
 
 @app.route("/api/service-close/history", methods=["DELETE"])
 def api_service_close_history_clear():
-    if not is_admin_account():
-        return jsonify({'success': False, 'error': '仅管理员可以清空结单记录'}), 403
     if not clear_service_close_history():
         return jsonify({'success': False, 'error': '清空结单记录失败'}), 500
     return jsonify({'success': True, 'message': '已清空结单记录'})

@@ -357,6 +357,27 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         self.assertTrue(self.session._set_store_order_search_keyword(order_no))
         self.assertEqual(self.page.locator('#bound-keyword').inner_text(), order_no)
 
+    def test_related_order_field_ignores_lookup_button_values(self):
+        self.page.set_content("""
+            <div class="el-form-item">
+              <label class="el-form-item__label">关联订单</label>
+              <div class="el-form-item__content">
+                <input value="ORD2609180063" readonly>
+                <input type="button" value="查找">
+                <input type="button" value="移除">
+                <input type="button" value="值">
+                <input type="button" value="确定">
+              </div>
+            </div>
+        """)
+
+        fields = self.session._service_detail_fields()
+
+        self.assertEqual(
+            app_module._related_order_no_from_service_fields(fields),
+            "ORD2609180063",
+        )
+
     def test_detail_readiness_accepts_only_stable_explicit_empty_table(self):
         detail = self.detail_html(["产品编码", "数量"], [])
         table_empty = detail.replace('<tbody></tbody>', '<tbody><tr><td colspan="2">暂无数据</td></tr></tbody>')

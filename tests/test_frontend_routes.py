@@ -140,7 +140,9 @@ class FrontendRouteSmokeTest(unittest.TestCase):
 
         viewer = app_module.app.test_client()
         viewer.post("/api/app-auth/login", json={"username": "service-close-viewer", "password": "viewer-pass"})
-        self.assertEqual(viewer.get("/service-close").status_code, 200)
+        viewer_page = viewer.get("/service-close")
+        self.assertEqual(viewer_page.status_code, 200)
+        self.assertIn(b'id="clearServiceCloseHistory"', viewer_page.data)
 
         denied = app_module.app.test_client()
         denied.post("/api/app-auth/login", json={"username": "service-close-denied", "password": "denied-pass"})

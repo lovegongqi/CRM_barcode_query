@@ -159,8 +159,8 @@ class ServiceCloseHistoryTests(unittest.TestCase):
 
         self.assertEqual([record["id"] for record in records], ["close-latest"])
 
-    def test_only_admin_can_delete_or_clear_shared_history(self):
-        """Removing server-side admin checks would let a result viewer erase history."""
+    def test_any_results_account_can_delete_or_clear_shared_history(self):
+        """结单记录由所有拥有结果页权限的账号共同维护。"""
         app_module._append_service_close_history(
             self.completed_job("close-one", "2026-09-21 10:01:00", "FWD-ONE")
         )
@@ -171,23 +171,14 @@ class ServiceCloseHistoryTests(unittest.TestCase):
         viewer = self.login("viewer")
         self.assertEqual(viewer.get("/api/service-close/history").status_code, 200)
         self.assertEqual(
-            viewer.delete("/api/service-close/history/close-two").status_code,
-            403,
+            viewer.delete("/api/service-close/history/service/FWD-TWO").status_code,
+            200,
         )
-        self.assertEqual(viewer.delete("/api/service-close/history").status_code, 403)
-        self.assertEqual(
-            [record["id"] for record in app_module.load_service_close_history()],
-            ["close-two", "close-one"],
-        )
-
-        admin = self.login("admin")
-        deleted = admin.delete("/api/service-close/history/close-two")
-        self.assertEqual(deleted.status_code, 200)
         self.assertEqual(
             [record["id"] for record in app_module.load_service_close_history()],
             ["close-one"],
         )
-        self.assertEqual(admin.delete("/api/service-close/history").status_code, 200)
+        self.assertEqual(viewer.delete("/api/service-close/history").status_code, 200)
         self.assertEqual(app_module.load_service_close_history(), [])
 
     def test_admin_can_delete_one_service_order_without_removing_its_batch(self):
