@@ -75,10 +75,12 @@ class LightThemeTest(unittest.TestCase):
             page.add_style_tag(content=css)
             style = page.locator('.aurora-logo').evaluate('''element => {
                 const value = getComputedStyle(element);
-                return {background: value.backgroundImage, border: value.borderTopWidth, shadow: value.boxShadow};
+                return {background: value.backgroundImage, border: value.borderTopWidth, shadow: value.boxShadow,
+                    overflow: value.overflow, radius: value.borderTopLeftRadius, padding: value.paddingTop};
             }''')
             browser.close()
-        self.assertEqual(style, {'background': 'none', 'border': '0px', 'shadow': 'none'})
+        self.assertEqual(style, {'background': 'none', 'border': '0px', 'shadow': 'none',
+                                 'overflow': 'visible', 'radius': '0px', 'padding': '0px'})
 
     def test_mobile_content_scrolls_only_above_fixed_navigation(self):
         styles = "\n".join(
