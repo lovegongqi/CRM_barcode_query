@@ -96,6 +96,49 @@ class AuroraNavigationTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_mobile_navigation_stays_outside_scrolling_content_in_webkit(self):
+        styles = "\n".join(
+            (ROOT / "static" / name).read_text(encoding="utf-8")
+            for name in ("app_layout.css", "aurora.css", "light_theme.css")
+        )
+        with sync_playwright() as playwright:
+            browser = playwright.webkit.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True)
+                page.set_content('''<meta name="viewport" content="width=device-width, initial-scale=1">
+                    <base href="http://127.0.0.1:5002/">
+                    <body data-aurora-page="inbound"><div class="container">
+                        <div class="header"><div><h1>入库</h1></div>
+                            <nav class="page-nav"><a href="/inbound">入库</a></nav></div>
+                        <main style="height: 1400px">内容</main>
+                    </div></body>''')
+                page.add_style_tag(content=styles)
+                page.add_script_tag(content=SCRIPT.read_text(encoding="utf-8"))
+                page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded'))")
+                page.locator('.container').evaluate('(element) => element.scrollTop = 600')
+                state = page.locator('.page-nav').evaluate('''nav => {
+                    let parent = nav.parentElement;
+                    let hasScrollingAncestor = false;
+                    while (parent && parent !== document.body) {
+                        const overflow = getComputedStyle(parent).overflowY;
+                        if (['auto', 'scroll'].includes(overflow) && parent.scrollHeight > parent.clientHeight)
+                            hasScrollingAncestor = true;
+                        parent = parent.parentElement;
+                    }
+                    const bounds = nav.getBoundingClientRect();
+                    return {hasScrollingAncestor, position: getComputedStyle(nav).position,
+                        visible: bounds.top >= 0 && bounds.bottom <= innerHeight,
+                        label: nav.querySelector('.aurora-nav-label')?.textContent};
+                }''')
+                self.assertFalse(state["hasScrollingAncestor"])
+                self.assertEqual(state["position"], "fixed")
+                self.assertTrue(state["visible"])
+                self.assertEqual(state["label"], "入库")
+                page.set_viewport_size({"width": 1200, "height": 844})
+                page.locator('.header > .page-nav').wait_for(state="attached")
+            finally:
+                browser.close()
+
     def test_desktop_keeps_original_warehouse_links_visible(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()

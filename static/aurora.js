@@ -35,6 +35,23 @@
         });
     }
 
+    const navigationHomes = new WeakMap();
+    function placeNavigation() {
+        const mobile = window.matchMedia('(max-width: 720px)').matches;
+        document.querySelectorAll('.page-nav').forEach(nav => {
+            if (!navigationHomes.has(nav)) {
+                navigationHomes.set(nav, {parent: nav.parentNode, next: nav.nextSibling});
+            }
+            if (mobile && nav.parentNode !== document.body) {
+                // iOS WebKit can omit fixed glass content inside a scrolling container.
+                document.body.appendChild(nav);
+            } else if (!mobile && nav.parentNode !== navigationHomes.get(nav).parent) {
+                const {parent, next} = navigationHomes.get(nav);
+                parent.insertBefore(nav, next);
+            }
+        });
+    }
+
     function collapseMobileResultsFilters() {
         const filters = document.getElementById('resultsFilterCollapse');
         if (!filters || !window.matchMedia('(max-width: 640px)').matches) return;
@@ -131,7 +148,9 @@
     });
     document.addEventListener('DOMContentLoaded', () => {
         enhanceNavigation();
+        placeNavigation();
         collapseMobileResultsFilters();
         ensureDialog();
     });
+    window.addEventListener('resize', placeNavigation);
 })();
