@@ -494,7 +494,7 @@ body[data-aurora-page="transfer"] .transfer-mobile-clear { display: none !import
     body[data-aurora-page="service-close"] .app-subtitle { display: none !important; }
     body[data-aurora-page="transfer"] .fields {
         display: grid;
-        grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+        grid-template-columns: 110px minmax(0, 1fr);
         gap: 8px;
     }
     body[data-aurora-page="transfer"] .transfer-remark-field,

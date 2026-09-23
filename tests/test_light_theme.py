@@ -215,6 +215,8 @@ class LightThemeTest(unittest.TestCase):
             self.assertAlmostEqual(row["distributor"]["height"], row["importButton"]["height"], delta=2)
         self.assertTrue(bounds[430]["mobileClearVisible"])
         self.assertFalse(bounds[430]["desktopClearVisible"])
+        self.assertLessEqual(bounds[430]["type"]["width"], 120)
+        self.assertGreater(bounds[430]["distributor"]["width"], bounds[430]["type"]["width"])
         self.assertAlmostEqual(bounds[430]["remark"]["top"], bounds[430]["mobileClear"]["top"], delta=2)
         self.assertGreater(bounds[430]["preview"]["top"], bounds[430]["remark"]["top"])
         self.assertFalse(bounds[1565]["mobileClearVisible"])
