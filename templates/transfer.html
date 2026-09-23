@@ -29,7 +29,6 @@
         .crm-actions { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
         .crm-actions .btn { min-height:34px; padding:6px 12px; font-size:12px; white-space:nowrap; }
         label { display:block; font-size:12px; color:#667085; font-weight:700; margin-bottom:6px; }
-        .field-label-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
         .mini-link-btn { min-height:24px; padding:2px 8px; border:1px solid #bfdbfe; border-radius:6px; background:#eff6ff; color:#1d4ed8; font-size:12px; font-weight:800; cursor:pointer; }
         .mini-link-btn:hover { background:#dbeafe; }
         textarea, input, select { width:100%; border:1px solid #cfd8e3; border-radius:6px; padding:9px 10px; font-size:14px; outline:none; background:#fff; }
@@ -116,8 +115,8 @@
     <link rel="stylesheet" href="/static/light_theme.css?v=1">
 </head>
 <body data-aurora-page="transfer">
-<a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
 <div class="container">
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
     <div class="header">
         <div>
             <h1>CRM 移库</h1>
@@ -161,26 +160,29 @@
                         </select>
                     </div>
                     <div>
-                        <label class="field-label-row">
-                            <span>目标分销商</span>
+                        <label>目标分销商</label>
+                        <div class="distributor-input-row">
+                            <div class="distributor-picker">
+                                <input id="transferDistributor" placeholder="输入分销商名称" autocomplete="off" onfocus="showDistributorDropdown()" oninput="saveTransferInput();showDistributorDropdown()" onkeydown="handleDistributorKeydown(event)" onblur="hideDistributorDropdownSoon()">
+                                <div id="distributorHistoryDropdown" class="distributor-dropdown"></div>
+                            </div>
                             {% if account and account.is_admin %}
                             <button class="mini-link-btn" type="button" onclick="openDistributorImportModal()">批量导入</button>
                             {% endif %}
-                        </label>
-                        <div class="distributor-picker">
-                            <input id="transferDistributor" placeholder="输入分销商名称" autocomplete="off" onfocus="showDistributorDropdown()" oninput="saveTransferInput();showDistributorDropdown()" onkeydown="handleDistributorKeydown(event)" onblur="hideDistributorDropdownSoon()">
-                            <div id="distributorHistoryDropdown" class="distributor-dropdown"></div>
                         </div>
                     </div>
-                    <div>
+                    <div class="transfer-remark-field">
                         <label>备注</label>
-                        <input id="transferRemark" placeholder="可选" oninput="saveTransferInput()">
+                        <div class="transfer-remark-input-row">
+                            <input id="transferRemark" placeholder="可选" oninput="saveTransferInput()">
+                            <button class="btn btn-secondary transfer-mobile-clear" onclick="clearForm()">清空</button>
+                        </div>
                     </div>
-                </div>
-                <div class="actions">
-                    <button class="btn btn-secondary" onclick="clearForm()">清空</button>
-                    <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
-                    <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
+                    <div class="actions">
+                        <button class="btn btn-secondary transfer-desktop-clear" onclick="clearForm()">清空</button>
+                        <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
+                        <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
+                    </div>
                 </div>
                 <div class="preview-log" id="previewLog" style="display:none">
                     <div class="preview-query-head">

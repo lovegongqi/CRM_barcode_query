@@ -1,24 +1,3 @@
-.global-log-button {
-    position: fixed;
-    top: 14px;
-    right: 14px;
-    z-index: 900;
-    min-height: 34px;
-    padding: 7px 12px;
-    border: 1px solid rgba(15, 23, 42, .18);
-    border-radius: 8px;
-    background: #0f172a;
-    color: #fff;
-    font-size: 12px;
-    font-weight: 800;
-    box-shadow: 0 10px 28px rgba(15, 23, 42, .18);
-    cursor: pointer;
-}
-
-.global-log-button:hover {
-    background: #1e293b;
-}
-
 .global-log-overlay {
     position: fixed;
     inset: 0;
@@ -107,14 +86,6 @@
 .global-log-body .dim { color: #94a3b8; }
 
 @media (max-width: 720px) {
-    .global-log-button {
-        top: 8px;
-        right: 8px;
-        min-height: 30px;
-        padding: 5px 8px;
-        font-size: 11px;
-    }
-
     .global-log-overlay {
         padding: 10px;
     }

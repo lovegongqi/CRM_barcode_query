@@ -40,6 +40,25 @@ body[data-aurora-page] .aurora-logo {
     border: 0 !important;
     box-shadow: none !important;
 }
+body[data-aurora-page]:has(.page-nav) { margin: 0; }
+body[data-aurora-page]:has(.page-nav) .container > .aurora-logo {
+    top: 30px;
+    left: 24px;
+    width: 63px;
+    height: 63px;
+    padding: 0;
+}
+body[data-aurora-page]:has(.page-nav) .header,
+body[data-aurora-page]:has(.page-nav) .app-header {
+    gap: 12px !important;
+    margin-bottom: 14px !important;
+}
+body[data-aurora-page] .header > div:first-child > p,
+body[data-aurora-page] .app-title > .app-subtitle {
+    margin: 0 !important;
+    font-size: 12px;
+    line-height: 18px;
+}
 
 body[data-aurora-page] .page-nav,
 body[data-aurora-page] .card,
@@ -103,14 +122,6 @@ body[data-aurora-page] .aurora-account-logout,
 body[data-aurora-page] .btn-danger,
 body[data-aurora-page] .delete-btn,
 body[data-aurora-page] .btn-danger-soft { color: #b52d48 !important; }
-body[data-aurora-page] .global-log-button {
-    color: #315773 !important;
-    background: rgba(255, 255, 255, .8) !important;
-    border-color: #d5e4ef !important;
-    box-shadow: 0 9px 26px rgba(40, 87, 134, .1) !important;
-    backdrop-filter: blur(18px);
-}
-body[data-aurora-page] .global-log-button:hover { background: #e8f5fe !important; }
 body[data-aurora-page] .toast,
 body[data-aurora-page="settings"] .runtime-query-slot,
 body[data-aurora-page="transfer"] .transfer-login-status {
@@ -206,6 +217,7 @@ body[data-aurora-page] .aurora-log-preview,
 body[data-aurora-page] .aurora-live-badge { color: #126c94 !important; background: #e5f5fd !important; }
 body[data-aurora-page] .aurora-row-action:hover,
 body[data-aurora-page] .aurora-log-preview:hover { color: #075e91 !important; background: #d4effc !important; }
+body[data-aurora-page] .aurora-status-button { color: #086b96 !important; }
 body[data-aurora-page] .aurora-status-button.success { color: #168252 !important; }
 body[data-aurora-page] .aurora-status-button.warn { color: #a76405 !important; }
 body[data-aurora-page] .aurora-status-button.error { color: #c6425a !important; }
@@ -437,7 +449,79 @@ body[data-aurora-page] .aurora-feature strong,
 body[data-aurora-page] .aurora-access-card h2 { color: var(--aurora-text) !important; }
 body[data-aurora-page] .aurora-login-shell::after { color: var(--aurora-muted) !important; background: #eef7fd !important; }
 
+body[data-aurora-page="transfer"] .distributor-input-row,
+body[data-aurora-page="transfer"] .transfer-remark-input-row {
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+}
+body[data-aurora-page="transfer"] .distributor-picker,
+body[data-aurora-page="transfer"] .transfer-remark-input-row input { flex: 1; min-width: 0; }
+body[data-aurora-page="transfer"] .distributor-input-row .mini-link-btn {
+    flex: 0 0 auto;
+    min-height: 38px;
+    margin: 0;
+}
+body[data-aurora-page="transfer"] .fields > .actions {
+    align-self: end;
+    margin: 0;
+}
+body[data-aurora-page="transfer"] .transfer-mobile-clear { display: none !important; }
+
 @media (max-width: 720px) {
+    body[data-aurora-page]:has(.page-nav) .container > .aurora-logo {
+        top: 12px;
+        left: 12px;
+        width: 36px;
+        height: 36px;
+    }
+    body[data-aurora-page]:has(.page-nav) {
+        height: 100dvh;
+        min-height: 0;
+        margin: 0;
+        overflow: hidden;
+    }
+    body[data-aurora-page]:has(.page-nav) .container {
+        height: calc(100dvh - 84px - env(safe-area-inset-bottom));
+        min-height: 0;
+        overflow-y: auto;
+        overscroll-behavior-y: contain;
+        padding: 18px 12px 12px !important;
+    }
+    body[data-aurora-page="results"] .app-header > .app-title,
+    body[data-aurora-page="service-close"] .app-header > .app-title { min-height: 0 !important; }
+    body[data-aurora-page="service-close"] .app-title::before,
+    body[data-aurora-page="service-close"] .app-subtitle { display: none !important; }
+    body[data-aurora-page="transfer"] .fields {
+        display: grid;
+        grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+        gap: 8px;
+    }
+    body[data-aurora-page="transfer"] .transfer-remark-field,
+    body[data-aurora-page="transfer"] .fields > .actions { grid-column: 1 / -1; }
+    body[data-aurora-page="transfer"] .transfer-mobile-clear { display: inline-flex !important; align-items: center; justify-content: center; }
+    body[data-aurora-page="transfer"] .transfer-desktop-clear { display: none !important; }
+    body[data-aurora-page="transfer"] .fields > .actions {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    }
+    body[data-aurora-page="results"] .action-groups .btn {
+        min-height: 30px !important;
+        padding: 4px 2px !important;
+    }
+    body[data-aurora-page="results"] .search-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto !important;
+        align-items: center;
+        gap: 6px;
+    }
+    body[data-aurora-page="results"] .search-row input { min-width: 0; height: 38px !important; min-height: 38px !important; }
+    body[data-aurora-page="results"] .search-row button {
+        height: 38px !important;
+        min-height: 38px !important;
+        padding: 5px 8px;
+        white-space: nowrap;
+    }
     body[data-aurora-page] .aurora-results-grid .barcode-item { background: rgba(255, 255, 255, .8) !important; }
     body[data-aurora-page] .page-nav { background: rgba(255, 255, 255, .86) !important; }
 }

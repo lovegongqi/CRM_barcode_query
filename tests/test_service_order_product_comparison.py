@@ -167,6 +167,16 @@ class CRMRelatedOrderTests(unittest.TestCase):
             "http://crmportal.ecowaterchina.net.cn/#/ordertwoc/list", timeout=60000
         )
 
+    def test_store_order_list_force_reload_reopens_even_when_route_is_ready(self):
+        session = make_crm_session()
+        with mock.patch.object(session, "is_alive", return_value=True), \
+                mock.patch.object(session, "_store_order_list_ready", return_value=True), \
+                mock.patch.object(session, "_goto", return_value=(True, "")) as goto, \
+                mock.patch.object(app_module.time, "sleep"):
+            ok, message = session._open_store_order_list(lambda *_: None, force_reload=True)
+        self.assertTrue(ok, message)
+        goto.assert_called_once_with(session._store_order_list_url(), timeout=60000)
+
     def test_query_related_order_products_returns_service_fields_and_order_rows(self):
         session = make_crm_session()
         fields = [{"label": "关联订单号", "value": "SO20260914001"}]
@@ -301,11 +311,10 @@ class CRMRelatedOrderTests(unittest.TestCase):
         open_detail.assert_called_once_with(service_no)
         search_order.assert_called_once_with(order_no)
 
-    def test_query_related_order_products_retries_after_cached_order_search_fails(self):
+    def test_query_related_order_products_keeps_valid_cached_order_on_third_attempt(self):
         session = make_crm_session()
         service_no = "FWD202609201457"
-        stale_order_no = "ORD2609140000"
-        fresh_order_no = "ORD2609140231"
+        order_no = "ORD2609140231"
         service_products = [{
             "product_name": "反渗透净水机",
             "product_code": "906042840",
@@ -320,21 +329,17 @@ class CRMRelatedOrderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir, \
                 mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir):
             app_module._write_service_order_detail(service_no, {
-                "fields": [{"label": "关联订单", "value": stale_order_no}],
+                "fields": [{"label": "关联订单", "value": order_no}],
                 "products": service_products,
-                "order_lookup": {"order_no": stale_order_no},
+                "order_lookup": {"order_no": order_no},
             })
             with mock.patch.object(session, "is_alive", return_value=True), \
                     mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
-                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
-                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
-                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
-                    mock.patch.object(session, "_service_detail_fields", return_value=[{"label": "关联订单", "value": fresh_order_no}]), \
-                    mock.patch.object(session, "_service_detail_products", return_value=service_products), \
-                    mock.patch.object(session, "_open_store_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_open_service_order_list", side_effect=AssertionError("有效订单号不应重查服务单")), \
+                    mock.patch.object(session, "_open_store_order_list", return_value=(True, "")) as open_orders, \
                     mock.patch.object(session, "_search_store_order", side_effect=[
-                        (False, f"订单列表未找到订单号：{stale_order_no}"),
-                        (False, f"订单列表未找到订单号：{stale_order_no}"),
+                        (False, f"订单列表未找到订单号：{order_no}"),
+                        (False, f"订单列表未找到订单号：{order_no}"),
                         (True, ""),
                     ]) as search_order, \
                     mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")), \
@@ -342,10 +347,14 @@ class CRMRelatedOrderTests(unittest.TestCase):
                 ok, result = session.query_related_order_products(service_no)
 
         self.assertTrue(ok, result)
-        self.assertEqual(result["order_no"], fresh_order_no)
+        self.assertEqual(result["order_no"], order_no)
         self.assertEqual(
             [call.args[0] for call in search_order.call_args_list],
-            [stale_order_no, stale_order_no, fresh_order_no],
+            [order_no, order_no, order_no],
+        )
+        self.assertEqual(
+            [call.kwargs for call in open_orders.call_args_list],
+            [{}, {"force_reload": True}, {"force_reload": True}],
         )
 
     def test_query_related_order_products_retries_same_order_before_refreshing_service(self):
@@ -390,7 +399,7 @@ class CRMRelatedOrderTests(unittest.TestCase):
             [order_no, order_no],
         )
 
-    def test_query_related_order_products_retries_same_order_after_service_refresh(self):
+    def test_query_related_order_products_reports_order_failure_without_service_refresh(self):
         session = make_crm_session()
         service_no = "FWD202609201457"
         order_no = "ORD2609140231"
@@ -415,24 +424,20 @@ class CRMRelatedOrderTests(unittest.TestCase):
             })
             with mock.patch.object(session, "is_alive", return_value=True), \
                     mock.patch.object(session, "_is_current_page_logged_in", return_value=True), \
-                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")) as open_service, \
-                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
-                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
-                    mock.patch.object(session, "_service_detail_fields", return_value=fields), \
-                    mock.patch.object(session, "_service_detail_products", return_value=service_products), \
+                    mock.patch.object(session, "_open_service_order_list", side_effect=AssertionError("有效订单号不应重查服务单")) as open_service, \
                     mock.patch.object(session, "_open_store_order_list", return_value=(True, "")) as open_orders, \
                     mock.patch.object(session, "_search_store_order", side_effect=[
                         (False, f"订单列表未找到订单号：{order_no}"),
                         (False, f"订单列表未找到订单号：{order_no}"),
-                        (True, ""),
+                        (False, f"订单列表未找到订单号：{order_no}"),
                     ]) as search_order, \
                     mock.patch.object(session, "_open_store_order_detail", return_value=(True, "")), \
                     mock.patch.object(session, "_store_order_detail_products", return_value=order_products):
                 ok, result = session.query_related_order_products(service_no)
 
-        self.assertTrue(ok, result)
-        self.assertEqual(result["order_no"], order_no)
-        self.assertEqual(open_service.call_count, 1)
+        self.assertFalse(ok)
+        self.assertIn(order_no, result["error"])
+        open_service.assert_not_called()
         self.assertEqual(open_orders.call_count, 3)
         self.assertEqual(
             [call.args[0] for call in search_order.call_args_list],

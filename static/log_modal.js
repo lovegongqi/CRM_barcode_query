@@ -2,7 +2,6 @@
     const STORAGE_KEY_PREFIX = 'crm_page_log_history';
     const MAX_HISTORY = 1000;
     const MAX_RENDERED_HISTORY = 500;
-    let button = null;
     let overlay = null;
     let body = null;
     let historyLoaded = false;
@@ -21,13 +20,7 @@
     }
 
     function ensureLogModal() {
-        if (button && overlay && body) return;
-
-        button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'global-log-button';
-        button.textContent = '查看日志';
-        button.addEventListener('click', openGlobalLogModal);
+        if (overlay && body) return;
 
         overlay = document.createElement('div');
         overlay.className = 'global-log-overlay';
@@ -49,7 +42,6 @@
             if (event.target.dataset.action === 'clear') clearGlobalLog();
         });
 
-        document.body.appendChild(button);
         document.body.appendChild(overlay);
         loadHistory();
     }

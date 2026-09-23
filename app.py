@@ -1932,13 +1932,13 @@ class CRMSession:
         cfg = load_crm_config()
         return f"{cfg['website']['url'].rstrip('/')}/#/ordertwoc/list"
 
-    def _open_store_order_list(self, emit):
+    def _open_store_order_list(self, emit, force_reload=False):
         emit("打开 CRM 门店管理订单列表...")
         if not self.is_alive():
             if not self._ensure_browser():
                 return False, "浏览器未启动"
         target_url = self._store_order_list_url()
-        if not self._store_order_list_ready():
+        if force_reload or not self._store_order_list_ready():
             ok, message = self._goto(target_url, timeout=60000)
             if not ok:
                 return False, message
@@ -2624,32 +2624,17 @@ class CRMSession:
                 if not service_products:
                     return False, {"error": "本地服务单详情缺少产品明细，请先重查产品明细"}
 
-                ok, message = self._open_store_order_list(emit)
-                if not ok:
-                    return False, {"error": message}
-                ok, message = self._search_store_order(order_no)
-                if not ok:
-                    emit(f"订单列表首次未找到 {order_no}，正在重新加载后重试", "warning")
-                    ok, reopen_message = self._open_store_order_list(emit)
-                    if not ok:
-                        return False, {"error": reopen_message}
-                    ok, message = self._search_store_order(order_no)
-                if not ok:
-                    original_message = message
-                    fresh_order_no, refresh_message = refresh_related_order()
-                    if not fresh_order_no:
-                        return False, {"error": refresh_message or original_message}
-                    if fresh_order_no == order_no:
-                        emit(f"服务单已确认关联订单仍为 {order_no}，正在进行最后一次查询", "warning")
-                    else:
-                        emit(f"关联订单已更新为 {fresh_order_no}，正在重新查询", "info")
-                    order_no = fresh_order_no
-                    ok, message = self._open_store_order_list(emit)
+                for attempt in range(3):
+                    if attempt:
+                        emit(f"订单列表未找到 {order_no}，正在重开订单列表后第 {attempt + 1} 次查询", "warning")
+                    ok, message = self._open_store_order_list(emit, force_reload=True) if attempt else self._open_store_order_list(emit)
                     if not ok:
                         return False, {"error": message}
                     ok, message = self._search_store_order(order_no)
-                    if not ok:
-                        return False, {"error": message}
+                    if ok:
+                        break
+                if not ok:
+                    return False, {"error": f"{message}（已重开订单列表重试 2 次）"}
                 ok, message = self._open_store_order_detail(order_no)
                 if not ok:
                     return False, {"error": message}

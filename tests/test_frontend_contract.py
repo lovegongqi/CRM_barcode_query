@@ -97,6 +97,15 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("data-history-service-no", html)
         self.assertIn("/api/service-close/history/service/", html)
 
+    def test_close_management_shows_only_latest_batch_summary_in_records_box(self):
+        html = self.source("service_close.html")
+        self.assertIn('id="serviceCloseLatestSummary"', html)
+        self.assertRegex(html, r'id="serviceCloseRecords"[^>]*>\s*<span[^>]*id="serviceCloseLatestSummary"')
+        self.assertIn("本次批量结单：新结单", html)
+        self.assertIn("record.actor", html)
+        self.assertIn("record.finished_at || record.started_at", html)
+        self.assertNotIn("`${time} · ${record.actor || '—'} · 新结单", html)
+
     def test_service_detail_order_product_query_resumes_and_guards_modal_identity(self):
         """A duplicate start must resume polling without updating a replaced modal."""
         html = self.source("index.html")
