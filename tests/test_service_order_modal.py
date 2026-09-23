@@ -106,6 +106,32 @@ def test_mobile_service_information_defaults_collapsed_and_expands_on_tap(servic
     assert service.locator(".service-detail-fields").is_visible()
 
 
+def test_service_close_lists_order_only_products_as_missing_from_service(service_close_detail_page):
+    page = service_close_detail_page
+    page.evaluate("""() => renderServiceOrderDetail({
+        service_no: 'FWD100',
+        fields: [],
+        products: [
+            {product_name: '服务单型号', product_code: 'A100', barcode: 'SN100'}
+        ],
+        order_lookup: {
+            order_no: 'ORD100',
+            comparison: [
+                {product_name: '服务单型号', product_code: 'A100', order_quantity: 1,
+                 service_quantity: 1, status: 'matched', status_label: '一致'},
+                {product_name: '订单独有型号', product_code: 'B200', order_quantity: 2,
+                 service_quantity: 0, status: 'service_missing', status_label: '服务单缺少'}
+            ]
+        }
+    })""")
+
+    rows = page.locator(".service-detail-table tbody tr")
+    assert rows.count() == 2
+    assert rows.nth(1).locator("td").all_inner_texts() == [
+        "订单独有型号", "B200", "—", "", "2", "0", "服务单缺少",
+    ]
+
+
 @pytest.mark.parametrize("boundary", ["fetch", "json"])
 def test_late_initial_detail_cannot_replace_same_service_reopened_modal(modal_page, boundary):
     page = modal_page
