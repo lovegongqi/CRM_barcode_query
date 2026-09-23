@@ -5028,7 +5028,10 @@ def _empty_background_query_job(owner, barcodes=None, slot_ids=None, retry_limit
     }
 
 
-def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_type='', remark=''):
+def _empty_transfer_job(
+    slot_id=None, summary=None, distributor='', transfer_type='', remark='',
+    barcodes=None, actor=''
+):
     return {
         'job_id': uuid.uuid4().hex,
         'record_id': '',
@@ -5044,6 +5047,8 @@ def _empty_transfer_job(slot_id=None, summary=None, distributor='', transfer_typ
         'distributor': distributor,
         'transfer_type': transfer_type,
         'remark': remark,
+        'barcodes': list(barcodes or []),
+        'actor': str(actor or ''),
         'log_seq': 0,
         'logs': [],
         'started_at': '',
@@ -8413,6 +8418,57 @@ def _select_idle_query_worker_desc(exclude_slot_ids=None):
         return worker, slot_id, slot_label, ""
     return None, "", "", error
 
+
+transfer_slot_round_robin_lock = threading.Lock()
+transfer_slot_round_robin_cursor = 0
+transfer_slot_dispatch_lock = threading.Lock()
+
+
+def _transfer_slot_has_running_transfer(slot_id):
+    with transfer_job_lock:
+        job = transfer_jobs.get(latest_transfer_job_by_slot.get(slot_id))
+        return bool(job and job.get('running'))
+
+
+def _transfer_slot_has_running_summary(slot_id):
+    with summary_job_lock:
+        job = summary_jobs.get(latest_summary_job_by_slot.get(slot_id))
+        return bool(job and job.get('running'))
+
+
+def _select_idle_transfer_worker_desc():
+    global transfer_slot_round_robin_cursor
+    with crm_pool.pool_lock:
+        slots = list(crm_pool.transfer_slots)
+    with transfer_slot_round_robin_lock:
+        rotation_start = transfer_slot_round_robin_cursor % len(slots) if slots else 0
+    ordered_slots = slots[rotation_start:] + slots[:rotation_start]
+    logged_in_count = 0
+    busy_count = 0
+    for slot_id in ordered_slots:
+        worker = crm_pool.get(slot_id, "transfer")
+        if worker.busy:
+            busy_count += 1
+            continue
+        if not worker.logged_in:
+            if not worker.remembered_logged_in:
+                continue
+            success, _message = worker.check_login_status()
+            if not success or not worker.logged_in:
+                continue
+        logged_in_count += 1
+        if _transfer_slot_has_running_transfer(slot_id) or _transfer_slot_has_running_summary(slot_id):
+            busy_count += 1
+            continue
+        with transfer_slot_round_robin_lock:
+            transfer_slot_round_robin_cursor = (slots.index(slot_id) + 1) % len(slots)
+        return worker, slot_id, _transfer_slot_label(slot_id), ""
+    if logged_in_count == 0:
+        if busy_count:
+            return None, "", "", "所有已登录移库通道都在处理任务，请稍后再试"
+        return None, "", "", "没有已登录的移库通道，请先登录 CRM"
+    return None, "", "", "所有已登录移库通道都在处理任务，请稍后再试"
+
 def _request_slot_id(kind="query"):
     data = request.get_json(silent=True) or {}
     slot_id = (
@@ -8422,6 +8478,17 @@ def _request_slot_id(kind="query"):
         or ""
     )
     return crm_pool.normalize_slot(slot_id, kind)
+
+
+def _transfer_worker_for_request(data=None):
+    data = data if isinstance(data, dict) else (request.get_json(silent=True) or {})
+    requested_slot = str(
+        request.args.get("slot_id") or data.get("slot_id") or data.get("slot") or ""
+    ).strip()
+    if requested_slot:
+        slot_id = crm_pool.normalize_slot(requested_slot, "transfer")
+        return crm_pool.get(slot_id, "transfer"), slot_id, _transfer_slot_label(slot_id), ""
+    return _select_idle_transfer_worker_desc()
 
 def _latest_job_id(mapping, slot_id):
     return mapping.get(slot_id) or ""
@@ -9109,12 +9176,23 @@ def _transfer_records_connection():
             elapsed INTEGER NOT NULL DEFAULT 0,
             transfer_type TEXT NOT NULL DEFAULT '',
             remark TEXT NOT NULL DEFAULT '',
+            actor TEXT NOT NULL DEFAULT '',
+            barcodes_json TEXT NOT NULL DEFAULT '[]',
             logs_json TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL DEFAULT '',
             updated_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(transfer_records)")}
+    if "barcodes_json" not in columns:
+        connection.execute(
+            "ALTER TABLE transfer_records ADD COLUMN barcodes_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "actor" not in columns:
+        connection.execute(
+            "ALTER TABLE transfer_records ADD COLUMN actor TEXT NOT NULL DEFAULT ''"
+        )
     return connection
 
 
@@ -9374,6 +9452,12 @@ def _normalize_transfer_record(record):
     logs = record.get("logs")
     if not isinstance(logs, list):
         logs = []
+    barcodes = record.get("barcodes")
+    if not isinstance(barcodes, list):
+        barcodes = []
+    barcodes = list(dict.fromkeys(
+        str(barcode or "").strip() for barcode in barcodes if str(barcode or "").strip()
+    ))
     try:
         elapsed = max(0, int(record.get("elapsed") or 0))
     except (TypeError, ValueError):
@@ -9392,6 +9476,8 @@ def _normalize_transfer_record(record):
         "elapsed": elapsed,
         "transfer_type": str(record.get("transfer_type") or ""),
         "remark": str(record.get("remark") or ""),
+        "actor": str(record.get("actor") or ""),
+        "barcodes": barcodes,
         "logs": logs[-160:],
         "created_at": str(record.get("created_at") or now),
         "updated_at": now,
@@ -9400,6 +9486,10 @@ def _normalize_transfer_record(record):
 
 def _transfer_row_to_dict(row):
     item = dict(row)
+    try:
+        item["barcodes"] = json.loads(item.pop("barcodes_json") or "[]")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        item["barcodes"] = []
     try:
         item["logs"] = json.loads(item.pop("logs_json") or "[]")
     except (TypeError, ValueError, json.JSONDecodeError):
@@ -9411,7 +9501,8 @@ def load_transfer_records():
     with TRANSFER_RECORDS_LOCK:
         with _transfer_records_connection() as connection:
             rows = connection.execute(
-                "SELECT * FROM transfer_records ORDER BY datetime(updated_at) DESC, rowid DESC"
+                "SELECT * FROM transfer_records "
+                "ORDER BY datetime(COALESCE(NULLIF(started_at, ''), created_at)) DESC, rowid DESC"
             ).fetchall()
     return [_transfer_row_to_dict(row) for row in rows]
 
@@ -9432,9 +9523,9 @@ def upsert_transfer_record(record):
                 """
                 INSERT INTO transfer_records (
                     record_id, job_id, slot_id, slot_label, order_no, state, status,
-                    distributor, started_at, finished_at, elapsed, transfer_type, remark,
+                    distributor, started_at, finished_at, elapsed, transfer_type, remark, actor, barcodes_json,
                     logs_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(record_id) DO UPDATE SET
                     job_id=excluded.job_id,
                     slot_id=excluded.slot_id,
@@ -9448,6 +9539,8 @@ def upsert_transfer_record(record):
                     elapsed=excluded.elapsed,
                     transfer_type=excluded.transfer_type,
                     remark=excluded.remark,
+                    actor=excluded.actor,
+                    barcodes_json=excluded.barcodes_json,
                     logs_json=excluded.logs_json,
                     updated_at=excluded.updated_at
                 """,
@@ -9456,7 +9549,9 @@ def upsert_transfer_record(record):
                     normalized["slot_label"], normalized["order_no"], normalized["state"],
                     normalized["status"], normalized["distributor"], normalized["started_at"],
                     normalized["finished_at"], normalized["elapsed"], normalized["transfer_type"],
-                    normalized["remark"], json.dumps(normalized["logs"], ensure_ascii=False),
+                    normalized["remark"], normalized["actor"],
+                    json.dumps(normalized["barcodes"], ensure_ascii=False),
+                    json.dumps(normalized["logs"], ensure_ascii=False),
                     normalized["created_at"], normalized["updated_at"],
                 ),
             )
@@ -9553,6 +9648,8 @@ def _sync_transfer_record_from_job(job_id):
         'elapsed': elapsed,
         'transfer_type': snapshot.get('transfer_type') or '',
         'remark': snapshot.get('remark') or '',
+        'barcodes': snapshot.get('barcodes') or [],
+        'actor': snapshot.get('actor') or '',
         'logs': logs,
     })
 
@@ -10962,8 +11059,6 @@ def api_clear_transfer_records():
 @app.route("/api/transfer/summary/start", methods=["POST"])
 def api_transfer_summary_start():
     data = request.get_json() or {}
-    slot_id = _request_slot_id("transfer")
-    worker = crm_pool.get(slot_id, "transfer")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
@@ -10972,23 +11067,27 @@ def api_transfer_summary_start():
     if not barcodes:
         return jsonify({'success': False, 'error': '输入的条码都是拆机条码，无需移库' if excluded else '请先选择要移库的条码', 'excluded': excluded})
 
-    with summary_job_lock:
-        running_job_id = latest_summary_job_by_slot.get(slot_id)
-        running_job = summary_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({'success': False, 'error': f'{slot_id} 已有汇总预览正在执行，请等待完成'})
-        job = _empty_summary_job(slot_id)
-        job.update({
-            'running': True,
-            'done': False,
-            'success': False,
-            'error': '',
-            'summary': None,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'finished_at': '',
-        })
-        summary_jobs[job['job_id']] = job
-        latest_summary_job_by_slot[slot_id] = job['job_id']
+    with transfer_slot_dispatch_lock:
+        worker, slot_id, _slot_label, selection_error = _transfer_worker_for_request(data)
+        if not worker:
+            return jsonify({'success': False, 'error': selection_error}), 409
+        with summary_job_lock:
+            running_job_id = latest_summary_job_by_slot.get(slot_id)
+            running_job = summary_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({'success': False, 'error': f'{slot_id} 已有汇总预览正在执行，请等待完成'})
+            job = _empty_summary_job(slot_id)
+            job.update({
+                'running': True,
+                'done': False,
+                'success': False,
+                'error': '',
+                'summary': None,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'finished_at': '',
+            })
+            summary_jobs[job['job_id']] = job
+            latest_summary_job_by_slot[slot_id] = job['job_id']
 
     threading.Thread(
         target=_run_summary_job,
@@ -11022,8 +11121,6 @@ def api_transfer_summary_status():
 @app.route("/api/crm/transfer", methods=["POST"])
 def api_crm_transfer():
     data = request.get_json() or {}
-    slot_id = _request_slot_id("transfer")
-    worker = crm_pool.get(slot_id, "transfer")
     barcodes = data.get('barcodes') or []
     barcodes = normalize_input_barcodes(barcodes)
     barcodes, excluded = filter_disassembly_barcodes(barcodes)
@@ -11037,46 +11134,55 @@ def api_crm_transfer():
     if not distributor:
         return jsonify({'success': False, 'error': '目标分销商不能为空'})
 
-    representatives = _missing_product_library_representatives(barcodes)
-    if representatives:
-        ready, ready_message = _crm_ready_for_auto_query(worker)
-        if not ready:
-            return jsonify({'success': False, 'error': ready_message})
-        ensure_product_library_for_barcodes(barcodes, None, worker)
+    with transfer_slot_dispatch_lock:
+        worker, slot_id, slot_label, selection_error = _transfer_worker_for_request(data)
+        if not worker:
+            return jsonify({'success': False, 'error': selection_error}), 409
 
-    summary = build_transfer_summary(barcodes, transfer_type, distributor)
-    summary['excluded'] = excluded
-    _exclude_unmatched_transfer_barcodes(summary)
-    if not summary.get('groups'):
-        return jsonify({
-            'success': False,
-            'error': '本次没有可移库条码，未匹配到产品信息的条码已临时排除',
-            'summary': summary,
-        })
-    if summary['missing']:
-        return jsonify({'success': False, 'error': '部分条码没有查询结果，也没有匹配到条码前缀，请先维护条码匹配或查询一次该产品条码', 'summary': summary})
-    if summary['incomplete']:
-        return jsonify({'success': False, 'error': '部分条码缺少产品名称或产品编码，无法自动移库', 'summary': summary})
+        representatives = _missing_product_library_representatives(barcodes)
+        if representatives:
+            ready, ready_message = _crm_ready_for_auto_query(worker)
+            if not ready:
+                return jsonify({'success': False, 'error': ready_message})
+            ensure_product_library_for_barcodes(barcodes, None, worker)
 
-    with transfer_job_lock:
-        running_job_id = latest_transfer_job_by_slot.get(slot_id)
-        running_job = transfer_jobs.get(running_job_id)
-        if running_job and running_job.get('running'):
-            return jsonify({'success': False, 'error': f'{slot_id} 已有移库任务正在执行，请等待完成后再提交'})
-        job = _empty_transfer_job(slot_id, summary, distributor, transfer_type, remark)
-        job.update({
-            'record_id': record_id,
-            'slot_label': _transfer_slot_label(slot_id),
-            'running': True,
-            'done': False,
-            'success': False,
-            'error': '',
-            'result': None,
-            'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'finished_at': '',
-        })
-        transfer_jobs[job['job_id']] = job
-        latest_transfer_job_by_slot[slot_id] = job['job_id']
+        summary = build_transfer_summary(barcodes, transfer_type, distributor)
+        summary['excluded'] = excluded
+        _exclude_unmatched_transfer_barcodes(summary)
+        if not summary.get('groups'):
+            return jsonify({
+                'success': False,
+                'error': '本次没有可移库条码，未匹配到产品信息的条码已临时排除',
+                'summary': summary,
+            })
+        if summary['missing']:
+            return jsonify({'success': False, 'error': '部分条码没有查询结果，也没有匹配到条码前缀，请先维护条码匹配或查询一次该产品条码', 'summary': summary})
+        if summary['incomplete']:
+            return jsonify({'success': False, 'error': '部分条码缺少产品名称或产品编码，无法自动移库', 'summary': summary})
+
+        actor = _clean_export_value((current_account() or {}).get('username'))
+        with transfer_job_lock:
+            running_job_id = latest_transfer_job_by_slot.get(slot_id)
+            running_job = transfer_jobs.get(running_job_id)
+            if running_job and running_job.get('running'):
+                return jsonify({'success': False, 'error': f'{slot_id} 已有移库任务正在执行，请等待完成后再提交'})
+            job = _empty_transfer_job(
+                slot_id, summary, distributor, transfer_type, remark,
+                barcodes=barcodes, actor=actor,
+            )
+            job.update({
+                'record_id': record_id,
+                'slot_label': slot_label,
+                'running': True,
+                'done': False,
+                'success': False,
+                'error': '',
+                'result': None,
+                'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'finished_at': '',
+            })
+            transfer_jobs[job['job_id']] = job
+            latest_transfer_job_by_slot[slot_id] = job['job_id']
 
     _sync_transfer_record_from_job(job['job_id'])
     threading.Thread(
@@ -11125,6 +11231,8 @@ def api_crm_transfer_status():
             'error': job['error'],
             'message': message,
             'order_no': order_no,
+            'actor': job.get('actor') or '',
+            'barcodes': list(job.get('barcodes') or []),
             'result': job['result'],
             'summary': job['summary'],
             'transfer': {

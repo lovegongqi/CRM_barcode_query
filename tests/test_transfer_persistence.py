@@ -1,6 +1,8 @@
 import os
 import tempfile
 import unittest
+from datetime import datetime
+from unittest import mock
 
 import app as app_module
 
@@ -43,6 +45,8 @@ class TransferPersistenceTests(unittest.TestCase):
             "elapsed": 1098,
             "transfer_type": "移出",
             "remark": "测试备注",
+            "actor": "admin",
+            "barcodes": ["435250509H274", "340240520063"],
             "logs": [{"time": "10:18:18", "message": "移库单已保存", "level": "success"}],
         }
 
@@ -65,6 +69,11 @@ class TransferPersistenceTests(unittest.TestCase):
         self.assertTrue(login.get_json()["success"])
         reloaded = second.get("/api/transfer-records")
         self.assertEqual(reloaded.get_json()["records"][0]["record_id"], "transfer-test-1")
+        self.assertEqual(
+            reloaded.get_json()["records"][0]["barcodes"],
+            ["435250509H274", "340240520063"],
+        )
+        self.assertEqual(reloaded.get_json()["records"][0]["actor"], "admin")
 
     def test_update_delete_one_and_clear_all_are_explicit(self):
         self.client.post("/api/transfer-records", json=self.record("one"))
@@ -88,6 +97,24 @@ class TransferPersistenceTests(unittest.TestCase):
         cleared = self.client.delete("/api/transfer-records")
         self.assertEqual(cleared.status_code, 200)
         self.assertEqual(self.client.get("/api/transfer-records").get_json()["records"], [])
+
+    def test_log_updates_do_not_move_older_submission_above_newer_submission(self):
+        older = self.record("older")
+        older["started_at"] = "2026-09-23 10:00:00"
+        newer = self.record("newer")
+        newer["started_at"] = "2026-09-23 11:00:00"
+
+        with mock.patch.object(app_module, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 9, 23, 10, 0, 1)
+            self.client.post("/api/transfer-records", json=older)
+            clock.now.return_value = datetime(2026, 9, 23, 11, 0, 1)
+            self.client.post("/api/transfer-records", json=newer)
+            clock.now.return_value = datetime(2026, 9, 23, 12, 0, 1)
+            older["logs"].append({"time": "12:00:01", "message": "日志刷新", "level": "info"})
+            self.client.post("/api/transfer-records", json=older)
+
+        records = self.client.get("/api/transfer-records").get_json()["records"]
+        self.assertEqual([row["record_id"] for row in records], ["newer", "older"])
 
     def test_transfer_records_api_skips_unchanged_payloads(self):
         initial = self.client.get("/api/transfer-records").get_json()

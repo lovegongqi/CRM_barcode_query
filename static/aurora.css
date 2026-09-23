@@ -453,34 +453,6 @@ body[data-aurora-page="results"] .date-clear-btn {
     height: 34px;
 }
 
-body[data-aurora-page="transfer"] .slot-tab {
-    color: #9eb5c4 !important;
-    background: rgba(6, 17, 30, .78) !important;
-    border-color: rgba(139, 190, 220, .17) !important;
-    box-shadow: inset 0 1px rgba(255, 255, 255, .025) !important;
-}
-
-body[data-aurora-page="transfer"] .slot-tab:hover,
-body[data-aurora-page="transfer"] .slot-tab:focus-visible {
-    color: #e2f8fd !important;
-    background: rgba(48, 145, 190, .13) !important;
-    border-color: rgba(87, 227, 255, .31) !important;
-    outline: none;
-}
-
-body[data-aurora-page="transfer"] .slot-tab.active {
-    color: #03131c !important;
-    background: linear-gradient(135deg, #65e8fa, #6b91ff) !important;
-    border-color: transparent !important;
-    box-shadow: 0 9px 22px rgba(44, 156, 225, .20) !important;
-}
-
-body[data-aurora-page="transfer"] .slot-tab.busy:not(.active) {
-    color: #ffd57c !important;
-    border-color: rgba(255, 208, 111, .32) !important;
-    background: rgba(255, 208, 111, .07) !important;
-}
-
 /* Dark-theme guard for legacy controls and surfaces that still declare light fills. */
 body[data-aurora-page] .stepper button,
 body[data-aurora-page] .btn-default,
@@ -491,7 +463,6 @@ body[data-aurora-page] .modal-close,
 body[data-aurora-page] .global-log-small,
 body[data-aurora-page] .global-log-close,
 body[data-aurora-page] .dropdown-actions button,
-body[data-aurora-page] .transfer-slot-option,
 body[data-aurora-page] .tab-btn:not(.active) {
     color: #a9bfcd !important;
     background: var(--aurora-control-bg) !important;
@@ -508,17 +479,10 @@ body[data-aurora-page] .modal-close:hover,
 body[data-aurora-page] .global-log-small:hover,
 body[data-aurora-page] .global-log-close:hover,
 body[data-aurora-page] .dropdown-actions button:hover,
-body[data-aurora-page] .transfer-slot-option:not(.busy):hover,
 body[data-aurora-page] .tab-btn:not(.active):hover {
     color: #e2f8fd !important;
     background: var(--aurora-control-hover) !important;
     border-color: rgba(87, 227, 255, .30) !important;
-}
-
-body[data-aurora-page] .transfer-slot-option.busy {
-    color: #627b8d !important;
-    background: rgba(7, 17, 30, .58) !important;
-    border-color: rgba(139, 190, 220, .10) !important;
 }
 
 body[data-aurora-page] .remark-popup,
@@ -714,14 +678,20 @@ body[data-aurora-page] #detailFrame {
 .aurora-log-preview { width: 100%; min-width: 0; min-height: 30px; padding: 5px 9px; display: block; overflow: hidden; color: #aeeefa; background: rgba(62, 198, 230, .07); border: 1px solid rgba(87, 227, 255, .12); border-radius: 8px; cursor: pointer; font-size: 11px; line-height: 18px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
 .aurora-log-preview:hover, .aurora-log-preview:focus-visible { color: #e1fbff; border-color: rgba(87, 227, 255, .48); background: rgba(62, 198, 230, .13); outline: none; }
 .aurora-transfer-table code { color: #dcf7ff; font: 11px/1.4 "SFMono-Regular", Consolas, monospace; }
-.aurora-transfer-table { width: 100%; min-width: 980px; table-layout: fixed; }
+.aurora-transfer-table { width: 100%; min-width: 1120px; table-layout: fixed; }
 .aurora-transfer-table th:first-child, .aurora-transfer-table td:first-child { width: 48px; text-align: center; }
 .aurora-transfer-table th:nth-child(2), .aurora-transfer-table td:nth-child(2) { width: 120px; }
 .aurora-transfer-table th:nth-child(3), .aurora-transfer-table td:nth-child(3) { width: 210px; }
 .aurora-transfer-table th:nth-child(4), .aurora-transfer-table td:nth-child(4) { width: auto; min-width: 0; }
-.aurora-transfer-table th:nth-child(5), .aurora-transfer-table td:nth-child(5) { width: 180px; }
-.aurora-transfer-table th:nth-child(6), .aurora-transfer-table td:nth-child(6) { width: 90px; }
-.aurora-transfer-table th:nth-child(7), .aurora-transfer-table td:nth-child(7) { width: 82px; text-align: right; }
+.aurora-transfer-table th:nth-child(5), .aurora-transfer-table td:nth-child(5) { width: 170px; }
+.aurora-transfer-table th:nth-child(6), .aurora-transfer-table td:nth-child(6) { width: 180px; }
+.aurora-transfer-table th:nth-child(7), .aurora-transfer-table td:nth-child(7) { width: 90px; }
+.aurora-transfer-table th:nth-child(8), .aurora-transfer-table td:nth-child(8) { width: 82px; text-align: right; }
+.transfer-record-operator strong,
+.transfer-record-operator small { display: block; }
+.transfer-record-operator strong { color: #dff8ff; font-size: 12px; }
+.transfer-record-operator small { margin-top: 3px; color: var(--aurora-muted); font: 10px/1.35 "SFMono-Regular", Consolas, monospace; white-space: nowrap; }
+.transfer-login-status { min-height: 34px; padding: 0 10px; display: inline-flex; align-items: center; border: 1px solid rgba(139, 190, 220, .16); border-radius: 9px; color: #a9bfcd !important; background: rgba(8, 22, 38, .58); white-space: nowrap; }
 body[data-aurora-page="transfer"] .summary,
 body[data-aurora-page="transfer"] .note,
 body[data-aurora-page="transfer"] .login-modal {
@@ -811,6 +781,8 @@ body[data-aurora-page="results"] .aurora-results-grid {
 .aurora-log-panel { width: min(720px, 100%); max-height: min(720px, 88vh); overflow: hidden; display: flex; flex-direction: column; border-radius: 20px; color: var(--aurora-text); background: linear-gradient(145deg, rgba(15, 32, 54, .98), rgba(7, 17, 31, .98)); border: 1px solid rgba(95, 229, 255, .23); box-shadow: 0 30px 100px rgba(0, 0, 0, .58); }
 .aurora-log-titlebar { min-height: 66px; padding: 14px 18px; display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 1px solid var(--aurora-line); }
 .aurora-log-titlebar small { display: block; margin-top: 4px; color: var(--aurora-muted); }
+.aurora-log-reuse { margin-left: auto; min-height: 36px; padding: 0 12px; border: 1px solid rgba(87, 227, 255, .34); border-radius: 10px; color: #89efff; background: rgba(31, 177, 208, .12); font-weight: 800; cursor: pointer; }
+.aurora-log-reuse:hover, .aurora-log-reuse:focus-visible { color: #e6fcff; border-color: rgba(87, 227, 255, .68); background: rgba(31, 177, 208, .2); outline: none; }
 .aurora-log-close { width: 36px; height: 36px; min-height: 36px !important; border: 1px solid var(--aurora-line); border-radius: 10px; color: #a5bac8; background: rgba(6, 16, 29, .65); cursor: pointer; }
 .aurora-log-meta { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 18px 0; }
 .aurora-log-meta span { padding: 5px 9px; color: #9eb6c5; background: rgba(7, 18, 32, .72); border: 1px solid var(--aurora-line); border-radius: 8px; font-size: 11px; }
@@ -1088,17 +1060,6 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     body[data-aurora-page="transfer"] .fields,
     body[data-aurora-page="transfer"] .actions,
     body[data-aurora-page="transfer"] textarea { min-width: 0; max-width: 100%; }
-    body[data-aurora-page="transfer"] .slot-tabs {
-        display: grid !important;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        width: 100%;
-    }
-    body[data-aurora-page="transfer"] .slot-tab {
-        width: 100%;
-        min-width: 0;
-        padding: 7px 5px;
-        font-size: 11px;
-    }
     body[data-aurora-page="transfer"] .actions {
         display: grid;
         grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1144,16 +1105,18 @@ body[data-aurora-page="no-permission"] .container { min-height: 100vh; padding: 
     body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(1),
     body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(2),
     body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(2),
-    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(6),
-    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(6) { display: none; }
-    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(3),
-    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(3) { width: 35%; }
-    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(4),
-    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(4) { width: 25%; }
-    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(5),
-    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(5) { width: 28%; }
     body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(7),
-    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(7) { width: 12%; text-align: right; white-space: nowrap; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(7) { display: none; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(3),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(3) { width: 25%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(4),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(4) { width: 20%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(5),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(5) { width: 22%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(6),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(6) { width: 23%; }
+    body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(8),
+    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(8) { width: 10%; text-align: right; white-space: nowrap; }
     body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(3) code { white-space: normal; overflow-wrap: anywhere; }
     body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(4) .aurora-status-button { width: 100%; min-width: 0; justify-content: center; padding: 4px 3px; font-size: 10px; white-space: nowrap; }
     .aurora-library-query-table { min-width: 620px; }

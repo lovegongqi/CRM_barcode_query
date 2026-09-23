@@ -526,10 +526,6 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         mobile_css = css.split("@media (max-width: 720px)", 1)[1]
         self.assertRegex(
             mobile_css,
-            r'body\[data-aurora-page="transfer"\] \.slot-tabs\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)',
-        )
-        self.assertRegex(
-            mobile_css,
             r'body\[data-aurora-page="transfer"\] \.actions\s*\{[^}]*grid-template-columns:\s*repeat\(3,\s*minmax\(0,\s*1fr\)',
         )
         self.assertRegex(
@@ -542,8 +538,8 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             mobile_css,
         )
         self.assertIn(
-            'body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(6),\n'
-            '    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(6) { display: none; }',
+            'body[data-aurora-page="transfer"] .aurora-transfer-table th:nth-child(7),\n'
+            '    body[data-aurora-page="transfer"] .aurora-transfer-table td:nth-child(7) { display: none; }',
             mobile_css,
         )
         self.assertRegex(
@@ -1725,7 +1721,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertNotIn("AUTO REFRESH", source)
         self.assertIn("clearTransferRealtimeRecords()", source)
         self.assertIn("<th>操作</th>", source)
-        self.assertIn('colspan="7"', source)
+        self.assertIn('colspan="8"', source)
         self.assertIn("crm_transfer_realtime_records_v2", source)
         self.assertIn("transferRealtimeRecords.unshift", source)
         self.assertNotIn("transferSlots.forEach(ensureTransferRecord)", source)
@@ -1753,17 +1749,19 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             source,
         )
 
-    def test_transfer_slot_tabs_use_dark_glass_theme(self):
-        css = (STATIC / "aurora.css").read_text(encoding="utf-8")
-        self.assertIn('body[data-aurora-page="transfer"] .slot-tab {', css)
-        self.assertIn('body[data-aurora-page="transfer"] .slot-tab.active {', css)
+    def test_transfer_page_uses_automatic_channel_assignment(self):
+        transfer = self.source("transfer.html")
+        results = self.source("index.html")
+        self.assertNotIn('id="transferSlotTabs"', transfer)
+        self.assertNotIn('id="transferSlotModal"', results)
+        self.assertIn("transferPayloadForSlot('', {", transfer)
+        self.assertIn("openTransferInSlot();", results)
 
     def test_legacy_light_surfaces_are_overridden_by_dark_theme(self):
         css = (STATIC / "aurora.css").read_text(encoding="utf-8")
         for selector in (
             "body[data-aurora-page] .stepper button",
             "body[data-aurora-page] .remark-popup",
-            "body[data-aurora-page] .transfer-slot-option",
             "body[data-aurora-page] .global-log-modal",
             "body[data-aurora-page] .note",
             'body[data-aurora-page="product-library"] .lookup-result-table tr',

@@ -108,11 +108,7 @@
         .distributor-delete { flex:0 0 auto; margin-right:6px; min-height:26px; padding:3px 8px; border:1px solid #fecaca; border-radius:6px; background:#fff1f2; color:#b91c1c; font-size:12px; font-weight:800; cursor:pointer; }
         .distributor-delete:hover { background:#fee2e2; }
         .distributor-empty { padding:9px 10px; font-size:13px; color:#94a3b8; }
-        .slot-tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
-        .slot-tab { flex:0 0 auto; min-width:96px; min-height:34px; padding:7px 10px; border:1px solid #cfd8e3; border-radius:8px; background:#fff; color:#334155; font-size:13px; line-height:1.15; font-weight:800; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-        .slot-tab.active { background:#0f766e; color:#fff; border-color:#0f766e; }
-        .slot-tab.busy { border-color:#f59e0b; box-shadow:0 0 0 3px rgba(245,158,11,.12); }
-        @media (max-width: 860px) { .container { padding:14px; } .grid, .fields { grid-template-columns:1fr; } .slot-tabs { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); } .slot-tab { width:100%; min-width:0; padding:7px 6px; font-size:clamp(10px, 2.6vw, 13px); } }
+        @media (max-width: 860px) { .container { padding:14px; } .grid, .fields { grid-template-columns:1fr; } }
     </style>
     <link rel="stylesheet" href="/static/app_layout.css">
     <link rel="stylesheet" href="/static/aurora.css">
@@ -133,15 +129,14 @@
         </div>
     </div>
 
+    {% if not is_desktop_app %}
     <div class="status-bar aurora-account-status">
-        <div class="status-text"><span class="dot" id="loginDot"></span>CRM 登录状态：<span id="loginStatus">检测中</span></div>
-        {% if not is_desktop_app %}
         <div class="aurora-account-session">
             <span class="aurora-account-name" id="appAccountStatus">检测中</span>
             <a class="aurora-account-logout" href="/logout">退出工具账号</a>
         </div>
-        {% endif %}
     </div>
+    {% endif %}
 
     <div class="grid">
         <div>
@@ -149,11 +144,11 @@
                 <div class="card-head">
                     <h2>提交移库</h2>
                     <div class="crm-actions">
+                        <div class="status-text transfer-login-status"><span class="dot" id="loginDot"></span>CRM：<span id="loginStatus">检测中</span></div>
                         <button class="btn btn-primary" id="loginBtn" onclick="openLoginModal()">批量登录 CRM</button>
                         <button class="btn btn-danger" id="logoutBtn" onclick="doLogout()" style="display:none">退出登录</button>
                     </div>
                 </div>
-                <div class="slot-tabs" id="transferSlotTabs"></div>
                 <label>条码列表</label>
                 <textarea id="barcodeInput" placeholder="每行一个条码，也可以用逗号、空格混合分隔" oninput="saveTransferInput()" inputmode="latin" lang="en" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" style="ime-mode:inactive"></textarea>
                 <div class="fields">
@@ -218,8 +213,8 @@
                 </div>
                 <div class="aurora-query-table-wrap">
                     <table class="aurora-transfer-table">
-                        <thead><tr><th>#</th><th>通道</th><th>生成的移库单号</th><th>实时状态</th><th>目标分销商</th><th>耗时</th><th>操作</th></tr></thead>
-                        <tbody id="transferRealtimeRows"><tr><td colspan="7"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr></tbody>
+                        <thead><tr><th>#</th><th>通道</th><th>生成的移库单号</th><th>实时状态</th><th>操作信息</th><th>目标分销商</th><th>耗时</th><th>操作</th></tr></thead>
+                        <tbody id="transferRealtimeRows"><tr><td colspan="8"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr></tbody>
                     </table>
                 </div>
                 <div class="log aurora-raw-log" id="transferLog" aria-hidden="true"><div class="dim">等待操作...</div></div>
@@ -364,7 +359,9 @@ function saveCrmCredentials(username, password, rememberId='rememberCrmLogin') {
 }
 
 function transferPayloadForSlot(slotId, extra={}) {
-    return Object.assign({slot_id: slotId, kind: 'transfer'}, extra);
+    const payload = Object.assign({kind: 'transfer'}, extra);
+    if (slotId) payload.slot_id = slotId;
+    return payload;
 }
 
 function slotLoginPayload(slot, extra={}) {
@@ -471,24 +468,27 @@ function findActiveTransferRecord(slotId, jobId='') {
 }
 
 function createTransferRealtimeRecord(slotId, distributor) {
+    const barcodes = parseBarcodes();
     const record = {
         record_id: transferRecordId(),
         job_id: '',
         slot_id: slotId,
-        slot_label: slotLabel(slotId),
+        slot_label: slotId ? slotLabel(slotId) : '自动分配',
         order_no: '',
         state: 'running',
         status: '正在创建移库任务',
         distributor: distributor || '',
         transfer_type: document.getElementById('transferType')?.value || '移出',
         remark: document.getElementById('transferRemark')?.value.trim() || '',
+        barcodes,
+        actor: document.getElementById('appAccountStatus')?.textContent.trim() || '',
         started_at: new Date().toISOString(),
         finished_at: '',
         elapsed: 0,
         logs: []
     };
     transferRealtimeRecords.unshift(record);
-    sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
+    if (slotId) sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, record.record_id);
     saveTransferRealtimeRecords();
     renderTransferRealtimeRecords();
     scheduleTransferRealtimeRefresh(1000);
@@ -524,6 +524,8 @@ function updateTransferRealtimeRecord(recordId, jobData={}, logs=[]) {
     record.job_id = jobData.job_id || record.job_id;
     record.started_at = jobData.started_at || record.started_at;
     record.finished_at = jobData.finished_at || record.finished_at;
+    record.actor = jobData.actor || record.actor || '';
+    record.barcodes = Array.isArray(jobData.barcodes) && jobData.barcodes.length ? jobData.barcodes : (record.barcodes || []);
     record.distributor = (jobData.transfer && jobData.transfer.distributor) || record.distributor || document.getElementById('transferDistributor')?.value.trim() || '';
     record.order_no = jobData.order_no || (jobData.result && jobData.result.order_no) || record.order_no || '';
     if ('transfer_success' in jobData) {
@@ -546,7 +548,7 @@ function renderTransferRealtimeRecords() {
     const body = document.getElementById('transferRealtimeRows');
     if (!body) return;
     if (!transferRealtimeRecords.length) {
-        body.innerHTML = '<tr><td colspan="7"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr>';
+        body.innerHTML = '<tr><td colspan="8"><div class="aurora-empty">提交移库后，将在这里显示记录</div></td></tr>';
         return;
     }
     body.innerHTML = transferRealtimeRecords.map((record, index) => {
@@ -557,11 +559,17 @@ function renderTransferRealtimeRecords() {
             <td>${escapeHtml(record.slot_label || record.slot_id)}</td>
             <td><code>${escapeHtml(record.order_no || '—')}</code></td>
             <td><button type="button" class="aurora-status-button ${stateClass}" onclick="openTransferChannelLog('${escapeHtml(record.record_id)}')">${escapeHtml(record.status)}</button></td>
+            <td class="transfer-record-operator"><strong>${escapeHtml(record.actor || '—')}</strong><small>${escapeHtml(formatTransferSubmittedAt(record.started_at))}</small></td>
             <td>${escapeHtml(record.distributor || '—')}</td>
             <td>${elapsed ? escapeHtml(jobDurationText(elapsed)) : '—'}</td>
             <td><button type="button" class="aurora-row-action danger" onclick="deleteTransferRealtimeRecord('${escapeHtml(record.record_id)}')">删除</button></td>
         </tr>`;
     }).join('');
+}
+
+function formatTransferSubmittedAt(value) {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return match ? `${match[1]}/${match[2]}/${match[3]}` : (value || '—');
 }
 
 function jobDurationText(seconds) {
@@ -578,6 +586,38 @@ function openTransferChannelLog(recordId) {
         '目标分销商': record.distributor || '—',
         '耗时': transferElapsed(record) ? jobDurationText(transferElapsed(record)) : '—'
     }, '通道完整移库日志', `transfer:${record.record_id}`);
+    renderTransferLogReuseAction(record);
+}
+
+function renderTransferLogReuseAction(record) {
+    const titlebar = document.querySelector('#auroraLogDialog .aurora-log-titlebar');
+    if (!titlebar) return;
+    const previous = titlebar.querySelector('.aurora-log-reuse');
+    if (previous) previous.remove();
+    const barcodes = Array.isArray(record && record.barcodes) ? record.barcodes.filter(Boolean) : [];
+    if (!barcodes.length || ['running', 'waiting'].includes(String(record.state || '').toLowerCase())) return;
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'aurora-log-reuse';
+    button.textContent = '复用移库信息';
+    button.addEventListener('click', () => reuseTransferRecord(record.record_id));
+    titlebar.insertBefore(button, titlebar.querySelector('.aurora-log-close'));
+}
+
+function reuseTransferRecord(recordId) {
+    const record = findTransferRecord(recordId);
+    const barcodes = Array.isArray(record && record.barcodes) ? record.barcodes.filter(Boolean) : [];
+    if (!record || !barcodes.length) return;
+    stopActivePolling();
+    document.getElementById('barcodeInput').value = Array.from(new Set(barcodes.map(String))).join('\n');
+    document.getElementById('transferDistributor').value = record.distributor || '';
+    document.getElementById('transferType').value = record.transfer_type || '移出';
+    document.getElementById('transferRemark').value = record.remark || '';
+    hidePreviewLog();
+    resetTransferActionUi();
+    saveTransferInput();
+    closeAuroraLog();
+    document.getElementById('barcodeInput').focus();
 }
 
 function refreshTransferChannelLog(record) {
@@ -627,50 +667,21 @@ async function loadSlots() {
         currentTransferSlot = (data.defaults && data.defaults.transfer) || (transferSlots[0] && transferSlots[0].id) || 'transfer-1';
         localStorage.setItem('crm_transfer_slot', currentTransferSlot);
     }
-    renderTransferSlots();
     renderTransferRealtimeRecords();
 }
 
-function renderTransferSlots() {
-    const box = document.getElementById('transferSlotTabs');
-    if (!box) return;
-    box.innerHTML = transferSlots.map(slot => {
-        const active = slot.id === currentTransferSlot ? ' active' : '';
-        const busy = slot.browser_running && !slot.logged_in ? ' busy' : '';
-        const status = slot.logged_in ? '已登录' : (slot.browser_running ? '未登录' : '未启动');
-        return `<button class="slot-tab${active}${busy}" onclick="switchTransferSlot('${slot.id}')">${slot.label} · ${status}</button>`;
-    }).join('');
-}
-
-function switchTransferSlot(slotId) {
-    if (slotId === currentTransferSlot) return;
-    saveTransferInput();
-    stopActivePolling();
-    currentTransferSlot = slotId;
-    localStorage.setItem('crm_transfer_slot', currentTransferSlot);
-    currentSummaryJobId = sessionStorage.getItem(`crm_summary_job_id_${currentTransferSlot}`) || '';
-    currentTransferJobId = sessionStorage.getItem(`crm_transfer_job_id_${currentTransferSlot}`) || '';
-    lastRenderedLogKey = '';
-    resetTransferActionUi();
-    document.getElementById('transferLog').innerHTML = '<div class="dim">等待操作...</div>';
-    restoreTransferInput();
-    renderTransferSlots();
-    refreshCrmStatus();
-    resumeBackgroundJobs();
-}
-
 function saveTransferInput() {
-    sessionStorage.setItem(`transfer_page_input_${currentTransferSlot}`, document.getElementById('barcodeInput').value);
-    sessionStorage.setItem(`transfer_page_distributor_${currentTransferSlot}`, document.getElementById('transferDistributor').value);
-    sessionStorage.setItem(`transfer_page_type_${currentTransferSlot}`, document.getElementById('transferType').value);
-    sessionStorage.setItem(`transfer_page_remark_${currentTransferSlot}`, document.getElementById('transferRemark').value);
+    sessionStorage.setItem('transfer_page_input', document.getElementById('barcodeInput').value);
+    sessionStorage.setItem('transfer_page_distributor', document.getElementById('transferDistributor').value);
+    sessionStorage.setItem('transfer_page_type', document.getElementById('transferType').value);
+    sessionStorage.setItem('transfer_page_remark', document.getElementById('transferRemark').value);
 }
 
 function restoreTransferInput() {
-    document.getElementById('barcodeInput').value = sessionStorage.getItem(`transfer_page_input_${currentTransferSlot}`) || '';
-    document.getElementById('transferDistributor').value = sessionStorage.getItem(`transfer_page_distributor_${currentTransferSlot}`) || '';
-    document.getElementById('transferType').value = sessionStorage.getItem(`transfer_page_type_${currentTransferSlot}`) || '移出';
-    document.getElementById('transferRemark').value = sessionStorage.getItem(`transfer_page_remark_${currentTransferSlot}`) || '';
+    document.getElementById('barcodeInput').value = sessionStorage.getItem('transfer_page_input') || '';
+    document.getElementById('transferDistributor').value = sessionStorage.getItem('transfer_page_distributor') || '';
+    document.getElementById('transferType').value = sessionStorage.getItem('transfer_page_type') || '移出';
+    document.getElementById('transferRemark').value = sessionStorage.getItem('transfer_page_remark') || '';
 }
 
 function escapeHtml(text) {
@@ -967,10 +978,10 @@ function clearForm() {
     document.getElementById('transferType').value = '移出';
     document.getElementById('transferRemark').value = '';
     hidePreviewLog();
-    sessionStorage.removeItem(`transfer_page_input_${currentTransferSlot}`);
-    sessionStorage.removeItem(`transfer_page_distributor_${currentTransferSlot}`);
-    sessionStorage.removeItem(`transfer_page_type_${currentTransferSlot}`);
-    sessionStorage.removeItem(`transfer_page_remark_${currentTransferSlot}`);
+    sessionStorage.removeItem('transfer_page_input');
+    sessionStorage.removeItem('transfer_page_distributor');
+    sessionStorage.removeItem('transfer_page_type');
+    sessionStorage.removeItem('transfer_page_remark');
     sessionStorage.removeItem(`crm_summary_job_id_${currentTransferSlot}`);
     currentSummaryJobId = '';
     resetTransferActionUi();
@@ -1073,8 +1084,8 @@ function openTransferSummaryFailures() {
 }
 
 async function ensureCrmLoggedIn(actionText) {
-    const data = await fetch('/api/crm/status?kind=transfer&slot_id=' + encodeURIComponent(currentTransferSlot)).then(r => r.json()).catch(() => ({}));
-    if (data.logged_in) return true;
+    await loadSlots();
+    if (transferSlots.some(slot => slot.logged_in)) return true;
     const message = `CRM 未登录，不能${actionText}。请先批量登录 CRM。`;
     appendLog(message, 'error');
     openLoginModal();
@@ -1303,11 +1314,9 @@ async function doLogout() {
 }
 
 async function previewTransfer() {
-    const slotId = currentTransferSlot;
     const barcodes = parseBarcodes();
     if (!barcodes.length) return alert('请输入条码');
     if (!await ensureCrmLoggedIn('汇总预览')) return;
-    if (slotId !== currentTransferSlot) return;
     const previewBtn = document.getElementById('previewBtn');
     const submitBtn = document.getElementById('submitBtn');
     previewBtn.disabled = true;
@@ -1319,7 +1328,7 @@ async function previewTransfer() {
     appendLog('开始汇总预览，缺少条码匹配前缀时会自动查询代表条码...', 'info');
     let data = null;
     try {
-        const payload = JSON.stringify(transferPayloadForSlot(slotId, {
+        const payload = JSON.stringify(transferPayloadForSlot('', {
             barcodes,
             transfer_type: document.getElementById('transferType').value,
             distributor: document.getElementById('transferDistributor').value.trim()
@@ -1332,23 +1341,28 @@ async function previewTransfer() {
         });
         data = await res.json();
     } catch (e) {
-        if (slotId === currentTransferSlot) {
-            appendLog('启动汇总请求被中断，正在检查后台任务状态...', 'warn');
-            startSummaryPolling(slotId, sessionStorage.getItem(`crm_summary_job_id_${slotId}`) || '');
-        }
+        appendLog('启动汇总请求被中断，请重试', 'error');
+        previewBtn.disabled = false;
+        previewBtn.textContent = '汇总预览';
         return;
     }
     if (!data.success) {
-        if (slotId === currentTransferSlot) {
-            appendLog(data.error || '预览失败', 'error');
-            previewBtn.disabled = false;
-            previewBtn.textContent = '汇总预览';
-        }
+        appendLog(data.error || '预览失败', 'error');
+        previewBtn.disabled = false;
+        previewBtn.textContent = '汇总预览';
         return;
     }
+    const slotId = data.slot_id || '';
+    if (!slotId) {
+        appendLog('后台未返回分配的移库通道', 'error');
+        previewBtn.disabled = false;
+        previewBtn.textContent = '汇总预览';
+        return;
+    }
+    currentTransferSlot = slotId;
+    localStorage.setItem('crm_transfer_slot', slotId);
     const jobId = data.job_id || '';
     if (jobId) sessionStorage.setItem(`crm_summary_job_id_${slotId}`, jobId);
-    if (slotId !== currentTransferSlot) return;
     currentSummaryJobId = jobId;
     startSummaryPolling(slotId, jobId);
 }
@@ -1388,19 +1402,17 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
 }
 
 async function submitTransfer() {
-    const slotId = currentTransferSlot;
     if (!lastSummary) return alert('请先汇总预览');
     const distributor = document.getElementById('transferDistributor').value.trim();
     if (!distributor) return alert('请输入目标分销商');
     if (!await ensureCrmLoggedIn('提交移库')) return;
-    if (slotId !== currentTransferSlot) return;
     document.getElementById('submitBtn').disabled = true;
-    const activeRecord = createTransferRealtimeRecord(slotId, distributor);
+    const activeRecord = createTransferRealtimeRecord('', distributor);
     appendLog('提交移库任务...', 'info', activeRecord.record_id);
     const res = await fetch('/api/crm/transfer', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(transferPayloadForSlot(slotId, {
+        body: JSON.stringify(transferPayloadForSlot('', {
             record_id: activeRecord.record_id,
             barcodes: parseBarcodes(),
             distributor,
@@ -1410,23 +1422,36 @@ async function submitTransfer() {
     });
     const data = await res.json();
     if (!data.success) {
-        if (slotId === currentTransferSlot) {
-            appendLog(data.error || '提交失败', 'error', activeRecord.record_id);
-            activeRecord.state = 'error';
-            activeRecord.status = '提交失败';
-            activeRecord.finished_at = new Date().toISOString();
-            saveTransferRealtimeRecords();
-            renderTransferRealtimeRecords();
-            document.getElementById('submitBtn').disabled = false;
-        }
+        appendLog(data.error || '提交失败', 'error', activeRecord.record_id);
+        activeRecord.state = 'error';
+        activeRecord.status = '提交失败';
+        activeRecord.finished_at = new Date().toISOString();
+        saveTransferRealtimeRecords();
+        renderTransferRealtimeRecords();
+        document.getElementById('submitBtn').disabled = false;
         return;
     }
+    const slotId = data.slot_id || '';
+    if (!slotId) {
+        appendLog('后台未返回分配的移库通道', 'error', activeRecord.record_id);
+        activeRecord.state = 'error';
+        activeRecord.status = '分配通道失败';
+        activeRecord.finished_at = new Date().toISOString();
+        saveTransferRealtimeRecords();
+        renderTransferRealtimeRecords();
+        document.getElementById('submitBtn').disabled = false;
+        return;
+    }
+    currentTransferSlot = slotId;
+    localStorage.setItem('crm_transfer_slot', slotId);
+    activeRecord.slot_id = slotId;
+    activeRecord.slot_label = slotLabel(slotId);
+    sessionStorage.setItem(`crm_transfer_record_id_${slotId}`, activeRecord.record_id);
     const jobId = data.job_id || '';
     if (jobId) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, jobId);
     activeRecord.job_id = jobId;
     saveTransferRealtimeRecords();
     submittedTransferDistributor = distributor;
-    if (slotId !== currentTransferSlot) return;
     currentTransferJobId = jobId;
     setTransferSummaryCollapsed(true);
     transferSummaryAutoCollapseJobId = jobId;
@@ -1705,15 +1730,14 @@ function loadIncomingBarcodes() {
 
 async function refreshCrmStatus() {
     await loadSlots();
-    const data = await fetch('/api/crm/status?kind=transfer&slot_id=' + encodeURIComponent(currentTransferSlot)).then(r => r.json()).catch(() => ({}));
     const dot = document.getElementById('loginDot');
     const text = document.getElementById('loginStatus');
     const loginBtn = document.getElementById('loginBtn');
     const logoutBtn = document.getElementById('logoutBtn');
     const totalSlots = transferSlots.length || 1;
     const loggedSlots = transferSlots.filter(slot => slot.logged_in).length;
-    dot.className = 'dot ' + (data.logged_in ? 'green' : 'red');
-    text.textContent = data.logged_in ? `已登录 ${loggedSlots}/${totalSlots}` : `未登录 ${loggedSlots}/${totalSlots}`;
+    dot.className = 'dot ' + (loggedSlots > 0 ? 'green' : 'red');
+    text.textContent = loggedSlots > 0 ? `已登录 ${loggedSlots}/${totalSlots}` : `未登录 0/${totalSlots}`;
     loginBtn.style.display = loggedSlots < totalSlots ? '' : 'none';
     if (logoutBtn) logoutBtn.style.display = loggedSlots > 0 ? '' : 'none';
     const appAccountStatus = document.getElementById('appAccountStatus');
@@ -1739,14 +1763,6 @@ async function loadQueriedDealerHistory() {
     await loadSlots();
     await loadTransferRealtimeRecords();
     scheduleTransferRealtimeRefresh();
-    const targetSlot = sessionStorage.getItem('transferTargetSlot') || '';
-    if (targetSlot && transferSlots.some(slot => slot.id === targetSlot)) {
-        currentTransferSlot = targetSlot;
-        localStorage.setItem('crm_transfer_slot', currentTransferSlot);
-        currentSummaryJobId = sessionStorage.getItem(`crm_summary_job_id_${currentTransferSlot}`) || '';
-        currentTransferJobId = sessionStorage.getItem(`crm_transfer_job_id_${currentTransferSlot}`) || '';
-        renderTransferSlots();
-    }
     sessionStorage.removeItem('transferTargetSlot');
     renderDistributorHistory();
     restoreTransferInput();

@@ -826,6 +826,8 @@ class BackgroundJobTests(unittest.TestCase):
             distributor="测试分销商",
             transfer_type="移出",
             remark="后台移库",
+            barcodes=["435250509H274", "340240520063"],
+            actor="admin",
         )
         job.update({
             "record_id": "transfer-background-test",
@@ -850,6 +852,8 @@ class BackgroundJobTests(unittest.TestCase):
             self.assertEqual(rows[0]["record_id"], "transfer-background-test")
             self.assertEqual(rows[0]["state"], "success")
             self.assertEqual(rows[0]["order_no"], "TRSF202607250001")
+            self.assertEqual(rows[0]["barcodes"], ["435250509H274", "340240520063"])
+            self.assertEqual(rows[0]["actor"], "admin")
             self.assertTrue(
                 any("移库单已保存" in row["message"] for row in rows[0]["logs"])
             )
@@ -1139,6 +1143,108 @@ class BackgroundJobTests(unittest.TestCase):
 
         app_module.query_slot_round_robin_cursor = original_cursor
         self.assertEqual(selected_slots, ["query-1", "query-2", "query-3"])
+
+    def test_idle_transfer_worker_selection_rotates_and_skips_busy_channels(self):
+        workers = {
+            "transfer-1": mock.Mock(busy=False, logged_in=True, remembered_logged_in=True),
+            "transfer-2": mock.Mock(busy=True, logged_in=True, remembered_logged_in=True),
+            "transfer-3": mock.Mock(busy=False, logged_in=True, remembered_logged_in=True),
+        }
+        original_cursor = getattr(app_module, "transfer_slot_round_robin_cursor", 0)
+        with mock.patch.object(
+            app_module.crm_pool,
+            "transfer_slots",
+            ["transfer-1", "transfer-2", "transfer-3"],
+        ), mock.patch.object(
+            app_module.crm_pool,
+            "get",
+            side_effect=lambda slot_id, _kind: workers[slot_id],
+        ):
+            app_module.transfer_slot_round_robin_cursor = 0
+            selected_slots = [
+                app_module._select_idle_transfer_worker_desc()[1]
+                for _ in range(3)
+            ]
+
+        app_module.transfer_slot_round_robin_cursor = original_cursor
+        self.assertEqual(selected_slots, ["transfer-1", "transfer-3", "transfer-1"])
+
+    def test_transfer_summary_start_automatically_assigns_an_idle_channel(self):
+        worker = mock.Mock()
+        with mock.patch.object(
+            app_module,
+            "_select_idle_transfer_worker_desc",
+            return_value=(worker, "transfer-3", "移库3", ""),
+        ), mock.patch.object(app_module.threading, "Thread"):
+            response = self.client.post(
+                "/api/transfer/summary/start",
+                json={"barcodes": ["435250509H274"], "transfer_type": "移出"},
+            )
+
+        payload = response.get_json()
+        try:
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["slot_id"], "transfer-3")
+            with app_module.summary_job_lock:
+                self.assertEqual(app_module.summary_jobs[payload["job_id"]]["slot_id"], "transfer-3")
+        finally:
+            with app_module.summary_job_lock:
+                app_module.summary_jobs.pop(payload.get("job_id"), None)
+                app_module.latest_summary_job_by_slot.pop("transfer-3", None)
+
+    def test_transfer_submission_assigns_idle_channel_and_records_actor_and_barcodes(self):
+        worker = mock.Mock()
+        summary = {
+            "groups": [{"product_code": "P100", "quantity": 1}],
+            "missing": [],
+            "incomplete": [],
+        }
+        with mock.patch.object(
+            app_module,
+            "_select_idle_transfer_worker_desc",
+            return_value=(worker, "transfer-3", "移库3", ""),
+        ), mock.patch.object(
+            app_module,
+            "_missing_product_library_representatives",
+            return_value={},
+        ), mock.patch.object(
+            app_module,
+            "build_transfer_summary",
+            return_value=summary,
+        ), mock.patch.object(
+            app_module,
+            "_exclude_unmatched_transfer_barcodes",
+        ), mock.patch.object(app_module.threading, "Thread"):
+            response = self.client.post(
+                "/api/crm/transfer",
+                json={
+                    "record_id": "auto-transfer-record",
+                    "barcodes": ["435250509H274"],
+                    "distributor": "测试分销商",
+                    "transfer_type": "移出",
+                    "remark": "自动通道",
+                },
+            )
+
+        payload = response.get_json()
+        try:
+            self.assertTrue(payload["success"])
+            self.assertEqual(payload["slot_id"], "transfer-3")
+            with app_module.transfer_job_lock:
+                job = app_module.transfer_jobs[payload["job_id"]]
+                self.assertEqual(job["barcodes"], ["435250509H274"])
+                self.assertEqual(job["actor"], "admin")
+            status = self.client.get(
+                "/api/crm/transfer/status",
+                query_string={"slot_id": "transfer-3", "job_id": payload["job_id"]},
+            ).get_json()
+            self.assertEqual(status["actor"], "admin")
+            self.assertEqual(status["barcodes"], ["435250509H274"])
+        finally:
+            with app_module.transfer_job_lock:
+                app_module.transfer_jobs.pop(payload.get("job_id"), None)
+                app_module.latest_transfer_job_by_slot.pop("transfer-3", None)
+            app_module.delete_transfer_record("auto-transfer-record")
 
     def test_service_close_merges_selected_and_detail_product_barcodes(self):
         row = {
