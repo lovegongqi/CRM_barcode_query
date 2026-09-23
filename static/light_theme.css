@@ -342,7 +342,6 @@ body[data-aurora-page] .service-detail-section h3,
 body[data-aurora-page] .service-detail-section summary,
 body[data-aurora-page] .service-detail-section-head,
 body[data-aurora-page] .service-detail-table td,
-body[data-aurora-page] .service-close-record,
 body[data-aurora-page] .service-close-status-row {
     color: var(--aurora-text) !important;
     background: rgba(247, 251, 255, .88) !important;

@@ -15,18 +15,15 @@
         .close-history-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
         .service-close-latest-summary { display:block; margin-bottom:10px; color:var(--aurora-muted); font-size:11px; font-weight:700; text-align:right; }
         .service-close-latest-summary[hidden] { display:none; }
-        .close-placeholder { min-height:90px; padding:18px; border:1px dashed var(--aurora-line-strong); border-radius:12px; color:var(--aurora-muted); font-size:13px; }
+        .close-placeholder { min-height:90px; color:var(--aurora-muted); font-size:13px; }
+        #serviceCloseRecordList { display:grid; gap:10px; }
         .close-history-actions button { min-height:32px; padding:6px 10px; border:1px solid rgba(255,124,148,.3); border-radius:9px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
-        .service-close-record { padding:14px; border:1px solid #1e3a52; border-radius:10px; background:rgba(7,20,38,.72); }
-        .service-close-record + .service-close-record { margin-top:10px; }
-        .service-close-record.is-current { border-color:rgba(56,189,248,.5); }
         .service-close-record-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#cbd5e1; font-size:12px; }
         .service-close-record-head strong { color:#e2e8f0; }
         .service-close-record-head button { min-height:30px; padding:5px 9px; border:1px solid rgba(255,124,148,.3); border-radius:8px; color:#ffb2c0; background:rgba(255,112,137,.1); cursor:pointer; }
         .service-close-order-top { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
         .service-close-record-meta { display:block; flex:0 0 auto; color:var(--aurora-muted); font-size:10px; line-height:1.35; text-align:right; }
         .service-close-record-meta span { display:block; }
-        .service-close-status-list { display:grid; gap:6px; margin-top:10px; }
         .service-close-status-row { display:grid; grid-template-columns:minmax(260px,2fr) 88px minmax(180px,1.2fr) 70px auto; gap:10px; align-items:center; padding:10px; border:1px solid #1e3a52; border-radius:9px; background:rgba(15,23,42,.72); color:#cbd5e1; }
         .service-close-order-link { padding:0; border:0; background:transparent; color:#7dd3fc; cursor:pointer; font:inherit; font-weight:800; text-align:left; text-decoration:underline; text-underline-offset:3px; }
         .service-close-order small { display:block; margin-top:3px; color:#94a3b8; line-height:1.45; overflow-wrap:anywhere; }
@@ -83,7 +80,7 @@
         function renderRows(rows, canDelete = false, record = {}) {
             const time = record.finished_at || record.started_at || '—';
             const recordMeta = `<span class="service-close-record-meta"><span>${escapeHtml(record.actor || '—')}</span><span>${escapeHtml(time)}</span></span>`;
-            return `<div class="service-close-status-list">${(rows || []).map(row => {
+            return (rows || []).map(row => {
                 const [label, stateClass] = closeState(row.state); const serviceNo = String(row.service_no || '');
                 const detailUrl = String(row.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
                 const selected = new Set((row.selected_barcodes || row.barcodes || []).map(String));
@@ -91,7 +88,7 @@
                 const customers = Array.isArray(row.customer_names) && row.customer_names.length ? `<small>客户 ${escapeHtml(row.customer_names.join('、'))}</small>` : '';
                 const deleteButton = canDelete && serviceNo ? `<div class="service-close-row-actions"><button type="button" data-history-service-no="${escapeHtml(serviceNo)}">删除记录</button></div>` : '';
                 return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><div class="service-close-order-top"><button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button>${recordMeta}</div>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
-            }).join('')}</div>`;
+            }).join('');
         }
 
         function fieldValue(fields, labels) { for (const label of labels) { const found = fields.find(row => String(row.label || '') === label); if (found) return String(found.value || ''); } return '—'; }
@@ -121,9 +118,6 @@
         async function startOrderProductQuery(serviceNo) { const button = document.querySelector('.service-detail-order-query'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '查询中…'; } setOrderProductQueryStatus({running:true, stage:'waiting', message:'正在提交查询任务', elapsed:0}); try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`,{method:'POST'}), data = await response.json(); if (response.status !== 409 && (!response.ok || !data.success)) throw new Error(data.error || '订单产品明细查询失败'); await pollOrderProductQuery(serviceNo,data.job_id); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询失败', elapsed:0}); } }
         async function pollOrderProductQuery(serviceNo,jobId) { if (!serviceNo || serviceNo !== currentDetailServiceNo || !jobId) return; try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`), data = await response.json(); if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败'); if (data.running) { const button = document.querySelector('.service-detail-order-query'); if (button) button.textContent = data.stage === 'waiting' ? '等待通道…' : '查询中…'; setOrderProductQueryStatus(data); setTimeout(() => pollOrderProductQuery(serviceNo,jobId),1000); return; } if (!data.success) { resetOrderProductQueryButton(); setOrderProductQueryStatus(data); return; } setOrderProductQueryStatus(null); await showServiceOrderDetail(serviceNo,`/api/service-orders/${encodeURIComponent(serviceNo)}`); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询状态读取失败', elapsed:0}); } }
         function closeDetailModal() { detailRequestId += 1; currentDetailServiceNo = ''; document.getElementById('detailModal').classList.remove('overlay-show'); document.getElementById('serviceDetailContent').innerHTML = ''; }
-        function renderRecord(record, isCurrent = false) {
-            return `<article class="service-close-record ${isCurrent ? 'is-current' : ''}">${renderRows(record.service_rows, canManageHistory && !isCurrent, record)}</article>`;
-        }
         function renderRecords() {
             const root = document.getElementById('serviceCloseRecordList');
             const records = historyRecords.slice();
@@ -131,7 +125,7 @@
             const summary = document.getElementById('serviceCloseLatestSummary');
             summary.hidden = !records.length;
             if (records.length) summary.textContent = `本次批量结单：新结单${records[0].closed_count || 0}/失败${records[0].failed_count || 0}`;
-            root.innerHTML = records.length ? records.map(record => renderRecord(record, record === currentCloseRecord)).join('') : '暂无结单记录。';
+            root.innerHTML = records.length ? records.map(record => renderRows(record.service_rows, canManageHistory && record !== currentCloseRecord, record)).join('') : '暂无结单记录。';
             root.querySelectorAll('[data-history-service-no]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条服务单记录？')) return; await fetch(`/api/service-close/history/service/${encodeURIComponent(button.dataset.historyServiceNo)}`, {method:'DELETE'}); loadHistory(); }));
         }
         async function loadHistory() {
