@@ -19,6 +19,8 @@ class LightThemeTest(unittest.TestCase):
         for template in (ROOT / "templates").glob("*.html"):
             with self.subTest(template=template.name):
                 head = template.read_text(encoding="utf-8").split("</head>", 1)[0]
+                if '<head>' not in head:
+                    continue
                 self.assertRegex(head, r'<link rel="stylesheet" href="/static/light_theme.css[^\"]*">')
                 light_link = head.rfind('/static/light_theme.css')
                 self.assertGreater(light_link, head.rfind('</style>'))
@@ -81,6 +83,77 @@ class LightThemeTest(unittest.TestCase):
             browser.close()
         self.assertEqual(style, {'background': 'none', 'border': '0px', 'shadow': 'none',
                                  'overflow': 'visible', 'radius': '0px', 'padding': '0px'})
+
+    def test_dark_theme_logo_does_not_overlap_heading_on_wide_screens(self):
+        template = (ROOT / "templates" / "crm.html").read_text(encoding="utf-8")
+        inline_css = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
+        styles = "\n".join([inline_css] + [
+            (ROOT / "static" / name).read_text(encoding="utf-8")
+            for name in ("app_layout.css", "aurora.css")
+        ])
+        markup = '''<body data-aurora-page="query"><div class="container">
+            <a class="aurora-logo"><img alt="怡口"></a>
+            <div class="header"><div><h1>CRM 在线查询</h1><p>批量查询</p></div>
+            <div class="page-nav"><a>查询</a></div></div>
+        </div></body>'''
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content(markup)
+            page.add_style_tag(content=styles)
+            for width in (1280, 1565, 1920):
+                with self.subTest(width=width):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    bounds = page.evaluate('''() => {
+                        const logo = document.querySelector('.aurora-logo').getBoundingClientRect();
+                        const heading = document.querySelector('h1').getBoundingClientRect();
+                        return {logoRight: logo.right, headingLeft: heading.left};
+                    }''')
+                    self.assertLessEqual(bounds['logoRight'] + 8, bounds['headingLeft'])
+            browser.close()
+
+    def test_inbound_and_inventory_headings_align_with_logos_in_both_themes(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            for name in ('inbound', 'inventory'):
+                template = (ROOT / 'templates' / f'{name}.html').read_text(encoding='utf-8')
+                inline_css = '\n'.join(re.findall(r'<style>(.*?)</style>', template, re.S))
+                base_css = '\n'.join([inline_css] + [
+                    (ROOT / 'static' / file).read_text(encoding='utf-8')
+                    for file in ('app_layout.css', 'aurora.css')
+                ] + ([(ROOT / 'static' / 'inventory.css').read_text(encoding='utf-8')]
+                     if name == 'inventory' else []))
+                for theme in ('dark', 'light'):
+                    with self.subTest(page=name, theme=theme):
+                        page = browser.new_page(viewport={'width': 430, 'height': 932})
+                        page.set_content(f'''<body data-aurora-page="{name}"><div class="container">
+                            <a class="aurora-logo"><img alt="怡口"></a>
+                            <div class="aurora-theme-switch"><select><option>深色</option></select></div>
+                            <div class="header"><div><h1>{'装箱单入库' if name == 'inbound' else '库存盘点'}</h1></div>
+                            <div class="page-nav"><a>当前页面</a></div></div>
+                        </div></body>''')
+                        page.add_style_tag(content=base_css + ('\n' + (ROOT / 'static' / 'light_theme.css').read_text(encoding='utf-8')
+                                                               if theme == 'light' else ''))
+                        bounds = page.evaluate('''() => {
+                            const box = selector => document.querySelector(selector).getBoundingClientRect();
+                            return {logo: box('.aurora-logo').toJSON(), title: box('h1').toJSON(),
+                                switcher: box('.aurora-theme-switch').toJSON()};
+                        }''')
+                        logo_center = bounds['logo']['y'] + bounds['logo']['height'] / 2
+                        title_center = bounds['title']['y'] + bounds['title']['height'] / 2
+                        self.assertLessEqual(abs(logo_center - title_center), 4)
+                        self.assertLess(bounds['title']['right'], bounds['switcher']['left'])
+                        if name == 'inventory':
+                            page.set_viewport_size({'width': 1565, 'height': 932})
+                            desktop = page.evaluate('''() => ({
+                                bodyMargin: getComputedStyle(document.body).marginLeft,
+                                logoRight: document.querySelector('.aurora-logo').getBoundingClientRect().right,
+                                titleLeft: document.querySelector('h1').getBoundingClientRect().left
+                            })''')
+                            self.assertEqual(desktop['bodyMargin'], '0px')
+                            self.assertLess(desktop['logoRight'], desktop['titleLeft'])
+                        page.close()
+            browser.close()
 
     def test_mobile_content_scrolls_only_above_fixed_navigation(self):
         styles = "\n".join(

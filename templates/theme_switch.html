@@ -1,0 +1,8 @@
+{% if theme_account %}
+<div class="aurora-theme-switch">
+    <select id="themeSelect" aria-label="界面主题">
+        <option value="light"{% if theme == 'light' %} selected{% endif %}>浅色</option>
+        <option value="dark"{% if theme == 'dark' %} selected{% endif %}>深色</option>
+    </select>
+</div>
+{% endif %}

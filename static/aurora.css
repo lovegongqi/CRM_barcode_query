@@ -61,7 +61,7 @@ body[data-aurora-page] .container {
     position: absolute;
     z-index: 80;
     top: 25px;
-    left: max(24px, calc((100vw - 1500px) / 2 + 24px));
+    left: 24px;
     width: 68px;
     height: 68px;
     padding: 7px;
@@ -75,6 +75,21 @@ body[data-aurora-page] .container {
 }
 
 .aurora-logo img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+.aurora-theme-switch {
+    position: absolute;
+    z-index: 90;
+    top: 30px;
+    right: 24px;
+}
+
+body[data-aurora-page] .aurora-theme-switch select {
+    width: 78px;
+    min-height: 34px;
+    padding: 6px 8px;
+    font-size: 12px;
+    cursor: pointer;
+}
 
 body[data-aurora-page]:not([data-aurora-page="login"]):not([data-aurora-page="no-permission"]) .page-nav {
     position: static !important;
@@ -165,6 +180,7 @@ body[data-aurora-page="results"] .app-header > .app-title,
 body[data-aurora-page="service-close"] .app-header > .app-title {
     min-height: 58px;
     padding-left: 76px;
+    padding-right: 90px;
 }
 
 body[data-aurora-page] .header > div:first-child::before,
@@ -1242,13 +1258,18 @@ body[data-aurora-page="results"] .date-clear-btn {
         left: 12px;
     }
 
-    body[data-aurora-page="inbound"] .container,
+    .aurora-theme-switch { top: 12px; right: 12px; }
+
     body[data-aurora-page="crm"] .container,
     body[data-aurora-page="index"] .container {
         /* 84px bottom padding: 62px nav + 12px bottom offset + 10px breathing
            room. The previous 116px was too generous and left an awkward gap
            above the floating tab bar. */
         padding: 12px 12px calc(84px + env(safe-area-inset-bottom));
+    }
+
+    body[data-aurora-page="inbound"] .container {
+        padding: 18px 12px calc(84px + env(safe-area-inset-bottom));
     }
 
     /* Title strip: stack, drop the 76px logo reservation */

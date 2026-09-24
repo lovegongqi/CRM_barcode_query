@@ -30,7 +30,14 @@ def test_theme_choice_is_saved_per_account_and_applies_to_pages(tmp_path, monkey
 
     assert alice.get('/api/app-auth/status').get_json()['account']['theme'] == 'light'
     assert b'/static/light_theme.css' in alice.get('/transfer').data
-    assert b'id="themeSelect"' in alice.get('/accounts').data
+    for path in ('/crm', '/results', '/transfer', '/inbound', '/inventory',
+                 '/service-close', '/product-library', '/accounts'):
+        page = alice.get(path)
+        assert b'id="themeSelect"' in page.data, path
+        assert b'<option value="light" selected>' in page.data, path
+        assert '>浅色</option>'.encode() in page.data, path
+        assert '>深色</option>'.encode() in page.data, path
+    assert b'id="themeCard"' not in alice.get('/accounts').data
 
     response = alice.post('/api/account/theme', json={'theme': 'dark'})
     assert response.get_json()['success']
@@ -42,7 +49,9 @@ def test_theme_choice_is_saved_per_account_and_applies_to_pages(tmp_path, monkey
         assert page.status_code == 200, path
         assert b'/static/aurora.css' in page.data, path
         assert b'/static/light_theme.css' not in page.data, path
+        assert b'<option value="dark" selected>' in page.data, path
     assert b'/static/light_theme.css' in bob.get('/transfer').data
+    assert b'<option value="light" selected>' in bob.get('/transfer').data
 
     fresh_session = app_module.app.test_client()
     _login(fresh_session, 'alice')

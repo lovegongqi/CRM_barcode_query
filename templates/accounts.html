@@ -87,6 +87,7 @@
 <body data-aurora-page="settings">
 <div class="container">
     <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+    {% include 'theme_switch.html' %}
     <div class="header">
         <div>
             <h1>{{ '应用设置' if is_desktop_app else '账号管理' }}</h1>
@@ -116,20 +117,6 @@
         </div>
     </div>
     {% endif %}
-
-    <div class="card" id="themeCard" style="display:none">
-        <h2>界面主题</h2>
-        <div class="form-grid">
-            <div>
-                <label for="themeSelect">主题色彩</label>
-                <select id="themeSelect" onchange="saveTheme()">
-                    <option value="light">当前浅色</option>
-                    <option value="dark">原版深色</option>
-                </select>
-            </div>
-        </div>
-        <p class="muted">仅影响当前账号，选择后自动保存并应用到所有页面。</p>
-    </div>
 
     <div class="settings-primary-grid">
     <div class="card" id="runtimeConfigCard" style="display:none">
@@ -790,8 +777,6 @@ async function saveRuntimeConfig() {
 async function loadAccounts() {
     const data = await fetch('/api/accounts').then(res => res.json());
     const account = data.account || null;
-    document.getElementById('themeCard').style.display = account ? '' : 'none';
-    if (account) document.getElementById('themeSelect').value = account.theme || 'light';
     if (!IS_DESKTOP_APP) {
         document.getElementById('accountStatus').textContent = account ? account.username : '未登录';
         document.getElementById('passwordCard').style.display = account ? '' : 'none';
@@ -832,20 +817,6 @@ async function loadAccounts() {
                 </tr>
             `).join('') || '<tr><td colspan="5">暂无账号</td></tr>'}</tbody>
         </table>`;
-}
-
-async function saveTheme() {
-    const data = await fetch('/api/account/theme', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({theme: document.getElementById('themeSelect').value})
-    }).then(res => res.json()).catch(() => ({success: false, error: '保存失败'}));
-    if (!data.success) {
-        alert(data.error || '保存失败');
-        loadAccounts();
-        return;
-    }
-    window.location.reload();
 }
 
 function editAccount(row) {

@@ -488,6 +488,7 @@ body[data-aurora-page="transfer"] .fields > .actions {
 body[data-aurora-page="transfer"] .transfer-mobile-clear { display: none !important; }
 
 @media (max-width: 720px) {
+    body[data-aurora-page="inventory"] .header > div:first-child { padding-top: 0; }
     body[data-aurora-page]:has(.page-nav) .container > .aurora-logo {
         top: 12px;
         left: 12px;

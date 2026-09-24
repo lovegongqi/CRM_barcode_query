@@ -10312,6 +10312,7 @@ def _aurora_asset_versions():
         return f"?v={cache[path]}"
     return {
         "theme": account_public(account)['theme'] if account else 'light',
+        "theme_account": bool(account),
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),

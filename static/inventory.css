@@ -1,3 +1,5 @@
+body[data-aurora-page="inventory"] { margin: 0; }
+
 body[data-aurora-page="inventory"] .status-bar {
     min-height: 58px;
     padding: 10px 14px;
@@ -1305,6 +1307,9 @@ article.inventory-item { cursor: default; }
     body[data-aurora-page="inventory"] .header {
         flex: 0 0 auto;
         margin-bottom: 6px !important;
+    }
+    body[data-aurora-page="inventory"] .header > div:first-child {
+        padding-top: 9px;
     }
     body[data-aurora-page="inventory"] .status-bar {
         display: flex;

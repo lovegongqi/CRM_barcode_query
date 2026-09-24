@@ -58,6 +58,29 @@
         filters.open = false;
     }
 
+    function setupThemeSwitch() {
+        const select = document.getElementById('themeSelect');
+        if (!select) return;
+        const initialTheme = select.value;
+        select.addEventListener('change', async () => {
+            select.disabled = true;
+            try {
+                const response = await fetch('/api/account/theme', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({theme: select.value})
+                });
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || '保存失败');
+                window.location.reload();
+            } catch (error) {
+                select.value = initialTheme;
+                select.disabled = false;
+                alert(error.message || '保存失败');
+            }
+        });
+    }
+
     function ensureDialog() {
         let dialog = document.getElementById('auroraLogDialog');
         if (dialog) return dialog;
@@ -150,6 +173,7 @@
         enhanceNavigation();
         placeNavigation();
         collapseMobileResultsFilters();
+        setupThemeSwitch();
         ensureDialog();
     });
     window.addEventListener('resize', placeNavigation);
