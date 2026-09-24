@@ -121,6 +121,32 @@ class LightThemeTest(unittest.TestCase):
         channels = [int(part) for part in re.findall(r"\d+", color)[:3]]
         self.assertLess(max(channels), 170)
 
+    def test_transfer_order_numbers_and_clear_action_are_readable(self):
+        styles = "\n".join(
+            (ROOT / "static" / name).read_text(encoding="utf-8")
+            for name in ("aurora.css", "light_theme.css")
+        )
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content('''<body data-aurora-page="transfer"><section class="aurora-realtime">
+                <div class="aurora-realtime-head"><button class="aurora-live-action">清空</button></div>
+                <table class="aurora-transfer-table"><tbody><tr><td></td><td></td>
+                    <td><code>TRSF202609220070</code></td></tr></tbody></table>
+            </section></body>''')
+            page.add_style_tag(content=styles)
+            colors = page.evaluate('''() => [
+                '.aurora-transfer-table code', '.aurora-live-action'
+            ].map(selector => getComputedStyle(document.querySelector(selector)).color)''')
+            browser.close()
+
+        for color in colors:
+            with self.subTest(color=color):
+                rgb = [int(part) / 255 for part in re.findall(r"\d+", color)[:3]]
+                linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in rgb]
+                luminance = sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
+                self.assertGreaterEqual(1.05 / (luminance + 0.05), 4.5)
+
     def test_shared_log_button_is_removed_but_log_api_remains(self):
         script = (ROOT / "static" / "log_modal.js").read_text(encoding="utf-8")
         with sync_playwright() as playwright:

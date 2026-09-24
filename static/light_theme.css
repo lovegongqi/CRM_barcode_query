@@ -220,6 +220,14 @@ body[data-aurora-page] .aurora-log-preview,
 body[data-aurora-page] .aurora-live-badge { color: #126c94 !important; background: #e5f5fd !important; }
 body[data-aurora-page] .aurora-row-action:hover,
 body[data-aurora-page] .aurora-log-preview:hover { color: #075e91 !important; background: #d4effc !important; }
+body[data-aurora-page="transfer"] .aurora-transfer-table code { color: #17698f !important; font-size: 12px; }
+body[data-aurora-page="transfer"] .aurora-live-action {
+    color: #315773 !important;
+    background: #e5f5fd !important;
+    border-color: #c2e2f2 !important;
+    font-size: 12px;
+}
+body[data-aurora-page="transfer"] .aurora-live-action:hover { color: #075e91 !important; background: #d4effc !important; }
 body[data-aurora-page] .aurora-status-button { color: #086b96 !important; }
 body[data-aurora-page] .aurora-status-button.success { color: #168252 !important; }
 body[data-aurora-page] .aurora-status-button.warn { color: #a76405 !important; }
