@@ -19,7 +19,7 @@ class LightThemeTest(unittest.TestCase):
         for template in (ROOT / "templates").glob("*.html"):
             with self.subTest(template=template.name):
                 head = template.read_text(encoding="utf-8").split("</head>", 1)[0]
-                self.assertRegex(head, r'<link rel="stylesheet" href="/static/light_theme.css(?:\?[^\"]*)?">')
+                self.assertRegex(head, r'<link rel="stylesheet" href="/static/light_theme.css[^\"]*">')
                 light_link = head.rfind('/static/light_theme.css')
                 self.assertGreater(light_link, head.rfind('</style>'))
                 self.assertGreater(light_link, head.rfind('/static/aurora.css'))

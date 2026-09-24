@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>可访问页面</title>
-    <link rel="stylesheet" href="/static/log_modal.css">
-    <script src="/static/log_modal.js"></script>
+    <link rel="stylesheet" href="/static/log_modal.css{{ log_modal_css_v }}">
+    <script src="/static/log_modal.js{{ log_modal_js_v }}"></script>
     <style>
         * { box-sizing:border-box; margin:0; padding:0; }
         body { min-height:100vh; background:#f4f7fb; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:#202938; }
@@ -17,10 +17,10 @@
         .links a { text-decoration:none; background:#2563eb; color:#fff; border-radius:8px; padding:9px 14px; font-size:13px; font-weight:900; }
         .secondary { background:#e5e7eb !important; color:#334155 !important; }
     </style>
-    <link rel="stylesheet" href="/static/app_layout.css">
-    <link rel="stylesheet" href="/static/aurora.css">
-    <script defer src="/static/aurora.js"></script>
-    <link rel="stylesheet" href="/static/light_theme.css?v=1">
+    <link rel="stylesheet" href="/static/app_layout.css{{ app_css_v }}">
+    <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
+    <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+    <link rel="stylesheet" href="/static/light_theme.css{{ light_theme_css_v }}">
 </head>
 <body data-aurora-page="no-permission">
 <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>

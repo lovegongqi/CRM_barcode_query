@@ -6982,6 +6982,13 @@ app = Flask(
 )
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "crm-barcode-query-local-secret")
 
+def _static_file_max_age(filename):
+    if request.path.startswith('/static/') and request.args.get('v'):
+        return 12 * 60 * 60
+    return None
+
+app.get_send_file_max_age = _static_file_max_age
+
 DATA_BASE_DIR = _runtime_data_base_dir()
 CONFIG_DIR = _runtime_config_dir()
 BARCODE_DIR = os.path.join(DATA_BASE_DIR, "barcode")
@@ -10304,8 +10311,10 @@ def _aurora_asset_versions():
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),
+        "light_theme_css_v": _stamp("light_theme.css"),
         "inventory_css_v": _stamp("inventory.css"),
         "inventory_js_v": _stamp("inventory.js"),
+        "zxing_js_v": _stamp("vendor/zxing-browser-0.2.1.min.js"),
         "log_modal_css_v": _stamp("log_modal.css") if os.path.exists(os.path.join(app.static_folder, "log_modal.css")) else "",
         "log_modal_js_v": _stamp("log_modal.js") if os.path.exists(os.path.join(app.static_folder, "log_modal.js")) else "",
     }

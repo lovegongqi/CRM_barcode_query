@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>怡口 CRM 结单管理</title>
-    <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/app_layout.css{{ app_css_v }}">
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
     <style>
@@ -60,7 +60,7 @@
         .service-detail-order-attempt { margin-top:5px; color:#fca5a5; font-size:11px; line-height:1.5; white-space:pre-line; } .service-detail-order-attempt.is-live { color:#7dd3fc; } .service-detail-empty { padding:28px; color:#94a3b8; text-align:center; }
         @media (max-width:760px) { .close-history-actions { flex-direction:column; align-items:flex-end; } .service-close-status-row { grid-template-columns:1fr auto; } .service-close-order { grid-column:1 / -1; } .service-close-progress { grid-column:1 / -1; } .service-close-channel { text-align:right; } .service-close-elapsed { display:none; } .service-detail-fields { grid-template-columns:1fr; } .service-detail-customer-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } .service-detail-customer-fields .service-detail-field:last-child { grid-column:1 / -1; } }
     </style>
-    <link rel="stylesheet" href="/static/light_theme.css?v=1">
+    <link rel="stylesheet" href="/static/light_theme.css{{ light_theme_css_v }}">
 </head>
 <body data-aurora-page="service-close">
     <div class="container">

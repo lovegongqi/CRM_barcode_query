@@ -1165,7 +1165,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertTrue(vendor.is_file())
         self.assertGreater(vendor.stat().st_size, 400_000)
         self.assertIn("MIT License", license_file.read_text(encoding="utf-8"))
-        decoder_script = '<script defer src="/static/vendor/zxing-browser-0.2.1.min.js"></script>'
+        decoder_script = '<script defer src="/static/vendor/zxing-browser-0.2.1.min.js{{ zxing_js_v }}"></script>'
         inventory_script = '<script defer src="/static/inventory.js{{ inventory_js_v }}"></script>'
         self.assertIn(decoder_script, source)
         self.assertLess(source.index(decoder_script), source.index(inventory_script))

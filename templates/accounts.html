@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ '应用设置' if is_desktop_app else '账号管理' }}</title>
-    <link rel="stylesheet" href="/static/log_modal.css">
-    <script src="/static/log_modal.js"></script>
+    <link rel="stylesheet" href="/static/log_modal.css{{ log_modal_css_v }}">
+    <script src="/static/log_modal.js{{ log_modal_js_v }}"></script>
     <style>
         * { box-sizing: border-box; margin:0; padding:0; }
         body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; background:#f4f7fb; color:#202938; min-height:100vh; }
@@ -77,10 +77,10 @@
         th { background:#f8fafc; color:#475569; }
         @media (max-width:860px) { .container { padding:14px; } .form-grid, .channel-grid, .business-config-grid, .runtime-query-settings, .bulk-login-grid, .bulk-captcha-row, .gyj-login-grid { grid-template-columns:1fr; } .gyj-channel-tabs { grid-template-columns:repeat(5,minmax(54px,1fr)); overflow-x:auto; } .gyj-captcha-row { grid-template-columns:1fr auto; } .gyj-captcha-preview { grid-column:1/-1; } }
     </style>
-    <link rel="stylesheet" href="/static/app_layout.css">
+    <link rel="stylesheet" href="/static/app_layout.css{{ app_css_v }}">
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
-    <link rel="stylesheet" href="/static/light_theme.css?v=1">
+    <link rel="stylesheet" href="/static/light_theme.css{{ light_theme_css_v }}">
 </head>
 <body data-aurora-page="settings">
 <div class="container">
