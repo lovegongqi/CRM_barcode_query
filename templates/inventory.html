@@ -176,7 +176,7 @@
                 <p class="inventory-eyebrow">SERIAL RECONCILIATION</p>
                 <h2 id="inventorySerialTitle">序列号核对</h2>
             </div>
-            <button class="inventory-icon-button" id="inventorySerialClose" type="button" aria-label="关闭序列号核对窗口">×</button>
+            <button class="inventory-icon-button" id="inventorySerialClose" type="button" aria-label="暂时关闭序列号核对窗口">×</button>
         </div>
         <div id="inventorySerialProduct" class="inventory-count-product"></div>
         <div class="inventory-serial-refresh">
@@ -236,7 +236,8 @@
         <div id="inventorySerialCounts" class="inventory-summary inventory-serial-counts" aria-label="序列号核对摘要"></div>
         <div id="inventorySerialDetails" class="inventory-serial-details" aria-live="polite"></div>
         <div class="inventory-dialog-actions">
-            <button class="btn btn-primary" id="inventorySerialCancel" type="button">关闭并保存</button>
+            <button class="btn btn-secondary" id="inventorySerialPause" type="button">暂时关闭</button>
+            <button class="btn btn-primary" id="inventorySerialCancel" type="button">完成核对</button>
         </div>
     </div>
 </dialog>

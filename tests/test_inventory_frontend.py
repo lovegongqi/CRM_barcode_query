@@ -289,11 +289,12 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             finally:
                 browser.close()
 
-    def test_serial_dialog_uses_close_as_the_only_completion_action(self):
+    def test_serial_dialog_offers_separate_pause_and_finish_actions(self):
         template = (ROOT / "templates" / "inventory.html").read_text(encoding="utf-8")
         self.assertIn('id="inventorySerialCancel"', template)
-        self.assertNotIn('id="inventorySerialFinish"', template)
-        self.assertNotIn("完成该商品核对", template)
+        self.assertIn('id="inventorySerialPause"', template)
+        self.assertIn('>暂时关闭</button>', template)
+        self.assertIn('>完成核对</button>', template)
 
     def test_mobile_category_and_state_filters_share_one_row(self):
         with sync_playwright() as playwright:
@@ -885,7 +886,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
-    def test_closing_serial_workspace_finishes_before_dismissing(self):
+    def test_closing_serial_workspace_never_waits_for_finish(self):
         self.run_node(
             r"""
             const requests = [];
@@ -925,13 +926,13 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 currentSerialBarcode = 'B2';
                 serialWorkspaceOpen = true;
                 serialWorkspaceEditable = true;
+                serialFinishPending = true;
                 renderSerialReconciliation = () => {};
                 pollInventoryTask = async () => {};
             `, context);
             (async () => {
                 await vm.runInContext('requestSerialWorkspaceClose()', context);
-                assert.equal(requests.length, 1);
-                assert.equal(requests[0].url, '/api/inventory/tasks/task-1/items/B2/serial/finish');
+                assert.equal(requests.length, 0);
                 assert.equal(dialog.open, false);
                 assert.equal(vm.runInContext('serialWorkspaceOpen', context), false);
             })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -3553,7 +3554,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const requests = [];
             let focusCount = 0;
             const elements = new Map();
+            const dialog = {open: true, close() { this.open = false; }};
             function element(id) {
+                if (id === 'inventorySerialWorkspace') return dialog;
                 if (!elements.has(id)) elements.set(id, {
                     disabled: false, textContent: '', className: '',
                     focus() { focusCount += 1; },
@@ -3602,6 +3605,9 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                     /SENTINEL_PRIVATE_GYJ_ERROR/,
                 );
                 assert.equal(focusCount, 1);
+                await vm.runInContext('requestSerialWorkspaceClose()', context);
+                assert.equal(requests.length, 1, 'closing must not retry failed completion');
+                assert.equal(dialog.open, false);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """
         )
@@ -3765,7 +3771,7 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
                 assert.equal(vm.runInContext('currentSerialData.barcode', context), 'B2');
                 assert.equal(vm.runInContext('serialWorkspaceEditable', context), true);
                 assert.equal(input.disabled, false);
-                assert.equal(finishButton.disabled, false);
+                assert.equal(finishButton.disabled, true, 'account cache is still unavailable');
                 assert.equal(message.textContent, newMessage);
                 assert.match(message.textContent, /重新获取/);
             })().catch(error => { console.error(error); process.exitCode = 1; });
