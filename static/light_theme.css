@@ -337,6 +337,15 @@ body[data-aurora-page] .preview-query-table code,
 body[data-aurora-page] .summary-detail-table code { color: #17698f !important; }
 body[data-aurora-page] .summary-detail-table td,
 body[data-aurora-page] .preview-query-table td { color: var(--aurora-text) !important; }
+body[data-aurora-page="transfer"] .summary {
+    background: rgba(246, 250, 255, .82) !important;
+    border-color: var(--aurora-line) !important;
+}
+body[data-aurora-page="transfer"] .summary-product-name small { color: #58728a; }
+body[data-aurora-page="transfer"] .card:has(.distributor-dropdown.open) {
+    position: relative;
+    z-index: 1;
+}
 body[data-aurora-page] .modal-overlay,
 body[data-aurora-page] .global-log-overlay,
 body[data-aurora-page] .aurora-log-dialog,

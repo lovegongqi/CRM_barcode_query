@@ -147,6 +147,59 @@ class LightThemeTest(unittest.TestCase):
                 luminance = sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722)))
                 self.assertGreaterEqual(1.05 / (luminance + 0.05), 4.5)
 
+    def test_transfer_summary_uses_light_surface(self):
+        template = (ROOT / "templates" / "transfer.html").read_text(encoding="utf-8")
+        inline_css = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
+        styles = "\n".join([inline_css] + [
+            (ROOT / "static" / name).read_text(encoding="utf-8")
+            for name in ("app_layout.css", "aurora.css", "light_theme.css")
+        ])
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.set_content('''<body data-aurora-page="transfer"><div class="card transfer-summary-card">
+                <div class="summary" id="summaryBox" style="display:block">
+                    <div class="summary-product-list"><button class="summary-product-row">产品</button></div>
+                </div></div></body>''')
+            page.add_style_tag(content=styles)
+            colors = page.evaluate('''() => ['#summaryBox', '.summary-product-row'].map(selector => {
+                const style = getComputedStyle(document.querySelector(selector));
+                return {background: style.backgroundColor, image: style.backgroundImage};
+            })''')
+            browser.close()
+        for color in colors:
+            with self.subTest(color=color):
+                self.assertEqual(color["image"], "none")
+                self.assertGreater(min(int(value) for value in re.findall(r"\d+", color["background"])[:3]), 205)
+
+    def test_transfer_distributor_dropdown_stays_above_following_card(self):
+        template = (ROOT / "templates" / "transfer.html").read_text(encoding="utf-8")
+        inline_css = re.search(r"<style>(.*?)</style>", template, re.S).group(1)
+        styles = "\n".join([inline_css] + [
+            (ROOT / "static" / name).read_text(encoding="utf-8")
+            for name in ("app_layout.css", "aurora.css", "light_theme.css")
+        ])
+        options = '<div class="distributor-option">分销商</div>' * 8
+        markup = '''<body data-aurora-page="transfer"><div class="grid"><div>
+            <div class="card"><div style="height:200px"></div><div class="distributor-picker">
+                <input><div class="distributor-dropdown open">''' + options + '''</div>
+            </div></div><div class="card transfer-summary-card" style="height:200px">下方卡片</div>
+        </div></div></body>'''
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 800, "height": 700})
+            page.set_content(markup)
+            page.add_style_tag(content=styles)
+            target = page.evaluate('''() => {
+                const menu = document.querySelector('.distributor-dropdown');
+                const card = document.querySelector('.transfer-summary-card');
+                const y = card.getBoundingClientRect().top + 30;
+                const x = menu.getBoundingClientRect().left + 20;
+                return document.elementFromPoint(x, y)?.closest('.distributor-dropdown, .transfer-summary-card')?.className;
+            }''')
+            browser.close()
+        self.assertIn("distributor-dropdown", target)
+
     def test_shared_log_button_is_removed_but_log_api_remains(self):
         script = (ROOT / "static" / "log_modal.js").read_text(encoding="utf-8")
         with sync_playwright() as playwright:
