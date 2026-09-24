@@ -9918,6 +9918,7 @@ def load_accounts():
         'username': 'admin',
         'display_name': '管理员',
         'password': '88293529',
+        'theme': 'light',
         'permissions': ['crm', 'results', 'transfer', 'inbound', 'inventory', 'accounts', 'product-library'],
         'updated_at': '',
     }
@@ -9945,6 +9946,7 @@ def account_public(row):
         'id': row.get('id', ''),
         'username': row.get('username', ''),
         'display_name': row.get('display_name', ''),
+        'theme': row.get('theme') if row.get('theme') in {'light', 'dark'} else 'light',
         'permissions': row.get('permissions', []),
         'updated_at': row.get('updated_at', ''),
         'is_admin': row.get('username') == 'admin' or bool(row.get('is_admin')),
@@ -10300,6 +10302,7 @@ def _aurora_asset_versions():
     bypass the browser's 12-hour static cache. Reads the timestamp lazily
     and only once per process."""
     cache = {}
+    account = current_account()
     def _stamp(path):
         try:
             if path not in cache:
@@ -10308,6 +10311,7 @@ def _aurora_asset_versions():
             return ""
         return f"?v={cache[path]}"
     return {
+        "theme": account_public(account)['theme'] if account else 'light',
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),
@@ -13207,11 +13211,29 @@ def api_accounts_save():
         'username': username,
         'display_name': display_name,
         'password': password,
+        'theme': 'light',
         'permissions': permissions,
         'updated_at': now,
     })
     save_accounts(accounts)
     return jsonify({'success': True})
+
+@app.route('/api/account/theme', methods=['POST'])
+def api_account_theme():
+    row = current_account()
+    if not row:
+        return jsonify({'success': False, 'error': '请先登录工具账号'}), 401
+    theme = (request.get_json(silent=True) or {}).get('theme')
+    if theme not in {'light', 'dark'}:
+        return jsonify({'success': False, 'error': '请选择浅色或深色主题'}), 400
+    accounts = load_accounts()
+    for account in accounts:
+        if account.get('username') == row.get('username'):
+            account['theme'] = theme
+            account['updated_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            save_accounts(accounts)
+            return jsonify({'success': True, 'account': account_public(account)})
+    return jsonify({'success': False, 'error': '账号不存在'}), 404
 
 @app.route("/api/accounts/<account_id>", methods=["DELETE"])
 def api_accounts_delete(account_id):

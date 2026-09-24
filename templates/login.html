@@ -26,7 +26,9 @@
     <link rel="stylesheet" href="/static/app_layout.css{{ app_css_v }}">
     <link rel="stylesheet" href="/static/aurora.css{{ aurora_css_v }}">
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
+    {% if theme == "light" %}
     <link rel="stylesheet" href="/static/light_theme.css{{ light_theme_css_v }}">
+    {% endif %}
 </head>
 <body data-aurora-page="login">
     <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
