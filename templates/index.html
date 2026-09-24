@@ -1306,7 +1306,7 @@
 </head>
 <body class="results-page" data-aurora-page="results">
     <div class="container">
-        <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+        <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png?v={{ logo_v }}" alt="EcoWater 怡口净水"></a>
     {% include 'theme_switch.html' %}
         <div class="app-header">
             <div class="app-title">
@@ -1327,7 +1327,7 @@
                 <a href="/service-close">结单管理</a>
             </div>
             <div class="aurora-account-session">
-                <span class="aurora-account-name" id="appAccountStatus">检测中</span>
+                <span class="aurora-account-name" id="appAccountStatus">{{ app_account_username }}</span>
                 <a class="aurora-account-logout" href="/logout">退出工具账号</a>
             </div>
         </div>
@@ -3091,10 +3091,11 @@ ${section(9, '移机单', 'moveid1', [
             area.scrollTop = area.scrollHeight;
         }
 
+        let statusCheckPending = false;
         async function checkStatus() {
-            if (document.hidden) return;
+            if (document.hidden || statusCheckPending) return;
+            statusCheckPending = true;
             try {
-                refreshAppAccountStatus();
                 const r = await fetch('/api/crm/status');
                 const d = await r.json();
                 const browserDot = document.getElementById('browserDot');
@@ -3137,13 +3138,9 @@ ${section(9, '移机单', 'moveid1', [
                 }
             } catch(e) {
                 console.error(e);
+            } finally {
+                statusCheckPending = false;
             }
-        }
-
-        async function refreshAppAccountStatus() {
-            const data = await fetch('/api/app-auth/status').then(r => r.json()).catch(() => ({}));
-            const el = document.getElementById('appAccountStatus');
-            if (el) el.textContent = data.account ? data.account.username : '未登录';
         }
 
         async function doLogin() {

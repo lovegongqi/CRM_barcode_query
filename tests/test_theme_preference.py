@@ -28,6 +28,10 @@ def test_theme_choice_is_saved_per_account_and_applies_to_pages(tmp_path, monkey
     _login(alice, 'alice')
     _login(bob, 'bob')
 
+    for path in ('/crm', '/results', '/transfer', '/service-close'):
+        assert b'id="appAccountStatus">alice</span>' in alice.get(path).data
+        assert b'id="appAccountStatus">bob</span>' in bob.get(path).data
+
     assert alice.get('/api/app-auth/status').get_json()['account']['theme'] == 'light'
     assert b'/static/light_theme.css' in alice.get('/transfer').data
     for path in ('/crm', '/results', '/transfer', '/inbound', '/inventory',

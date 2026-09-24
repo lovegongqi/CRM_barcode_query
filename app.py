@@ -20,6 +20,7 @@ import queue
 import uuid
 import shutil
 import hashlib
+import gzip
 from contextlib import closing, contextmanager
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
@@ -6989,6 +6990,36 @@ def _static_file_max_age(filename):
 
 app.get_send_file_max_age = _static_file_max_age
 
+
+@app.after_request
+def _compress_text_response(response):
+    """Reduce WAN transfer without buffering exports or streaming responses."""
+    text_types = {'text/html', 'text/css', 'text/javascript', 'application/javascript', 'application/json'}
+    if request.endpoint == 'static' or response.mimetype in text_types:
+        response.vary.add('Accept-Encoding')
+    if (
+        response.status_code != 200 or request.method == 'HEAD'
+        or response.mimetype not in text_types
+        or response.headers.get('Content-Encoding')
+        or response.cache_control.no_transform
+        or request.accept_encodings['gzip'] <= 0
+        or (response.is_streamed and request.endpoint != 'static')
+    ):
+        return response
+    response.direct_passthrough = False
+    body = response.get_data()
+    if len(body) < 1024:
+        return response
+    compressed = gzip.compress(body, compresslevel=5, mtime=0)
+    if len(compressed) >= len(body):
+        return response
+    response.set_data(compressed)
+    response.headers['Content-Encoding'] = 'gzip'
+    etag, _ = response.get_etag()
+    if etag:
+        response.set_etag(etag, weak=True)
+    return response
+
 DATA_BASE_DIR = _runtime_data_base_dir()
 CONFIG_DIR = _runtime_config_dir()
 BARCODE_DIR = os.path.join(DATA_BASE_DIR, "barcode")
@@ -10313,6 +10344,8 @@ def _aurora_asset_versions():
     return {
         "theme": account_public(account)['theme'] if account else 'light',
         "theme_account": bool(account),
+        "app_account_username": account.get('username', '') if account else '',
+        "logo_v": _stamp("ecowater-logo.png"),
         "aurora_css_v": _stamp("aurora.css"),
         "aurora_js_v": _stamp("aurora.js"),
         "app_css_v": _stamp("app_layout.css"),
@@ -13665,7 +13698,12 @@ def api_crm_background_batch_status():
         job = background_query_jobs.get(job_id)
         if job and job.get('owner') != owner:
             return jsonify({'success': False, 'error': '后台查询任务不存在'}), 404
-        return jsonify(_background_query_status_payload(job))
+        payload = _background_query_status_payload(job)
+    revision = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:20]
+    if request.args.get('revision') == revision:
+        return jsonify(success=True, unchanged=True, revision=revision)
+    payload['revision'] = revision
+    return jsonify(payload)
 
 
 @app.route("/api/crm/background-batch/stop", methods=["POST"])

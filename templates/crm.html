@@ -107,7 +107,7 @@
 </head>
 <body data-aurora-page="query">
     <div class="container">
-        <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+        <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png?v={{ logo_v }}" alt="EcoWater 怡口净水"></a>
     {% include 'theme_switch.html' %}
         <div class="header">
             <div>
@@ -132,7 +132,7 @@
             </div>
             {% if not is_desktop_app %}
             <div class="aurora-account-session">
-                <span class="aurora-account-name" id="appAccountStatus">检测中</span>
+                <span class="aurora-account-name" id="appAccountStatus">{{ app_account_username }}</span>
                 <a class="aurora-account-logout" href="/logout">退出工具账号</a>
             </div>
             {% endif %}
@@ -234,6 +234,7 @@
         let multiBatchPollTimer = null;
         let querySharedSyncTimer = null;
         let isMultiBatchPolling = false;
+        let backgroundQueryRevision = '';
         let pendingLoginSlots = [];
         let currentLoginJobId = sessionStorage.getItem('crm_bulk_login_job_query') || '';
         let loginPollTimer = null;
@@ -756,10 +757,11 @@
             checkStatus();
         }
 
+        let statusCheckPending = false;
         async function checkStatus() {
-            if (document.hidden) return;
+            if (document.hidden || statusCheckPending) return;
+            statusCheckPending = true;
             try {
-                refreshAppAccountStatus();
                 await loadSlots();
                 const browserDot = document.getElementById('browserDot');
                 const loginDot = document.getElementById('loginDot');
@@ -795,13 +797,9 @@
                 }
             } catch(e) {
                 console.error(e);
+            } finally {
+                statusCheckPending = false;
             }
-        }
-
-        async function refreshAppAccountStatus() {
-            const data = await fetch('/api/app-auth/status').then(r => r.json()).catch(() => ({}));
-            const el = document.getElementById('appAccountStatus');
-            if (el) el.textContent = data.account ? data.account.username : '未登录';
         }
 
         function appendLoginServerLog(entry) {
@@ -1165,8 +1163,11 @@
                 } else if (currentBackgroundQueryJobId) {
                     params.set('job_id', currentBackgroundQueryJobId);
                 }
+                if (backgroundQueryRevision) params.set('revision', backgroundQueryRevision);
                 const response = await fetch('/api/crm/background-batch/status?' + params.toString());
                 const data = await response.json();
+                if (data.unchanged) return;
+                backgroundQueryRevision = data.revision || '';
                 if (!data.success || !data.job_id) {
                     isMultiBatchRunning = false;
                     resetQueryButtons();

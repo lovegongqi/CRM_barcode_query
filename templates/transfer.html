@@ -118,7 +118,7 @@
 </head>
 <body data-aurora-page="transfer">
 <div class="container">
-    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png" alt="EcoWater 怡口净水"></a>
+    <a class="aurora-logo" href="/" aria-label="怡口 CRM 首页"><img src="/static/ecowater-logo.png?v={{ logo_v }}" alt="EcoWater 怡口净水"></a>
     {% include 'theme_switch.html' %}
     <div class="header">
         <div>
@@ -135,7 +135,7 @@
     {% if not is_desktop_app %}
     <div class="status-bar aurora-account-status">
         <div class="aurora-account-session">
-            <span class="aurora-account-name" id="appAccountStatus">检测中</span>
+            <span class="aurora-account-name" id="appAccountStatus">{{ app_account_username }}</span>
             <a class="aurora-account-logout" href="/logout">退出工具账号</a>
         </div>
     </div>
@@ -1746,11 +1746,6 @@ async function refreshCrmStatus() {
     text.textContent = loggedSlots > 0 ? `已登录 ${loggedSlots}/${totalSlots}` : `未登录 0/${totalSlots}`;
     loginBtn.style.display = loggedSlots < totalSlots ? '' : 'none';
     if (logoutBtn) logoutBtn.style.display = loggedSlots > 0 ? '' : 'none';
-    const appAccountStatus = document.getElementById('appAccountStatus');
-    if (appAccountStatus) {
-        const appData = await fetch('/api/app-auth/status').then(r => r.json()).catch(() => ({}));
-        appAccountStatus.textContent = appData.account ? appData.account.username : '未登录';
-    }
 }
 
 async function loadQueriedDealerHistory() {

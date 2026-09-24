@@ -609,6 +609,23 @@ class BackgroundJobTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["job_id"], latest["job_id"])
 
+    def test_unchanged_query_status_omits_logs_and_changes_invalidate_revision(self):
+        job = app_module._empty_background_query_job('admin', ['A1'], ['query-1'], 0)
+        job.update(done=True, running=False)
+        app_module.background_query_jobs[job['job_id']] = job
+        app_module.latest_background_query_job_by_owner['admin'] = job['job_id']
+        path = '/api/crm/background-batch/status'
+        first = self.client.get(path).get_json()
+        self.assertIn('revision', first)
+        repeated = self.client.get(path, query_string={'revision': first['revision']}).get_json()
+        self.assertTrue(repeated['unchanged'])
+        self.assertNotIn('logs', repeated)
+        self.assertNotIn('items', repeated)
+        job['items'][0]['state'] = 'error'
+        changed = self.client.get(path, query_string={'revision': first['revision']}).get_json()
+        self.assertNotEqual(changed['revision'], first['revision'])
+        self.assertEqual(changed['items'][0]['state'], 'error')
+
     def test_background_query_status_only_returns_actionable_rows(self):
         job = app_module._empty_background_query_job(
             "admin",
