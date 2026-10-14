@@ -9,6 +9,13 @@
     <script defer src="/static/aurora.js{{ aurora_js_v }}"></script>
     <style>
         .close-card { padding:20px; } .close-card + .close-card { margin-top:14px; }
+        .service-search-form { display:flex; align-items:end; gap:10px; margin-top:14px; }
+        .service-search-field { flex:1; min-width:0; }
+        .service-search-field label { display:block; margin-bottom:6px; color:var(--aurora-muted); font-size:12px; }
+        .service-search-field input { width:100%; box-sizing:border-box; min-height:40px; padding:9px 12px; border:1px solid var(--aurora-line-strong); border-radius:10px; background:var(--aurora-control-bg); color:var(--aurora-text); }
+        .service-search-form button { min-height:40px; padding:9px 14px; border:1px solid var(--aurora-line-strong); border-radius:10px; background:var(--aurora-control-bg); color:var(--aurora-text); cursor:pointer; white-space:nowrap; }
+        .service-search-form button:disabled { opacity:.6; cursor:wait; }
+        #serviceSearchMessage { min-height:18px; margin-top:8px; }
         .close-card-head { display:grid; grid-template-columns:1fr auto; align-items:start; gap:8px 12px; margin-bottom:14px; }
         .close-card h2 { margin:0; font-size:16px; } .close-card p { margin:5px 0 0; color:var(--aurora-muted); font-size:12px; }
         .close-card-head > p { grid-column:1 / -1; margin:0; }
@@ -70,6 +77,15 @@
     {% include 'theme_switch.html' %}
         <div class="app-header"><div class="app-title"><h1>怡口 CRM 结单管理</h1><div class="app-subtitle">批量结单进度与历史记录</div></div><div class="page-nav">{% for link in nav_links %}<a href="{{ link.href }}">{{ link.label }}</a>{% endfor %}</div></div>
         {% if not is_desktop_app %}<div class="status-bar aurora-account-status"><div class="aurora-workspace-links"><a href="/results">条码列表</a><a class="active" href="/service-close">结单管理</a></div><div class="aurora-account-session"><span class="aurora-account-name" id="appAccountStatus">{{ app_account_username }}</span><a class="aurora-account-logout" href="/logout">退出工具账号</a></div></div>{% endif %}
+        <section class="card close-card">
+            <h2>按服务单号查询</h2>
+            <p>输入服务单号，直接查询 CRM 客户与产品明细。</p>
+            <form class="service-search-form" onsubmit="searchServiceOrder(event)">
+                <div class="service-search-field"><label for="serviceSearchNumber">服务单号</label><input id="serviceSearchNumber" type="text" placeholder="例如 FWD202608170003" maxlength="80" autocomplete="off" spellcheck="false" required></div>
+                <button id="serviceSearchButton" type="submit">查询服务单</button>
+            </form>
+            <p id="serviceSearchMessage" role="status" aria-live="polite"></p>
+        </section>
         <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions">{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>批量结单请在条码列表页发起；最新任务与历史记录均直接显示在这里。</p></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
     </div>
     <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><span class="modal-title-text" id="modalTitle">服务单详情</span><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
@@ -79,6 +95,38 @@
         const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
         const closeState = state => ({waiting:['等待','is-waiting'],running:['处理中','is-running'],closed:['新结单','is-closed'],already_closed:['原已结单','is-already-closed'],failed:['失败','is-failed']}[state] || [state || '等待','is-waiting']);
         const duration = value => { const seconds = Math.max(0, Number(value || 0)); return seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`; };
+
+        async function searchServiceOrder(event) {
+            event.preventDefault();
+            const input = document.getElementById('serviceSearchNumber');
+            const button = document.getElementById('serviceSearchButton');
+            const message = document.getElementById('serviceSearchMessage');
+            if (button.disabled) return;
+            const serviceNo = input.value.trim().toUpperCase();
+            if (!/^[A-Z0-9_-]{4,80}$/.test(serviceNo)) {
+                message.textContent = '请输入完整服务单号，仅支持字母、数字、下划线和短横线';
+                return;
+            }
+            input.value = serviceNo;
+            button.disabled = true;
+            input.disabled = true;
+            button.textContent = '查询中…';
+            message.textContent = '正在从 CRM 查询服务单，请稍候…';
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, {method:'POST'});
+                if (!response.headers.get('content-type')?.includes('application/json')) throw new Error(`查询请求异常（HTTP ${response.status}），请稍后重试`);
+                const data = await response.json();
+                if (!response.ok || !data.success) throw new Error(data.error || '服务单查询失败');
+                message.textContent = `已查询服务单 ${serviceNo}`;
+                await showServiceOrderDetail(serviceNo, data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+            } catch (error) {
+                message.textContent = error.message || '服务单查询失败，请稍后重试';
+            } finally {
+                button.disabled = false;
+                input.disabled = false;
+                button.textContent = '查询服务单';
+            }
+        }
 
         function renderRows(rows, canDelete = false, record = {}) {
             const time = record.finished_at || record.started_at || '—';
