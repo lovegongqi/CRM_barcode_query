@@ -213,7 +213,8 @@ def test_modal_close_button_queues_only_this_service_and_shows_result(search_pag
     expect(page.locator('.service-detail-close')).to_be_disabled()
 
 
-def test_model_correction_requires_preview_then_explicit_save(search_page):
+@pytest.mark.parametrize('transient_error', [False, True])
+def test_model_correction_requires_preview_then_explicit_save(search_page, transient_error):
     page, _, state = search_page
     submitted = []
     option = {'detail_id':'row-1', 'seq':10, 'old_code':'906042809', 'old_name':'ERO121-3',
@@ -222,7 +223,12 @@ def test_model_correction_requires_preview_then_explicit_save(search_page):
         payload = route.request.post_data_json
         submitted.append(payload)
         route.fulfill(json={'job_id':payload['action'], 'action':payload['action'], 'running':True})
+    failed_once = False
     def model_status(route):
+        nonlocal failed_once
+        if transient_error and not failed_once:
+            failed_once = True
+            return route.fulfill(status=502, content_type='text/html', body='<html>Bad Gateway</html>')
         action = route.request.url.rsplit('=',1)[1]
         route.fulfill(json={'job_id':action, 'action':action, 'running':False, 'success':True,
                             'message':'型号已修正并核验', 'preview':{'order_no':'ORD2610040175', 'options':[option]}})

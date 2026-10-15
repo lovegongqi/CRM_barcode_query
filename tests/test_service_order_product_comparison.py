@@ -147,6 +147,29 @@ class CRMRelatedOrderTests(unittest.TestCase):
         self.assertTrue(ok, result)
         self.assertEqual(result, {"fields": fields, "products": products})
 
+    def test_refresh_reads_related_order_after_detail_data_finishes_loading(self):
+        session = make_crm_session()
+        fields = [{"label": "关联订单", "value": "ORD2610040175"}]
+        products = [{"product_code": "906042810", "barcode": "3402504290242"}]
+        loaded = False
+
+        def load_products():
+            nonlocal loaded
+            loaded = True
+            return products
+
+        with mock.patch.object(session, "is_alive", return_value=True), \
+                mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                mock.patch.object(session, "_service_detail_fields", side_effect=lambda: fields if loaded else []), \
+                mock.patch.object(session, "_service_detail_products", side_effect=load_products):
+            ok, result = session.refresh_service_order_products("FWD202610040293")
+
+        self.assertTrue(ok, result)
+        self.assertEqual(result["fields"], fields)
+        self.assertEqual(result["products"], products)
+
     def test_store_order_list_uses_live_crm_route_and_accepts_live_or_legacy_heading(self):
         session = make_crm_session()
         session.page.url = "http://crmportal.ecowaterchina.net.cn/#/workOrder/list"
@@ -562,6 +585,23 @@ class CRMOrderProductDOMTests(unittest.TestCase):
         finally:
             self.page.unroute("**/*", fulfill)
         self.page.set_content(html)
+
+    def test_service_detail_heading_does_not_bypass_loading_form_checks(self):
+        self.set_crm_page('#/workOrder/edit/service-id', '<a>FWD202610040293</a>')
+        self.session.context = self.page.context
+        loading = '<h1>服务工单</h1><button>结单确认</button><label>结单状态</label>'
+        loaded = loading + '<input value="FWD202610040293"><input value="未结单">'
+        steps = []
+
+        def advance(_delay):
+            steps.append(1)
+            self.page.set_content(loaded if len(steps) == 3 else loading)
+
+        with mock.patch.object(app_module.time, 'sleep', side_effect=advance):
+            ok, message = self.session._open_service_order_detail('FWD202610040293')
+
+        self.assertTrue(ok, message)
+        self.assertEqual(len(steps), 3)
 
     def test_detail_readiness_waits_for_exact_context_and_loaded_recognized_table(self):
         list_html = '<h1>订单列表 产品筛选</h1><table><tbody><tr><td><a>SO-100</a></td></tr></tbody></table>'

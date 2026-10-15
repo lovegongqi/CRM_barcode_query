@@ -1895,6 +1895,8 @@ class CRMSession:
                     }""", str(service_no))
                     if (ready or {}).get("hasServiceNo") and (ready or {}).get("hasCloseStatus"):
                         return True, ""
+                    # The detail shell appears before its form values; keep waiting.
+                    continue
                 if ("服务工单" in compact and "结单确认" in compact) or ("服务工单号" in compact and "结单状态" in compact):
                     return True, ""
             except Exception:
@@ -2546,8 +2548,9 @@ class CRMSession:
                 ok, message = self._open_service_order_detail(service_no)
                 if not ok:
                     return False, {"error": message or "无法打开服务单详情"}
-                fields = self._service_detail_fields()
                 products = self._service_detail_products()
+                # Product loading also gives the asynchronously populated form time to render.
+                fields = self._service_detail_fields()
                 return True, {"fields": fields, "products": products}
         except Exception as e:
             return False, {"error": str(e)}
@@ -2661,8 +2664,10 @@ class CRMSession:
             if not ok:
                 return False, detail
             order_no = _related_order_no_from_service_fields(detail.get('fields') or [])
-            if not order_no or not detail.get('products'):
-                return False, {'error': '服务单缺少关联订单号或产品明细，请先核对 CRM'}
+            if not order_no:
+                return False, {'error': '本次未读取到 CRM 关联订单号，请稍后重新预览'}
+            if not detail.get('products'):
+                return False, {'error': '本次未读取到 CRM 服务单产品明细，请稍后重新预览'}
             with _service_order_cache_lock(service_no):
                 # Preserve barcode relationships while replacing stale order associations.
                 filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')

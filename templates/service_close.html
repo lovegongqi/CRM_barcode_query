@@ -206,11 +206,25 @@
                 setModelBusy(false);
             }
         }
-        async function pollModelCorrection(serviceNo, jobId, requestId) {
+        async function pollModelCorrection(serviceNo, jobId, requestId, readFailures = 0) {
             if (requestId !== detailRequestId) return;
+            let response, data;
             try {
-                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/model-correction/status?job_id=${encodeURIComponent(jobId)}`);
-                const data = await response.json();
+                response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/model-correction/status?job_id=${encodeURIComponent(jobId)}`);
+                if (response.status >= 500) throw new Error('状态服务暂时不可用');
+                data = await response.json();
+            } catch (_) {
+                if (requestId !== detailRequestId) return;
+                if (readFailures < 3) {
+                    showModelMessage('状态读取暂时中断，正在重新连接；不会重复提交修正。');
+                    setTimeout(() => pollModelCorrection(serviceNo,jobId,requestId,readFailures + 1),1200);
+                } else {
+                    setModelBusy(false);
+                    showModelMessage('暂时无法读取后台结果，请关闭详情后重新打开以继续查看；请勿重复提交。');
+                }
+                return;
+            }
+            try {
                 if (requestId !== detailRequestId) return;
                 if (!response.ok) throw new Error(data.error || '型号修正状态读取失败');
                 showModelMessage(data.message || '正在等待查询通道…');
