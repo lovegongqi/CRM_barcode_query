@@ -39,6 +39,7 @@ try:
 except ImportError:
     msvcrt = None
 
+from service_model_correction import build_model_correction_preview, MODEL_SNAPSHOT_JS, MODEL_APPLY_JS
 from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
 from inbound_extraction import (
     build_inbound_result,
@@ -2652,6 +2653,59 @@ class CRMSession:
         except Exception as error:
             return False, {"error": str(error)}
 
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None):
+        emit = log or (lambda *_args: None)
+        try:
+            emit('正在重新读取服务单与关联订单', 'info')
+            ok, detail = self.refresh_service_order_products(service_no, log)
+            if not ok:
+                return False, detail
+            order_no = _related_order_no_from_service_fields(detail.get('fields') or [])
+            if not order_no or not detail.get('products'):
+                return False, {'error': '服务单缺少关联订单号或产品明细，请先核对 CRM'}
+            with _service_order_cache_lock(service_no):
+                # Preserve barcode relationships while replacing stale order associations.
+                filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
+                try:
+                    with open(filepath, encoding='utf-8') as file:
+                        cached = json.load(file)
+                except (OSError, ValueError):
+                    cached = {}
+                cached.update(detail)
+                cached['order_lookup'] = {}
+                _write_service_order_detail(service_no, cached)
+            ok, related = self.query_related_order_products(service_no, log)
+            if not ok:
+                return False, related
+            with self.lock:
+                snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
+                preview = build_model_correction_preview(snapshot, detail['products'])
+                if expected is not None:
+                    if preview['fingerprint'] != expected.get('fingerprint') or option not in preview['options']:
+                        return False, {'error': '服务单或关联订单已变化，请重新预览型号修正'}
+                    emit('正在保存关联订单型号并重新读取核验', 'info')
+                    result = self.page.evaluate(MODEL_APPLY_JS, {'preview': preview, 'option': option})
+                    snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
+                else:
+                    result = preview
+            order_products = [{
+                'product_code': row.get('new_productname') or '',
+                'product_name': (row.get('new_productid') or {}).get('name') or '',
+                'quantity': row.get('new_qty') or 0,
+            } for row in snapshot['rows']]
+            with _service_order_cache_lock(service_no):
+                with open(filepath, encoding='utf-8') as file:
+                    cached = json.load(file)
+                cached['order_lookup'] = {
+                    'order_no': order_no, 'products': order_products,
+                    'comparison': _build_service_order_product_comparison(detail['products'], order_products),
+                    'queried_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                _write_service_order_detail(service_no, cached)
+            return True, result
+        except Exception as error:
+            return False, {'error': str(error)}
+
     def _move_create_url(self):
         cfg = load_crm_config()
         base = cfg["website"]["url"].rstrip("/")
@@ -4017,6 +4071,9 @@ class CRMWorker:
     def query_related_order_products(self, service_no, log=None):
         return self._call("query_related_order_products", service_no, log)
 
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None):
+        return self._call("correct_service_order_model", service_no, expected, option, log)
+
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
 
@@ -4941,6 +4998,8 @@ service_close_history_lock = threading.RLock()
 
 order_product_job_lock = threading.RLock()
 order_product_jobs = {}
+service_model_jobs = {}
+service_model_apply_lock = threading.Lock()
 latest_order_product_job_by_service = {}
 service_order_cache_locks_guard = threading.Lock()
 service_order_cache_locks = {}
@@ -10143,6 +10202,30 @@ def _append_service_close_history(job):
         return _save_service_close_history([record, *records])
 
 
+def _record_service_order_query(service_no, detail, slot_id, slot_label):
+    with service_close_history_lock:
+        for record in load_service_close_history():
+            if any(row.get('service_no') == service_no and row.get('state') != 'queried'
+                   for row in record.get('service_rows') or []):
+                # 查询不覆盖此前的结单结果；结单任务完成后仍由原流程更新。
+                return True
+        customer = _service_detail_field_value(detail, ['客户名称', '客户姓名', '反馈人', '联系人'])
+        order = _merge_service_order_products({
+            'service_no': service_no,
+            'customer_names': [customer] if customer else [],
+            'detail_url': f'/api/service-orders/{service_no}',
+        }, detail.get('products') or [], selected_barcodes=[])
+        job = _empty_service_close_job(slot_id, [order])
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        job.update(done=True, success=True, current=1, started_at=now, finished_at=now,
+                   actor=_clean_export_value((current_account() or {}).get('username')))
+        job['service_rows'][0].update(
+            state='queried', message='已查询服务单，尚未提交结单', selected_barcodes=[],
+            slot_id=slot_id, slot_label=slot_label, started_at=now, finished_at=now,
+        )
+        return _append_service_close_history(job)
+
+
 def delete_service_close_history(job_id):
     job_id = _clean_export_value(job_id)
     with service_close_history_lock:
@@ -10809,10 +10892,24 @@ def api_export_xlsx():
 def api_service_close_start():
     data = request.get_json() or {}
     barcodes = normalize_input_barcodes(data.get("barcodes") or [])
-    if not barcodes:
+    service_no = _clean_export_value(data.get('service_no')).upper()
+    if service_no:
+        if not re.fullmatch(r'[A-Z0-9_-]{4,80}', service_no):
+            return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
+        detail = _cached_service_order_detail(service_no)
+        if not detail:
+            return jsonify({'success': False, 'error': '请先查询该服务单并核对详情'}), 400
+        customer = _service_detail_field_value(detail, ['客户名称', '客户姓名', '反馈人', '联系人'])
+        barcodes = []
+        prepared = {'orders': [{
+            'service_no': service_no,
+            'customer_names': [customer] if customer else [],
+            'detail_url': f'/api/service-orders/{service_no}',
+        }]}
+    elif not barcodes:
         return jsonify({'success': False, 'error': '请先选择要结单的条码'})
-
-    prepared = selected_latest_service_orders(barcodes)
+    else:
+        prepared = selected_latest_service_orders(barcodes)
     orders = prepared.get("orders") or []
     if not orders:
         no_service = prepared.get("no_service") or []
@@ -10826,6 +10923,16 @@ def api_service_close_start():
 
     global latest_service_close_job_id
     with service_close_job_lock:
+        closing_service_nos = {row['service_no'] for row in orders}
+        if any(job['service_no'] in closing_service_nos and job['running'] for job in service_model_jobs.values()):
+            return jsonify(success=False, error='正在处理型号修正，请完成后再结单'), 409
+        if service_no:
+            for active_job in service_close_jobs.values():
+                if active_job.get('running') and any(
+                    row.get('service_no') == service_no for row in active_job.get('service_rows') or []
+                ):
+                    return jsonify({'success': False, 'error': '该服务单正在结单，请勿重复提交',
+                                    'job_id': active_job['job_id']}), 409
         job = _empty_service_close_job('', orders)
         job.update({
             'running': True,
@@ -11433,6 +11540,114 @@ def api_service_order_products_status(service_no):
         return jsonify(_order_product_job_status_payload(job, service_no))
 
 
+def _service_model_job_payload(job):
+    result = {key: job.get(key) for key in (
+        'job_id', 'service_no', 'action', 'running', 'done', 'success', 'error', 'message',
+    )}
+    if job.get('success') and job['action'] == 'preview':
+        preview = job['result']
+        result['preview'] = {key: preview[key] for key in ('order_no', 'options')}
+    return result
+
+
+def _run_service_model_job(job_id, worker):
+    with service_close_job_lock:
+        job = service_model_jobs[job_id]
+
+    def log(message, _level='info'):
+        with service_close_job_lock:
+            job['message'] = str(message)
+
+    try:
+        ok, result = worker.correct_service_order_model(
+            job['service_no'], job.get('_expected'), job.get('_option'), log,
+        )
+        if not ok:
+            raise RuntimeError(result.get('error') if isinstance(result, dict) else result)
+        with service_close_job_lock:
+            job.update(result=result, success=True, message='型号已修正并核验' if job['action'] == 'apply' else '型号修正预览已生成')
+    except Exception as error:
+        with service_close_job_lock:
+            job.update(success=False, error=str(error), message=str(error))
+    finally:
+        with service_close_job_lock:
+            job.update(running=False, done=True)
+
+
+@app.route('/api/service-orders/<service_no>/model-correction', methods=['POST'])
+def api_service_model_correction_start(service_no):
+    if not re.fullmatch(r'[A-Za-z0-9_-]{4,80}', service_no or ''):
+        return jsonify(success=False, error='服务单号格式不正确'), 400
+    data = request.get_json(silent=True) or {}
+    action = data.get('action', 'preview')
+    if action not in {'preview', 'apply'}:
+        return jsonify(success=False, error='无效的型号修正操作'), 400
+    actor = _clean_export_value((current_account() or {}).get('username'))
+    with service_close_job_lock:
+        for key, prior in list(service_model_jobs.items()):
+            if not prior['running'] and time.time() - prior['_created_ts'] > 1800:
+                service_model_jobs.pop(key)
+        for active in service_model_jobs.values():
+            if active['service_no'] == service_no and active['running']:
+                if active['actor'] == actor:
+                    return jsonify(_service_model_job_payload(active)), 409
+                return jsonify(success=False, error='该服务单正在处理型号修正，请稍后重试'), 409
+        if any(job.get('running') and any(row.get('service_no') == service_no for row in job.get('service_rows') or [])
+               for job in service_close_jobs.values()):
+            return jsonify(success=False, error='该服务单正在结单，请等待完成后重新查询'), 409
+        expected = option = None
+        source = None
+        if action == 'apply':
+            source = service_model_jobs.get(data.get('preview_job_id'))
+            if (not source or source['actor'] != actor or source['service_no'] != service_no
+                    or source['action'] != 'preview' or not source.get('success')
+                    or time.time() - source['_created_ts'] > 900):
+                return jsonify(success=False, error='预览已失效，请重新点击型号修正'), 400
+            if source.get('_apply_job_id'):
+                prior = service_model_jobs.get(source['_apply_job_id'])
+                if prior:
+                    return jsonify(_service_model_job_payload(prior)), 409
+                return jsonify(success=False, error='该预览已经提交，请重新预览'), 400
+            expected = source['result']
+            index = data.get('option')
+            if type(index) is not int or not 0 <= index < len(expected['options']):
+                return jsonify(success=False, error='请选择预览中的型号修正项'), 400
+            option = expected['options'][index]
+        job = {
+            'job_id': uuid.uuid4().hex, 'service_no': service_no, 'actor': actor, 'action': action,
+            'running': True, 'done': False, 'success': False, 'error': '', 'message': '等待可用查询通道',
+            '_created_ts': time.time(), '_expected': expected, '_option': option,
+        }
+        service_model_jobs[job['job_id']] = job
+        if source is not None:
+            source['_apply_job_id'] = job['job_id']
+
+    def launch(worker, slot_id, _slot_label):
+        def run():
+            try:
+                # Serialize model changes so two previews of a shared order cannot save concurrently.
+                if action == 'apply':
+                    with service_model_apply_lock:
+                        _run_service_model_job(job['job_id'], worker)
+                else:
+                    _run_service_model_job(job['job_id'], worker)
+            finally:
+                _release_priority_query_slot(slot_id)
+        threading.Thread(target=run, daemon=True).start()
+    enqueue_priority_query_work('order_products', job['job_id'], launch)
+    return jsonify(_service_model_job_payload(job))
+
+
+@app.route('/api/service-orders/<service_no>/model-correction/status')
+def api_service_model_correction_status(service_no):
+    actor = _clean_export_value((current_account() or {}).get('username'))
+    with service_close_job_lock:
+        job = service_model_jobs.get(request.args.get('job_id'))
+        if not job or job['service_no'] != service_no or job['actor'] != actor:
+            return jsonify(success=False, error='型号修正任务不存在或已过期'), 404
+        return jsonify(_service_model_job_payload(job))
+
+
 @app.route("/api/service-orders/<service_no>/refresh-products", methods=["POST"])
 def api_service_order_refresh_products(service_no):
     if not re.fullmatch(r"[A-Za-z0-9_-]{4,80}", service_no or ""):
@@ -11485,6 +11700,10 @@ def api_service_order_refresh_products(service_no):
         existing["service_no"] = _clean_export_value(service_no)
         _write_service_order_detail(service_no, existing)
 
+    history_saved = None
+    if (request.get_json(silent=True) or {}).get('record_query') is True:
+        history_saved = _record_service_order_query(service_no, existing, slot_id, slot_label)
+
     return jsonify({
         "success": True,
         "service_no": service_no,
@@ -11492,6 +11711,7 @@ def api_service_order_refresh_products(service_no):
         "slot_label": slot_label,
         "products": products,
         "product_count": len(products),
+        "history_saved": history_saved,
         "detail_url": f"/api/service-orders/{service_no}",
     })
 

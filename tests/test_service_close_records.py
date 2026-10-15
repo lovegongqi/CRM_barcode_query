@@ -32,4 +32,11 @@ def test_service_close_records_form_one_newest_first_list():
         ]
         assert page.locator("#serviceCloseRecordList .service-close-record").count() == 0
         assert page.locator("#serviceCloseLatestSummary").inner_text() == "本次批量结单：新结单2/失败0"
+        page.evaluate("""() => {
+            historyRecords = [{id:'queried', service_rows:[{service_no:'FWD-SAME',state:'queried'}]}];
+            currentCloseRecord = {id:'running', service_rows:[{service_no:'FWD-SAME',state:'running'}]};
+            renderRecords();
+        }""")
+        assert page.locator('.service-close-order-link').count() == 1
+        assert page.locator('.service-close-state').inner_text() == '处理中'
         browser.close()
