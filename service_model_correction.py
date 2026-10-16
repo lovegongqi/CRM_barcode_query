@@ -36,7 +36,7 @@ def build_barcode_model_correction_preview(order, service, library):
     order_rows = order.get('rows') or []
     for line in (service.get('rows') or []) if service.get('editable') else []:
         barcode = str(line.get('new_userprofile_number') or '').strip()
-        rule = library.get(barcode[:-10]) or {}
+        rule = library.get(barcode) or library.get(barcode[:-10]) or {}
         old_code = str(line.get('productnumber') or '').strip().upper()
         target = str(rule.get('product_code') or '').strip().upper()
         if not barcode or rule.get('source_barcode') != barcode or not old_code or not target or old_code == target:

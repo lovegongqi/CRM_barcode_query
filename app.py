@@ -21,6 +21,7 @@ import uuid
 import shutil
 import hashlib
 import gzip
+import tempfile
 from contextlib import closing, contextmanager
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
@@ -1368,7 +1369,7 @@ class CRMSession:
             print(f"  [错误] 导航到报表失败: {e}")
             return False
 
-    def query_barcode(self, barcode, log=None, output_dir=None):
+    def query_barcode(self, barcode, log=None, output_dir=None, update_library=True):
         def emit(message, level='info'):
             if log:
                 log(message, level)
@@ -1577,11 +1578,12 @@ class CRMSession:
                     output_file = os.path.join(html_dir, f"{barcode}.html")
                     with open(output_file, "w", encoding="utf-8") as f:
                         f.write(html_content)
-                    try:
-                        fields = extract_fields_from_html(output_file)
-                        refresh_product_library_from_query_fields(barcode, fields, emit)
-                    except Exception as e:
-                        emit(f"条码匹配自动更新失败：{e}", "warn")
+                    if update_library:
+                        try:
+                            fields = extract_fields_from_html(output_file)
+                            refresh_product_library_from_query_fields(barcode, fields, emit)
+                        except Exception as e:
+                            emit(f"条码匹配自动更新失败：{e}", "warn")
                     self.needs_navigation = False
                     return True, barcode
                 else:
@@ -2671,16 +2673,16 @@ class CRMSession:
                 return False, {'error': '本次未读取到 CRM 关联订单号，请稍后重新预览'}
             if not detail.get('products'):
                 return False, {'error': '本次未读取到 CRM 服务单产品明细，请稍后重新预览'}
-            library = load_product_library()
+            service_snapshot = None
+            if any(product.get('barcode') for product in detail['products']):
+                with self.lock:
+                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
+            library = verify_model_correction_barcodes(self, detail['products'], load_product_library(), emit)
             barcode_conflict = any(
-                (rule := library.get(product_prefix_from_barcode(product.get('barcode') or '')) or {}).get('source_barcode') == product.get('barcode')
+                (rule := library.get(product.get('barcode') or '') or {}).get('source_barcode') == product.get('barcode')
                 and str(rule.get('product_code') or '').strip().upper() != str(product.get('product_code') or '').strip().upper()
                 for product in detail['products']
             )
-            service_snapshot = None
-            if barcode_conflict:
-                with self.lock:
-                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
             with _service_order_cache_lock(service_no):
                 # Preserve barcode relationships while replacing stale order associations.
                 filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
@@ -4098,10 +4100,10 @@ class CRMWorker:
     def check_login_status(self):
         return self._call("check_login_status")
 
-    def query_barcode(self, barcode, log=None, output_dir=None):
+    def query_barcode(self, barcode, log=None, output_dir=None, update_library=True):
         if log:
             log(f"CRM 查询任务已加入队列：{barcode}", "dim")
-        return self._call("query_barcode", barcode, log, output_dir)
+        return self._call("query_barcode", barcode, log, output_dir, update_library)
 
     def close_service_orders(self, service_orders, log=None, progress=None):
         if log:
@@ -8093,6 +8095,35 @@ def _barcode_product_info(item):
         'matched_prefix': product_prefix_from_barcode(item.get('barcode')),
     }
     return info
+
+
+def verify_model_correction_barcodes(worker, products, library, log=None):
+    """Use a complete-barcode CRM report before offering a model change."""
+    verified = dict(library)
+    for product in products:
+        barcode = _clean_export_value(product.get('barcode'))
+        if not barcode or barcode in verified:
+            continue
+        rule = verified.get(product_prefix_from_barcode(barcode)) or {}
+        if rule.get('source_barcode') == barcode:
+            verified[barcode] = rule
+            continue
+        if log:
+            log(f'正在查询完整条码 {barcode} 的 CRM 型号', 'info')
+        os.makedirs(TEMP_QUERY_DIR, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='model-correction-', dir=TEMP_QUERY_DIR) as output_dir:
+            success, message = worker.query_barcode(barcode, log, output_dir, update_library=False)
+            if not success:
+                raise ValueError(f'完整条码 {barcode} 查询失败：{message}；未修改订单或服务单')
+            fields = extract_fields_from_html(os.path.join(output_dir, f'{barcode}.html'))
+        info = _barcode_product_info({'barcode': barcode, 'fields': fields})
+        if not info.get('product_code') or not info.get('product_name'):
+            raise ValueError(f'完整条码 {barcode} 未查到产品编码和名称；未修改订单或服务单')
+        verified[barcode] = {
+            'source_barcode': barcode, 'product_code': info['product_code'],
+            'product_name': info['product_name'],
+        }
+    return verified
 
 def refresh_product_library_from_query_fields(barcode, fields, log=None):
     info = _barcode_product_info({
