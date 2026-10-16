@@ -38,6 +38,20 @@ def test_direct_close_queues_only_the_current_cached_service_order(direct_close)
     assert job['selected_barcodes'] == []
 
 
+def test_detail_annotates_exact_barcode_model_conflict(direct_close, monkeypatch):
+    app_module._write_service_order_detail('FWD123456', {
+        'products':[{'barcode':'3752311060186','product_code':'906042810','product_name':'ERO131-3'}],
+    })
+    monkeypatch.setattr(app_module, 'load_product_library', lambda: {
+        '375':{'source_barcode':'3752311060186','product_code':'906042809','product_name':'ERO121-3'},
+    })
+    with app_module.app.test_request_context():
+        data = app_module.api_service_order_detail('FWD123456').get_json()
+    assert data['products'][0]['barcode_match'] == {
+        'product_code':'906042809','product_name':'ERO121-3','exact':True,'mismatch':True,
+    }
+
+
 @pytest.mark.parametrize('service_no', ['../../other', 'FWD-NOT-QUERIED'])
 def test_direct_close_rejects_invalid_or_unqueried_service(direct_close, service_no):
     response, _ = start_close({'service_no': service_no})

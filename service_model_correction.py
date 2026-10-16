@@ -30,6 +30,44 @@ def build_model_correction_preview(snapshot, service_products):
     return {**snapshot, 'options': options, 'fingerprint': fingerprint}
 
 
+def build_barcode_model_correction_preview(order, service, library):
+    """Offer only exact-source barcode corrections with one unambiguous order line."""
+    options = []
+    order_rows = order.get('rows') or []
+    for line in (service.get('rows') or []) if service.get('editable') else []:
+        barcode = str(line.get('new_userprofile_number') or '').strip()
+        rule = library.get(barcode[:-10]) or {}
+        old_code = str(line.get('productnumber') or '').strip().upper()
+        target = str(rule.get('product_code') or '').strip().upper()
+        if not barcode or rule.get('source_barcode') != barcode or not old_code or not target or old_code == target:
+            continue
+        linked = line.get('new_mem_salesorderlineid') or ''
+        linked = linked.get('id') if isinstance(linked, dict) else linked
+        candidates = [row for row in order_rows if row.get('detailid') and
+                      (not linked or row['detailid'] == linked) and
+                      str(row.get('new_productname') or '').strip().upper() in {old_code, target}]
+        if len(candidates) != 1 or not line.get('id'):
+            continue
+        row = candidates[0]
+        order_code = str(row.get('new_productname') or '').strip().upper()
+        if order_code == old_code and (row.get('new_isgifts') or row.get('new_type') != 1 or
+                                       float(row.get('new_qty') or 0) != 1 or
+                                       float(row.get('new_installedqty') or 0) != 0 or
+                                       float(row.get('new_returnqty') or 0) != 0):
+            continue
+        options.append({
+            'barcode': barcode, 'service_line_id': line['id'], 'order_detail_id': row['detailid'],
+            'seq': row.get('new_seq'), 'old_code': old_code,
+            'old_name': (line.get('new_product_id') or {}).get('name') or old_code,
+            'new_code': target, 'new_name': rule.get('product_name') or target,
+            'quantity': 1, 'steps': (['order'] if order_code != target else []) + ['service'],
+        })
+    fingerprint = hashlib.sha256(json.dumps(
+        [order, service, library], ensure_ascii=False, sort_keys=True,
+    ).encode()).hexdigest()
+    return {**order, 'service': service, 'options': options, 'fingerprint': fingerprint, 'mode': 'barcode'}
+
+
 # Read current server data, not stale editor values left after cancelling a dialog.
 MODEL_SNAPSHOT_JS = r"""async (orderNo) => {
     const pages = [...new Set([...document.querySelectorAll('*')].map(el => el.__vue__))]
@@ -87,4 +125,64 @@ MODEL_APPLY_JS = r"""async ({preview, option}) => {
         }
         return {detail_id:option.detail_id, old_code:option.old_code, new_code:option.new_code, message:'型号已修正并核验'};
     } finally { dialog.isSubmit = false; }
+}"""
+
+
+SERVICE_SNAPSHOT_JS = r"""async (serviceNo) => {
+    const match = location.hash.match(/^#\/workOrder\/edit\/([A-Za-z0-9-]+)/);
+    if (!match) throw new Error('当前不是 CRM 服务单详情页');
+    const id = match[1];
+    const workOrder = await rt.get('api/WorkOrder/GetWorkOrderById/' + encodeURIComponent(id));
+    if (workOrder?.new_name !== serviceNo) throw new Error('CRM 服务单号已变化，请重新查询');
+    const rows = await rt.get('api/WorkOrder/GetSrvProductline/' + encodeURIComponent(id));
+    if (!Array.isArray(rows)) throw new Error('服务单产品明细读取失败');
+    const details = [];
+    for (const row of rows) {
+        if (!row.id) throw new Error('服务单产品行缺少明细编号');
+        const detail = await rt.get('api/WorkOrder/GetSrvProductlineById/' + encodeURIComponent(row.id));
+        if (!detail || (detail.id && detail.id !== row.id)) throw new Error('服务单产品行读取不一致');
+        details.push({...detail,id:row.id});
+    }
+    return {service_no:serviceNo, work_order_id:id,
+        editable:[1,2,4].includes(Number(workOrder.new_approvalstatus)), rows:details};
+}"""
+
+
+SERVICE_APPLY_JS = r"""async ({preview, option}) => {
+    const sorted = value => Array.isArray(value) ? value.map(sorted) : value && typeof value === 'object'
+        ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])])) : value;
+    const canonical = value => JSON.stringify(sorted(value));
+    const service = preview.service;
+    const expected = service.rows.filter(row => row.id === option.service_line_id);
+    if (expected.length !== 1) throw new Error('服务单产品行不唯一，请重新预览');
+    const workOrder = await rt.get('api/WorkOrder/GetWorkOrderById/' + encodeURIComponent(service.work_order_id));
+    if (workOrder?.new_name !== service.service_no || ![1,2,4].includes(Number(workOrder.new_approvalstatus)))
+        throw new Error('服务单状态已变化，CRM 当前不允许修改明细');
+    const order = await rt.get('api/SalesOrder/GetOrderLineInfo?id=' + encodeURIComponent(option.order_detail_id));
+    if (String(order?.new_productname || '').trim().toUpperCase() !== option.new_code)
+        throw new Error('必须先修正关联订单型号，服务单尚未修改');
+    const read = async () => {
+        const row = await rt.get('api/WorkOrder/GetSrvProductlineById/' + encodeURIComponent(option.service_line_id));
+        if (!row || (row.id && row.id !== option.service_line_id)) throw new Error('服务单产品行读取不一致');
+        return {...row,id:option.service_line_id};
+    };
+    const before = await read();
+    if (canonical(before) !== canonical(expected[0])) throw new Error('服务单产品行已变化，请重新预览');
+    const lookup = await rt.get('../api/crmlookupview/getdata?entityName=product&page=1&count=50&select=name,productid,productnumber&orderby=new_salesvolume%20asc&filter=name,productnumber&filterValue=' + encodeURIComponent(option.new_code) + '&condition=');
+    const targets = (lookup?.Data || []).filter(row => String(row.productnumber).trim().toUpperCase() === option.new_code);
+    if (targets.length !== 1 || !targets[0].productid) throw new Error('未找到唯一的目标型号，请核对产品编码');
+    const target = targets[0];
+    const payload = {...before, id:option.service_line_id, new_srv_workorder_id:service.work_order_id,
+        new_product_id:{id:target.productid,name:target.name,logicalname:'product'}, productnumber:target.productnumber};
+    if (canonical(await read()) !== canonical(before)) throw new Error('保存前服务单已变化，请重新预览');
+    await rt.post('api/WorkOrder/UpdateSrvProductline', payload);
+    const saved = await read();
+    if (saved?.new_product_id?.id !== target.productid || String(saved.productnumber).trim().toUpperCase() !== option.new_code)
+        throw new Error('提交后未确认服务单新型号，请在 CRM 核对，勿重复提交');
+    for (const key of ['new_userprofile_number','new_mem_salesorderlineid']) {
+        if (canonical(saved[key]) !== canonical(before[key])) throw new Error('服务单型号已提交，但条码或关联订单行发生变化，请在 CRM 核对');
+    }
+    return {service_line_id:option.service_line_id, new_code:option.new_code,
+        new_name:target.name, barcode:before.new_userprofile_number,
+        message:'订单与服务单型号已修正并核验'};
 }"""

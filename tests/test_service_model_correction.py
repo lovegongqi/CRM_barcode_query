@@ -3,6 +3,7 @@ import copy
 import pytest
 
 import app as app_module
+from service_model_correction import build_barcode_model_correction_preview
 
 
 @pytest.fixture
@@ -51,6 +52,89 @@ def test_model_preview_fingerprint_changes_when_price_or_service_model_changes(m
     assert preview(model_snapshot)['fingerprint'] != first
     model_snapshot['rows'][0]['new_price'] = 3980
     assert preview(model_snapshot, [{'product_code':'OTHER'}])['fingerprint'] != first
+
+
+def test_barcode_preview_targets_verified_model_and_orders_writes_first(model_snapshot):
+    model_snapshot['rows'][0]['new_productname'] = '906042810'
+    model_snapshot['rows'][0]['new_productid']['name'] = 'ERO131-3'
+    service = {'service_no':'FWD202610040292', 'work_order_id':'service-id', 'editable':True,
+               'rows':[{'id':'service-line', 'new_userprofile_number':'3752311060186',
+                        'productnumber':'906042810', 'new_product_id':{'id':'old-id', 'name':'ERO131-3'}}]}
+    library = {'375':{'prefix':'375', 'product_code':'906042809', 'product_name':'ERO121-3',
+                      'source_barcode':'3752311060186'}}
+    result = build_barcode_model_correction_preview(model_snapshot, service, library)
+    assert len(result['options']) == 1
+    option = result['options'][0]
+    assert option['old_code'] == '906042810'
+    assert option['new_code'] == '906042809'
+    assert option['service_line_id'] == 'service-line'
+    assert option['order_detail_id'] == 'row-1'
+    assert option['barcode'] == '3752311060186'
+    assert option['steps'] == ['order', 'service']
+
+
+def test_barcode_preview_requires_exact_source_and_unique_order_line(model_snapshot):
+    model_snapshot['rows'][0]['new_productname'] = '906042810'
+    service = {'work_order_id':'service-id', 'editable':True,
+               'rows':[{'id':'service-line', 'new_userprofile_number':'3752311060186',
+                        'productnumber':'906042810'}]}
+    library = {'375':{'product_code':'906042809','product_name':'ERO121-3',
+                      'source_barcode':'3759999999999'}}
+    assert build_barcode_model_correction_preview(model_snapshot, service, library)['options'] == []
+    library['375']['source_barcode'] = '3752311060186'
+    model_snapshot['rows'].append({**model_snapshot['rows'][0], 'detailid':'row-2'})
+    assert build_barcode_model_correction_preview(model_snapshot, service, library)['options'] == []
+
+
+def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, model_snapshot):
+    from service_model_correction import SERVICE_APPLY_JS
+    model_snapshot['rows'][0]['new_productname'] = '906042809'
+    model_page.evaluate('''() => {
+        const s = window.testState;
+        s.service = {id:'service-line',new_userprofile_number:'3752311060186',productnumber:'906042810',
+                     new_product_id:{id:'old-id',name:'ERO131-3'},new_mem_salesorderlineid:'row-1'};
+        s.serviceWrites = [];
+        const previousGet = rt.get;
+        rt.get = async url => {
+            if (url.includes('GetWorkOrderById')) return {new_name:'FWD202610040292',new_approvalstatus:1};
+            if (url.includes('GetSrvProductlineById')) return structuredClone(s.service);
+            if (url.includes('crmlookupview')) return {Data:[{productid:'target-id',name:'ERO121-3',productnumber:'906042809'}]};
+            return previousGet(url);
+        };
+        rt.post = async (url,payload) => { s.serviceWrites.push({url,payload:structuredClone(payload)});
+            s.service = {...payload,productnumber:payload.productnumber}; };
+    }''')
+    service = {'service_no':'FWD202610040292','work_order_id':'service-id','editable':True,
+               'rows':[model_page.evaluate('testState.service')]}
+    option = {'service_line_id':'service-line','order_detail_id':'row-1','new_code':'906042809'}
+    plan = {'order_id':'order-id','service':service,'rows':model_snapshot['rows']}
+    model_page.evaluate('testState.row.new_productname = "906042810"')
+    from playwright.sync_api import Error
+    with pytest.raises(Error, match='先修正关联订单'):
+        model_page.evaluate(SERVICE_APPLY_JS, {'preview':plan,'option':option})
+    assert model_page.evaluate('testState.serviceWrites.length') == 0
+    model_page.evaluate('testState.row.new_productname = "906042809"')
+    model_page.evaluate(SERVICE_APPLY_JS, {'preview':plan,'option':option})
+    writes = model_page.evaluate('testState.serviceWrites')
+    assert len(writes) == 1
+    assert writes[0]['url'] == 'api/WorkOrder/UpdateSrvProductline'
+    assert writes[0]['payload']['new_userprofile_number'] == '3752311060186'
+    assert writes[0]['payload']['new_mem_salesorderlineid'] == 'row-1'
+
+
+def test_service_snapshot_reads_full_line_even_when_detail_omits_id(model_page):
+    from service_model_correction import SERVICE_SNAPSHOT_JS
+    model_page.evaluate('''() => {
+        location.hash = '#/workOrder/edit/service-id';
+        rt.get = async url => {
+            if (url.includes('GetWorkOrderById')) return {new_name:'FWD202610040292',new_approvalstatus:1};
+            if (url.includes('GetSrvProductlineById')) return {productnumber:'906042810',new_userprofile_number:'3752311060186'};
+            if (url.includes('GetSrvProductline')) return [{id:'service-line'}];
+        };
+    }''')
+    result = model_page.evaluate(SERVICE_SNAPSHOT_JS, 'FWD202610040292')
+    assert result['editable']
+    assert result['rows'][0]['id'] == 'service-line'
 
 
 @pytest.fixture

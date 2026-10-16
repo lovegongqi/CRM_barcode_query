@@ -92,6 +92,17 @@ def test_mobile_customer_name_and_phone_share_one_row(service_close_detail_page)
     assert address_box["width"] > name_box["width"] * 1.8
 
 
+def test_service_detail_marks_exact_barcode_model_conflict(service_close_detail_page):
+    service_close_detail_page.evaluate("""() => renderServiceOrderDetail({
+        service_no:'FWD202610040292',fields:[],products:[{
+            product_name:'ERO131-3',product_code:'906042810',barcode:'3752311060186',
+            barcode_match:{product_code:'906042809',product_name:'ERO121-3',exact:true,mismatch:true}
+        }],order_lookup:{order_no:'ORD2610040178'}})""")
+    text = service_close_detail_page.locator('#serviceDetailContent').inner_text()
+    assert '条码匹配 ERO121-3' in text
+    assert '906042809' in text
+
+
 def test_mobile_service_information_defaults_collapsed_and_expands_on_tap(service_close_detail_page):
     service = service_close_detail_page.locator(".service-detail-service")
 

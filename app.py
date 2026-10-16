@@ -39,7 +39,10 @@ try:
 except ImportError:
     msvcrt = None
 
-from service_model_correction import build_model_correction_preview, MODEL_SNAPSHOT_JS, MODEL_APPLY_JS
+from service_model_correction import (
+    build_model_correction_preview, build_barcode_model_correction_preview,
+    MODEL_SNAPSHOT_JS, MODEL_APPLY_JS, SERVICE_SNAPSHOT_JS, SERVICE_APPLY_JS,
+)
 from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
 from inbound_extraction import (
     build_inbound_result,
@@ -2668,6 +2671,16 @@ class CRMSession:
                 return False, {'error': '本次未读取到 CRM 关联订单号，请稍后重新预览'}
             if not detail.get('products'):
                 return False, {'error': '本次未读取到 CRM 服务单产品明细，请稍后重新预览'}
+            library = load_product_library()
+            barcode_conflict = any(
+                (rule := library.get(product_prefix_from_barcode(product.get('barcode') or '')) or {}).get('source_barcode') == product.get('barcode')
+                and str(rule.get('product_code') or '').strip().upper() != str(product.get('product_code') or '').strip().upper()
+                for product in detail['products']
+            )
+            service_snapshot = None
+            if barcode_conflict:
+                with self.lock:
+                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
             with _service_order_cache_lock(service_no):
                 # Preserve barcode relationships while replacing stale order associations.
                 filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
@@ -2684,13 +2697,41 @@ class CRMSession:
                 return False, related
             with self.lock:
                 snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
-                preview = build_model_correction_preview(snapshot, detail['products'])
+                preview = (build_barcode_model_correction_preview(snapshot, service_snapshot, library)
+                           if barcode_conflict else build_model_correction_preview(snapshot, detail['products']))
                 if expected is not None:
                     if preview['fingerprint'] != expected.get('fingerprint') or option not in preview['options']:
                         return False, {'error': '服务单或关联订单已变化，请重新预览型号修正'}
-                    emit('正在保存关联订单型号并重新读取核验', 'info')
-                    result = self.page.evaluate(MODEL_APPLY_JS, {'preview': preview, 'option': option})
-                    snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
+                    if barcode_conflict:
+                        if 'order' in option['steps']:
+                            emit('正在先修正关联订单型号并核验', 'info')
+                            order_option = {
+                                'detail_id': option['order_detail_id'], 'old_code': option['old_code'],
+                                'new_code': option['new_code'],
+                            }
+                            self.page.evaluate(MODEL_APPLY_JS, {'preview': preview, 'option': order_option})
+                        snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
+                        emit('订单型号已核对，正在修正服务单型号', 'info')
+                        for operation in (
+                            lambda: self._open_service_order_list(emit),
+                            lambda: self._search_service_order(service_no),
+                            lambda: self._open_service_order_detail(service_no),
+                        ):
+                            ok, message = operation()
+                            if not ok:
+                                return False, {'error': f'关联订单可能已修正，服务单尚未修改：{message}。请重新查询核对'}
+                        try:
+                            result = self.page.evaluate(SERVICE_APPLY_JS, {'preview': preview, 'option': option})
+                        except Exception as error:
+                            return False, {'error': f'关联订单可能已修正，服务单修改未确认：{error}。请重新查询核对，勿重复提交'}
+                        for product in detail['products']:
+                            if product.get('barcode') == result['barcode']:
+                                product['product_code'] = result['new_code']
+                                product['product_name'] = result['new_name']
+                    else:
+                        emit('正在保存关联订单型号并重新读取核验', 'info')
+                        result = self.page.evaluate(MODEL_APPLY_JS, {'preview': preview, 'option': option})
+                        snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
                 else:
                     result = preview
             order_products = [{
@@ -2701,6 +2742,8 @@ class CRMSession:
             with _service_order_cache_lock(service_no):
                 with open(filepath, encoding='utf-8') as file:
                     cached = json.load(file)
+                if expected is not None and barcode_conflict:
+                    cached['products'] = detail['products']
                 cached['order_lookup'] = {
                     'order_no': order_no, 'products': order_products,
                     'comparison': _build_service_order_product_comparison(detail['products'], order_products),
@@ -11450,7 +11493,18 @@ def api_service_order_detail(service_no):
             payload = json.load(file)
     except Exception:
         return jsonify({"success": False, "error": "服务单详情读取失败"}), 500
-    return jsonify(_normalize_service_order_detail(payload, service_no))
+    detail = _normalize_service_order_detail(payload, service_no)
+    library = load_product_library()
+    for product in detail.get('products') or []:
+        barcode = product.get('barcode') or ''
+        rule = library.get(product_prefix_from_barcode(barcode)) or {}
+        if (rule.get('source_barcode') == barcode and rule.get('product_code')
+                and str(rule['product_code']).strip().upper() != str(product.get('product_code') or '').strip().upper()):
+            product['barcode_match'] = {
+                'product_code': rule['product_code'], 'product_name': rule.get('product_name') or '',
+                'exact': True, 'mismatch': True,
+            }
+    return jsonify(detail)
 
 
 def _order_product_job_status_payload(job, service_no):
@@ -11552,6 +11606,7 @@ def _service_model_job_payload(job):
     if job.get('success') and job['action'] == 'preview':
         preview = job['result']
         result['preview'] = {key: preview[key] for key in ('order_no', 'options')}
+        result['preview']['mode'] = preview.get('mode') or 'order'
     return result
 
 
@@ -11570,7 +11625,7 @@ def _run_service_model_job(job_id, worker):
         if not ok:
             raise RuntimeError(result.get('error') if isinstance(result, dict) else result)
         with service_close_job_lock:
-            job.update(result=result, success=True, message='型号已修正并核验' if job['action'] == 'apply' else '型号修正预览已生成')
+            job.update(result=result, success=True, message=(result.get('message') or '型号已修正并核验') if job['action'] == 'apply' else '型号修正预览已生成')
     except Exception as error:
         with service_close_job_lock:
             job.update(success=False, error=str(error), message=str(error))
