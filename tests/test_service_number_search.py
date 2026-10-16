@@ -246,3 +246,34 @@ def test_model_correction_requires_preview_then_explicit_save(search_page, trans
     page.get_by_role('button', name='确认修正', exact=True).click()
     expect(page.locator('#modelCorrectionPanel')).to_contain_text('型号已修正并核验')
     assert submitted[-1] == {'action':'apply', 'preview_job_id':'preview', 'option':0}
+
+
+def test_model_correction_can_preview_a_manually_entered_product_code(search_page):
+    page, _, _ = search_page
+    submitted = []
+
+    def model_start(route):
+        payload = route.request.post_data_json
+        submitted.append(payload)
+        route.fulfill(json={'job_id': str(len(submitted)), 'action':'preview', 'running':False})
+
+    def model_status(route):
+        manual = route.request.url.rsplit('=', 1)[1] == '2'
+        option = {'seq':10, 'old_code':'OLD', 'old_name':'旧型号',
+                  'new_code':'CUSTOM' if manual else 'PREFIX',
+                  'new_name':'手填型号' if manual else '前缀型号', 'quantity':1,
+                  'source':'manual' if manual else 'prefix'}
+        route.fulfill(json={'action':'preview', 'running':False, 'success':True,
+                            'preview':{'order_no':'ORD123', 'mode':'barcode', 'options':[option]}})
+
+    page.route('**/model-correction', model_start)
+    page.route('**/model-correction/status?job_id=*', model_status)
+    page.get_by_label('服务单号', exact=True).fill('FWD123456')
+    page.get_by_role('button', name='查询服务单', exact=True).click()
+    page.get_by_role('button', name='型号修正', exact=True).click()
+    expect(page.locator('#modelCorrectionPanel')).to_contain_text('前缀型号')
+    page.get_by_label('目标产品编码').fill('CUSTOM')
+    page.get_by_role('button', name='预览手填编码').click()
+    expect(page.locator('#modelCorrectionPanel')).to_contain_text('手填型号')
+    assert submitted == [{'action':'preview'},
+                         {'action':'preview', 'override':{'barcode':'SN1', 'product_code':'CUSTOM'}}]

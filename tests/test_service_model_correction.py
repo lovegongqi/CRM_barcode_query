@@ -73,42 +73,21 @@ def test_barcode_preview_targets_verified_model_and_orders_writes_first(model_sn
     assert option['steps'] == ['order', 'service']
 
 
-def test_barcode_preview_requires_exact_source_and_unique_order_line(model_snapshot):
+def test_barcode_preview_accepts_prefix_model_but_requires_unique_order_line(model_snapshot):
     model_snapshot['rows'][0]['new_productname'] = '906042810'
     service = {'work_order_id':'service-id', 'editable':True,
                'rows':[{'id':'service-line', 'new_userprofile_number':'3752311060186',
                         'productnumber':'906042810'}]}
     library = {'375':{'product_code':'906042809','product_name':'ERO121-3',
                       'source_barcode':'3759999999999'}}
-    assert build_barcode_model_correction_preview(model_snapshot, service, library)['options'] == []
+    assert build_barcode_model_correction_preview(model_snapshot, service, library)['options'][0]['new_code'] == '906042809'
     library['375']['source_barcode'] = '3752311060186'
     model_snapshot['rows'].append({**model_snapshot['rows'][0], 'detailid':'row-2'})
     assert build_barcode_model_correction_preview(model_snapshot, service, library)['options'] == []
 
 
-def test_model_correction_queries_full_barcode_before_using_prefix(monkeypatch, tmp_path):
+def test_model_correction_manual_code_overrides_prefix_for_selected_barcode():
     barcode = '9232506010078'
-    monkeypatch.setattr(app_module, 'TEMP_QUERY_DIR', str(tmp_path))
-    monkeypatch.setattr(app_module, 'extract_fields_from_html', lambda _path: {'sr10': {
-        'newproductname1': '926051571', 'newproductidName1': 'H-CTO-12L滤芯',
-    }})
-
-    class Worker:
-        def query_barcode(self, queried, _log, output_dir, update_library=True):
-            assert queried == barcode
-            assert update_library is False
-            from pathlib import Path
-            Path(output_dir, f'{queried}.html').write_text('<html>CRM report</html>')
-            return True, queried
-
-    library = {'923': {'source_barcode': '9232505290418', 'product_code': '926051571',
-                       'product_name': 'H-CTO-12L滤芯'}}
-    verified = app_module.verify_model_correction_barcodes(Worker(), [
-        {'barcode': barcode, 'product_code': '926051587'},
-    ], library)
-    assert verified[barcode] == {'source_barcode': barcode, 'product_code': '926051571',
-                                 'product_name': 'H-CTO-12L滤芯'}
-    assert verified['923'] == library['923']
     order = {'order_id': 'order-id', 'order_no': 'ORD2610140356', 'rows': [{
         'detailid': 'row-1', 'new_seq': 10, 'new_type': 1, 'new_isgifts': False,
         'new_productname': '926051587', 'new_productid': {'name': 'CTO-20替换滤芯成品'},
@@ -117,26 +96,15 @@ def test_model_correction_queries_full_barcode_before_using_prefix(monkeypatch, 
     service = {'service_no': 'FWD202610140423', 'editable': True, 'rows': [{
         'id': 'service-row', 'new_userprofile_number': barcode, 'productnumber': '926051587',
     }]}
-    option = build_barcode_model_correction_preview(order, service, verified)['options'][0]
-    assert option['new_code'] == '926051571'
+    library = {'923': {'source_barcode': '9232505290418', 'product_code': '926051571',
+                       'product_name': 'H-CTO-12L滤芯'}}
+    prefix_option = build_barcode_model_correction_preview(order, service, library)['options'][0]
+    assert prefix_option['new_code'] == '926051571'
+    custom = {barcode: {'product_code': '926099999', 'product_name': '手填型号'}}
+    option = build_barcode_model_correction_preview(order, service, library, custom)['options'][0]
+    assert option['new_code'] == '926099999'
+    assert option['new_name'] == '手填型号'
     assert option['steps'] == ['order', 'service']
-
-
-def test_model_correction_stops_when_full_barcode_query_has_no_model(monkeypatch, tmp_path):
-    monkeypatch.setattr(app_module, 'TEMP_QUERY_DIR', str(tmp_path))
-    monkeypatch.setattr(app_module, 'extract_fields_from_html', lambda _path: {})
-
-    class Worker:
-        def query_barcode(self, barcode, _log, output_dir, update_library=True):
-            assert update_library is False
-            from pathlib import Path
-            Path(output_dir, f'{barcode}.html').write_text('<html>empty</html>')
-            return True, barcode
-
-    with pytest.raises(ValueError, match='未查到产品编码'):
-        app_module.verify_model_correction_barcodes(Worker(), [
-            {'barcode': '9232506010078', 'product_code': '926051587'},
-        ], {'923': {'source_barcode': '9232505290418', 'product_code': '926051571'}})
 
 
 def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, model_snapshot):
@@ -228,6 +196,16 @@ def test_crm_snapshot_reads_fresh_server_values(model_page):
     result = model_page.evaluate(MODEL_SNAPSHOT_JS, 'ORD2610040175')
     assert result['rows'][0]['new_price'] == 4000
     assert model_page.evaluate('testState.writes.length') == 0
+
+
+def test_manual_model_lookup_requires_one_exact_crm_product(model_page):
+    from playwright.sync_api import Error
+    from service_model_correction import MODEL_LOOKUP_JS
+    assert model_page.evaluate(MODEL_LOOKUP_JS, '906042810') == {
+        'product_code':'906042810', 'product_name':'ERO131-3',
+    }
+    with pytest.raises(Error, match='未找到唯一'):
+        model_page.evaluate(MODEL_LOOKUP_JS, '906042811')
 
 
 def test_crm_apply_changes_only_product_reference_and_verifies_readback(model_page, model_snapshot):

@@ -68,7 +68,7 @@
         .service-detail-comparison.is-barcode-mismatch { color:#fca5a5; background:rgba(239,68,68,.15); }
         .service-detail-comparison.is-unverified { color:#94a3b8; background:rgba(148,163,184,.13); }
         .service-detail-comparison.is-matched { color:#86efac; background:rgba(34,197,94,.15); } .service-detail-comparison.is-mismatch { color:#fde68a; background:rgba(245,158,11,.15); } .service-detail-comparison.is-order-missing { color:#fca5a5; background:rgba(239,68,68,.15); } .service-detail-comparison.is-service-missing { color:#c4b5fd; background:rgba(139,92,246,.16); }
-        .model-correction-panel { padding:14px; color:var(--aurora-text); font-size:13px; line-height:1.6; overflow-wrap:anywhere; } .model-correction-panel select { display:block; width:100%; min-width:0; max-width:100%; margin:8px 0; padding:8px; border:1px solid var(--aurora-line-strong); border-radius:8px; background:var(--aurora-control-bg); color:var(--aurora-text); }
+        .model-correction-panel { padding:14px; color:var(--aurora-text); font-size:13px; line-height:1.6; overflow-wrap:anywhere; } .model-correction-panel select, .model-correction-panel input { display:block; width:100%; min-width:0; max-width:100%; margin:8px 0; padding:8px; border:1px solid var(--aurora-line-strong); border-radius:8px; background:var(--aurora-control-bg); color:var(--aurora-text); }
         .service-detail-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; } .service-detail-refresh { border:1px solid rgba(0,200,220,.4); border-radius:999px; background:rgba(0,200,220,.12); color:#67e8f9; padding:4px 12px; font-size:12px; cursor:pointer; } .service-detail-refresh:disabled { opacity:.6; cursor:wait; }
         .service-detail-order-attempt { margin-top:5px; color:#fca5a5; font-size:11px; line-height:1.5; white-space:pre-line; } .service-detail-order-attempt.is-live { color:#7dd3fc; } .service-detail-empty { padding:28px; color:#94a3b8; text-align:center; }
         @media (max-width:760px) { .close-history-actions { flex-direction:column; align-items:flex-end; } .service-close-status-row { grid-template-columns:1fr auto; } .service-close-order { grid-column:1 / -1; } .service-close-progress { grid-column:1 / -1; } .service-close-channel { text-align:right; } .service-close-elapsed { display:none; } .service-detail-fields { grid-template-columns:1fr; } .service-detail-customer-fields { grid-template-columns:repeat(2,minmax(0,1fr)); } .service-detail-customer-fields .service-detail-field:last-child { grid-column:1 / -1; } }
@@ -152,6 +152,7 @@
         function fieldValue(fields, labels) { for (const label of labels) { const found = fields.find(row => String(row.label || '') === label); if (found) return String(found.value || ''); } return '—'; }
         function detailField(label, value) { return `<div class="service-detail-field"><label>${label}</label><div>${escapeHtml(value)}</div></div>`; }
         function renderServiceOrderDetail(detail) {
+            modelBarcodes = [...new Set((detail.products || []).map(product => String(product.barcode || '').trim()).filter(Boolean))];
             const fields = (detail.fields || []).filter(row => row && row.label), selected = new Set((detail.selected_barcodes || []).map(String)), related = new Set((detail.related_barcodes || []).map(String));
             const comparisons = new Map((detail.order_lookup?.comparison || []).map(row => [String(row.product_code || '').trim().toUpperCase(), row]));
             const customer = `<section class="service-detail-section"><h3>客户信息</h3><div class="service-detail-fields service-detail-customer-fields">${detailField('客户姓名', fieldValue(fields,['客户名称','客户姓名','反馈人','联系人']))}${detailField('联系电话', fieldValue(fields,['联系电话','客户电话','反馈电话','联系人电话','手机号码']))}${detailField('联系地址',[fieldValue(fields,['所属省份','省份']),fieldValue(fields,['所属城市','城市']),fieldValue(fields,['所属县区','县区']),fieldValue(fields,['联系地址','客户地址','地址'])].filter(value => value !== '—').join(' ') || '—')}</div></section>`;
@@ -164,7 +165,7 @@
         }
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
-            if (!serviceNo || !detailUrl) return; const requestId = ++detailRequestId; currentDetailServiceNo = serviceNo; modelPreview = null;
+            if (!serviceNo || !detailUrl) return; const requestId = ++detailRequestId; currentDetailServiceNo = serviceNo; modelPreview = null; modelOverride = null;
             document.getElementById('modalTitle').textContent = `服务单详情 - ${serviceNo}`; document.getElementById('serviceDetailContent').innerHTML = '<div class="service-detail-empty">正在读取服务单详情…</div>'; document.getElementById('detailModal').classList.add('overlay-show');
             try { const response = await fetch(detailUrl), detail = await response.json(); if (requestId !== detailRequestId) return; if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在'); renderServiceOrderDetail(detail); if (modelTasks.has(serviceNo)) { setModelBusy(true); pollModelCorrection(serviceNo,modelTasks.get(serviceNo),requestId); } else await resumeOrderProductQuery(serviceNo); }
             catch (error) { if (requestId === detailRequestId) document.getElementById('serviceDetailContent').innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`; }
@@ -175,7 +176,7 @@
         async function resumeOrderProductQuery(serviceNo) { if (!serviceNo || serviceNo !== currentDetailServiceNo) return; try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status`), data = await response.json(); if (!response.ok || !data.job_id || serviceNo !== currentDetailServiceNo) return; if (data.running) { const button = document.querySelector('.service-detail-order-query'); if (button) { button.disabled = true; button.textContent = data.stage === 'waiting' ? '等待通道…' : '查询中…'; } setOrderProductQueryStatus(data); await pollOrderProductQuery(serviceNo, data.job_id); } else if (!data.success && data.done) { resetOrderProductQueryButton(); setOrderProductQueryStatus(data); } } catch (_) {} }
         async function startOrderProductQuery(serviceNo) { const button = document.querySelector('.service-detail-order-query'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '查询中…'; } setOrderProductQueryStatus({running:true, stage:'waiting', message:'正在提交查询任务', elapsed:0}); try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`,{method:'POST'}), data = await response.json(); if (response.status !== 409 && (!response.ok || !data.success)) throw new Error(data.error || '订单产品明细查询失败'); await pollOrderProductQuery(serviceNo,data.job_id); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询失败', elapsed:0}); } }
         async function pollOrderProductQuery(serviceNo,jobId) { if (!serviceNo || serviceNo !== currentDetailServiceNo || !jobId) return; try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`), data = await response.json(); if (!response.ok) throw new Error(data.error || '订单产品明细查询状态读取失败'); if (data.running) { const button = document.querySelector('.service-detail-order-query'); if (button) button.textContent = data.stage === 'waiting' ? '等待通道…' : '查询中…'; setOrderProductQueryStatus(data); setTimeout(() => pollOrderProductQuery(serviceNo,jobId),1000); return; } if (!data.success) { resetOrderProductQueryButton(); setOrderProductQueryStatus(data); return; } setOrderProductQueryStatus(null); await showServiceOrderDetail(serviceNo,`/api/service-orders/${encodeURIComponent(serviceNo)}`); } catch (error) { resetOrderProductQueryButton(); setOrderProductQueryStatus({running:false, message:error.message || '订单产品明细查询状态读取失败', elapsed:0}); } }
-        let modelPreview = null;
+        let modelPreview = null, modelOverride = null, modelBarcodes = [];
         const modelTasks = new Map();
         function setModelBusy(busy) {
             document.querySelectorAll('.service-detail-actions button').forEach(button => button.disabled = busy);
@@ -190,10 +191,20 @@
             const option = modelPreview?.options[index];
             document.getElementById('modelCorrectionPreview').textContent = option ? `第 ${option.seq} 行：${option.old_name}（${option.old_code}） → ${option.new_name}（${option.new_code}），数量 ${option.quantity}` : '';
         }
-        async function startModelCorrection(serviceNo, apply = false) {
+        function modelManualControls() {
+            if (!modelBarcodes.length) return '';
+            return `<div class="model-correction-manual"><p>手填产品编码修正</p><label for="modelCorrectionBarcode">服务单条码</label><select id="modelCorrectionBarcode">${modelBarcodes.map(barcode => `<option value="${escapeHtml(barcode)}"${modelOverride?.barcode === barcode ? ' selected' : ''}>${escapeHtml(barcode)}</option>`).join('')}</select><label for="modelCorrectionCode">目标产品编码</label><input id="modelCorrectionCode" maxlength="40" placeholder="输入 CRM 产品编码" value="${escapeHtml(modelOverride?.product_code || '')}"><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,false,true)">预览手填编码</button></div>`;
+        }
+        async function startModelCorrection(serviceNo, apply = false, manual = false) {
             if (serviceNo !== currentDetailServiceNo) return;
             const requestId = detailRequestId;
-            const payload = apply ? {action:'apply', preview_job_id:modelPreview?.jobId, option:Number(document.getElementById('modelCorrectionChoice')?.value)} : {action:'preview'};
+            if (manual) {
+                const barcode = document.getElementById('modelCorrectionBarcode')?.value || '';
+                const productCode = document.getElementById('modelCorrectionCode')?.value.trim().toUpperCase() || '';
+                if (!barcode || !productCode) { document.getElementById('modelCorrectionCode')?.focus(); return; }
+                modelOverride = {barcode, product_code:productCode};
+            } else if (!apply) modelOverride = null;
+            const payload = apply ? {action:'apply', preview_job_id:modelPreview?.jobId, option:Number(document.getElementById('modelCorrectionChoice')?.value)} : {action:'preview', ...(manual ? {override:modelOverride} : {})};
             if (apply && (!modelPreview || modelPreview.serviceNo !== serviceNo)) return;
             setModelBusy(true);
             showModelMessage(apply ? '正在按顺序保存并核验关联订单、服务单型号…' : '正在读取条码匹配与关联订单，生成型号修正预览…');
@@ -206,7 +217,8 @@
             } catch (error) {
                 if (requestId !== detailRequestId) return;
                 modelPreview = null;
-                showModelMessage(error.message || '型号修正请求失败');
+                const panel = document.getElementById('modelCorrectionPanel');
+                panel.innerHTML = `<p>${escapeHtml(error.message || '型号修正请求失败')}</p>${modelManualControls()}`;
                 setModelBusy(false);
             }
         }
@@ -242,10 +254,10 @@
                 if (!data.success) throw new Error(data.error || '型号修正失败，请重新预览');
                 if (data.action === 'preview') {
                     const preview = data.preview;
-                    if (!preview?.options?.length) { showModelMessage(preview?.mode === 'barcode' ? '条码匹配到不同型号，但 CRM 产品行或服务单状态不满足安全修正条件，请在 CRM 核对明细。' : '没有可直接修正的型号差异。请核对是否型号已一致，或存在安装、退货数量及数量差异。'); return; }
+                    if (!preview?.options?.length) { const panel = document.getElementById('modelCorrectionPanel'); panel.innerHTML = `<p>${preview?.mode === 'barcode' ? '当前型号无法安全修正，请核对服务单状态、订单产品行、安装及退货数量。' : '没有可直接修正的型号差异。'}</p>${modelManualControls()}`; return; }
                     modelPreview = {...preview, jobId, serviceNo};
                     const panel = document.getElementById('modelCorrectionPanel');
-                    panel.innerHTML = `<p>关联订单：${escapeHtml(preview.order_no)}</p><label for="modelCorrectionChoice">选择型号修正项</label><select id="modelCorrectionChoice" onchange="updateModelPreview()">${preview.options.map((option,index) => `<option value="${index}">第 ${escapeHtml(option.seq)} 行：${escapeHtml(option.old_name)} → ${escapeHtml(option.new_name)}</option>`).join('')}</select><p id="modelCorrectionPreview"></p><p>${preview.mode === 'barcode' ? '按条码精确来源匹配；确认后先修正关联订单，再修正服务单，并核验条码、数量与金额。' : '仅修正关联订单型号，保留原数量与金额。'}</p><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,true)">确认修正</button>`;
+                    panel.innerHTML = `<p>关联订单：${escapeHtml(preview.order_no)}</p><label for="modelCorrectionChoice">选择型号修正项</label><select id="modelCorrectionChoice" onchange="updateModelPreview()">${preview.options.map((option,index) => `<option value="${index}">第 ${escapeHtml(option.seq)} 行：${escapeHtml(option.old_name)} → ${escapeHtml(option.new_name)}</option>`).join('')}</select><p id="modelCorrectionPreview"></p><p>${preview.mode === 'barcode' ? (preview.options[0].source === 'manual' ? '手填编码已在 CRM 产品目录核实；' : '按条码前缀匹配；') + '确认后先修正关联订单，再修正服务单，并核验条码、数量与金额。' : '仅修正关联订单型号，保留原数量与金额。'}</p><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,true)">确认修正</button>${modelManualControls()}`;
                     updateModelPreview();
                 } else {
                     modelPreview = null;
@@ -259,7 +271,8 @@
                 if (requestId !== detailRequestId) return;
                 modelPreview = null;
                 setModelBusy(false);
-                showModelMessage(error.message || '型号修正状态读取失败，请重新查询核对');
+                const panel = document.getElementById('modelCorrectionPanel');
+                panel.innerHTML = `<p>${escapeHtml(error.message || '型号修正状态读取失败，请重新查询核对')}</p>${modelManualControls()}`;
             }
         }
         async function confirmServiceClose(serviceNo) {

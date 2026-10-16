@@ -21,7 +21,6 @@ import uuid
 import shutil
 import hashlib
 import gzip
-import tempfile
 from contextlib import closing, contextmanager
 from collections import OrderedDict
 from decimal import Decimal, InvalidOperation
@@ -42,7 +41,7 @@ except ImportError:
 
 from service_model_correction import (
     build_model_correction_preview, build_barcode_model_correction_preview,
-    MODEL_SNAPSHOT_JS, MODEL_APPLY_JS, SERVICE_SNAPSHOT_JS, SERVICE_APPLY_JS,
+    MODEL_SNAPSHOT_JS, MODEL_LOOKUP_JS, MODEL_APPLY_JS, SERVICE_SNAPSHOT_JS, SERVICE_APPLY_JS,
 )
 from inbound_crm import PackingSlipCRMReader, PackingSlipReadError
 from inbound_extraction import (
@@ -1369,7 +1368,7 @@ class CRMSession:
             print(f"  [错误] 导航到报表失败: {e}")
             return False
 
-    def query_barcode(self, barcode, log=None, output_dir=None, update_library=True):
+    def query_barcode(self, barcode, log=None, output_dir=None):
         def emit(message, level='info'):
             if log:
                 log(message, level)
@@ -1578,12 +1577,11 @@ class CRMSession:
                     output_file = os.path.join(html_dir, f"{barcode}.html")
                     with open(output_file, "w", encoding="utf-8") as f:
                         f.write(html_content)
-                    if update_library:
-                        try:
-                            fields = extract_fields_from_html(output_file)
-                            refresh_product_library_from_query_fields(barcode, fields, emit)
-                        except Exception as e:
-                            emit(f"条码匹配自动更新失败：{e}", "warn")
+                    try:
+                        fields = extract_fields_from_html(output_file)
+                        refresh_product_library_from_query_fields(barcode, fields, emit)
+                    except Exception as e:
+                        emit(f"条码匹配自动更新失败：{e}", "warn")
                     self.needs_navigation = False
                     return True, barcode
                 else:
@@ -2661,7 +2659,7 @@ class CRMSession:
         except Exception as error:
             return False, {"error": str(error)}
 
-    def correct_service_order_model(self, service_no, expected=None, option=None, log=None):
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None):
         emit = log or (lambda *_args: None)
         try:
             emit('正在重新读取服务单与关联订单', 'info')
@@ -2673,16 +2671,16 @@ class CRMSession:
                 return False, {'error': '本次未读取到 CRM 关联订单号，请稍后重新预览'}
             if not detail.get('products'):
                 return False, {'error': '本次未读取到 CRM 服务单产品明细，请稍后重新预览'}
-            service_snapshot = None
-            if any(product.get('barcode') for product in detail['products']):
-                with self.lock:
-                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
-            library = verify_model_correction_barcodes(self, detail['products'], load_product_library(), emit)
-            barcode_conflict = any(
-                (rule := library.get(product.get('barcode') or '') or {}).get('source_barcode') == product.get('barcode')
+            library = load_product_library()
+            barcode_conflict = bool(override) or any(
+                (rule := library.get(product_prefix_from_barcode(product.get('barcode') or '')) or {}).get('product_code')
                 and str(rule.get('product_code') or '').strip().upper() != str(product.get('product_code') or '').strip().upper()
                 for product in detail['products']
             )
+            service_snapshot = None
+            if barcode_conflict:
+                with self.lock:
+                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
             with _service_order_cache_lock(service_no):
                 # Preserve barcode relationships while replacing stale order associations.
                 filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
@@ -2699,7 +2697,14 @@ class CRMSession:
                 return False, related
             with self.lock:
                 snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
-                preview = (build_barcode_model_correction_preview(snapshot, service_snapshot, library)
+                overrides = {}
+                if override:
+                    barcode = override['barcode']
+                    if not any(product.get('barcode') == barcode for product in detail['products']):
+                        return False, {'error': '服务单条码已变化，请重新打开详情后预览'}
+                    target = self.page.evaluate(MODEL_LOOKUP_JS, override['product_code'])
+                    overrides[barcode] = target
+                preview = (build_barcode_model_correction_preview(snapshot, service_snapshot, library, overrides)
                            if barcode_conflict else build_model_correction_preview(snapshot, detail['products']))
                 if expected is not None:
                     if preview['fingerprint'] != expected.get('fingerprint') or option not in preview['options']:
@@ -4100,10 +4105,10 @@ class CRMWorker:
     def check_login_status(self):
         return self._call("check_login_status")
 
-    def query_barcode(self, barcode, log=None, output_dir=None, update_library=True):
+    def query_barcode(self, barcode, log=None, output_dir=None):
         if log:
             log(f"CRM 查询任务已加入队列：{barcode}", "dim")
-        return self._call("query_barcode", barcode, log, output_dir, update_library)
+        return self._call("query_barcode", barcode, log, output_dir)
 
     def close_service_orders(self, service_orders, log=None, progress=None):
         if log:
@@ -4121,8 +4126,8 @@ class CRMWorker:
     def query_related_order_products(self, service_no, log=None):
         return self._call("query_related_order_products", service_no, log)
 
-    def correct_service_order_model(self, service_no, expected=None, option=None, log=None):
-        return self._call("correct_service_order_model", service_no, expected, option, log)
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None):
+        return self._call("correct_service_order_model", service_no, expected, option, log, override)
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
@@ -8097,34 +8102,6 @@ def _barcode_product_info(item):
     return info
 
 
-def verify_model_correction_barcodes(worker, products, library, log=None):
-    """Use a complete-barcode CRM report before offering a model change."""
-    verified = dict(library)
-    for product in products:
-        barcode = _clean_export_value(product.get('barcode'))
-        if not barcode or barcode in verified:
-            continue
-        rule = verified.get(product_prefix_from_barcode(barcode)) or {}
-        if rule.get('source_barcode') == barcode:
-            verified[barcode] = rule
-            continue
-        if log:
-            log(f'正在查询完整条码 {barcode} 的 CRM 型号', 'info')
-        os.makedirs(TEMP_QUERY_DIR, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='model-correction-', dir=TEMP_QUERY_DIR) as output_dir:
-            success, message = worker.query_barcode(barcode, log, output_dir, update_library=False)
-            if not success:
-                raise ValueError(f'完整条码 {barcode} 查询失败：{message}；未修改订单或服务单')
-            fields = extract_fields_from_html(os.path.join(output_dir, f'{barcode}.html'))
-        info = _barcode_product_info({'barcode': barcode, 'fields': fields})
-        if not info.get('product_code') or not info.get('product_name'):
-            raise ValueError(f'完整条码 {barcode} 未查到产品编码和名称；未修改订单或服务单')
-        verified[barcode] = {
-            'source_barcode': barcode, 'product_code': info['product_code'],
-            'product_name': info['product_name'],
-        }
-    return verified
-
 def refresh_product_library_from_query_fields(barcode, fields, log=None):
     info = _barcode_product_info({
         'barcode': barcode,
@@ -11651,7 +11628,7 @@ def _run_service_model_job(job_id, worker):
 
     try:
         ok, result = worker.correct_service_order_model(
-            job['service_no'], job.get('_expected'), job.get('_option'), log,
+            job['service_no'], job.get('_expected'), job.get('_option'), log, job.get('_override'),
         )
         if not ok:
             raise RuntimeError(result.get('error') if isinstance(result, dict) else result)
@@ -11686,7 +11663,7 @@ def api_service_model_correction_start(service_no):
         if any(job.get('running') and any(row.get('service_no') == service_no for row in job.get('service_rows') or [])
                for job in service_close_jobs.values()):
             return jsonify(success=False, error='该服务单正在结单，请等待完成后重新查询'), 409
-        expected = option = None
+        expected = option = override = None
         source = None
         if action == 'apply':
             source = service_model_jobs.get(data.get('preview_job_id'))
@@ -11704,10 +11681,20 @@ def api_service_model_correction_start(service_no):
             if type(index) is not int or not 0 <= index < len(expected['options']):
                 return jsonify(success=False, error='请选择预览中的型号修正项'), 400
             option = expected['options'][index]
+            override = source.get('_override')
+        elif data.get('override') is not None:
+            raw_override = data['override']
+            if not isinstance(raw_override, dict):
+                return jsonify(success=False, error='请填写条码和目标产品编码'), 400
+            barcode = _clean_export_value(raw_override.get('barcode'))
+            product_code = _clean_export_value(raw_override.get('product_code')).upper()
+            if not re.fullmatch(r'[A-Za-z0-9_-]{4,40}', barcode) or not re.fullmatch(r'[A-Z0-9._-]{2,40}', product_code):
+                return jsonify(success=False, error='条码或目标产品编码格式不正确'), 400
+            override = {'barcode': barcode, 'product_code': product_code}
         job = {
             'job_id': uuid.uuid4().hex, 'service_no': service_no, 'actor': actor, 'action': action,
             'running': True, 'done': False, 'success': False, 'error': '', 'message': '等待可用查询通道',
-            '_created_ts': time.time(), '_expected': expected, '_option': option,
+            '_created_ts': time.time(), '_expected': expected, '_option': option, '_override': override,
         }
         service_model_jobs[job['job_id']] = job
         if source is not None:

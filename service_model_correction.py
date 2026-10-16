@@ -30,16 +30,19 @@ def build_model_correction_preview(snapshot, service_products):
     return {**snapshot, 'options': options, 'fingerprint': fingerprint}
 
 
-def build_barcode_model_correction_preview(order, service, library):
-    """Offer only exact-source barcode corrections with one unambiguous order line."""
+def build_barcode_model_correction_preview(order, service, library, overrides=None):
+    """Offer prefix or selected manual corrections for one unambiguous order line."""
     options = []
+    overrides = overrides or {}
     order_rows = order.get('rows') or []
     for line in (service.get('rows') or []) if service.get('editable') else []:
         barcode = str(line.get('new_userprofile_number') or '').strip()
-        rule = library.get(barcode) or library.get(barcode[:-10]) or {}
+        if overrides and barcode not in overrides:
+            continue
+        rule = overrides.get(barcode) or library.get(barcode) or library.get(barcode[:-10]) or {}
         old_code = str(line.get('productnumber') or '').strip().upper()
         target = str(rule.get('product_code') or '').strip().upper()
-        if not barcode or rule.get('source_barcode') != barcode or not old_code or not target or old_code == target:
+        if not barcode or not old_code or not target or old_code == target:
             continue
         linked = line.get('new_mem_salesorderlineid') or ''
         linked = linked.get('id') if isinstance(linked, dict) else linked
@@ -60,10 +63,11 @@ def build_barcode_model_correction_preview(order, service, library):
             'seq': row.get('new_seq'), 'old_code': old_code,
             'old_name': (line.get('new_product_id') or {}).get('name') or old_code,
             'new_code': target, 'new_name': rule.get('product_name') or target,
-            'quantity': 1, 'steps': (['order'] if order_code != target else []) + ['service'],
+            'quantity': 1, 'source': 'manual' if barcode in overrides else 'prefix',
+            'steps': (['order'] if order_code != target else []) + ['service'],
         })
     fingerprint = hashlib.sha256(json.dumps(
-        [order, service, library], ensure_ascii=False, sort_keys=True,
+        [order, service, library, overrides], ensure_ascii=False, sort_keys=True,
     ).encode()).hexdigest()
     return {**order, 'service': service, 'options': options, 'fingerprint': fingerprint, 'mode': 'barcode'}
 
@@ -85,6 +89,14 @@ MODEL_SNAPSHOT_JS = r"""async (orderNo) => {
         details.push(detail);
     }
     return {order_id:id, order_no:orderNo, rows:details};
+}"""
+
+MODEL_LOOKUP_JS = r"""async (code) => {
+    const lookup = await rt.get('../api/crmlookupview/getdata?entityName=product&page=1&count=50&select=name,productid,productnumber&orderby=new_salesvolume%20asc&filter=name,productnumber&filterValue=' + encodeURIComponent(code) + '&condition=');
+    const targets = (lookup?.Data || []).filter(row => String(row.productnumber || '').trim().toUpperCase() === code);
+    if (targets.length !== 1 || !targets[0].productid || !targets[0].name)
+        throw new Error('未找到唯一的目标型号，请核对手填产品编码');
+    return {product_code:code, product_name:targets[0].name};
 }"""
 
 MODEL_APPLY_JS = r"""async ({preview, option}) => {

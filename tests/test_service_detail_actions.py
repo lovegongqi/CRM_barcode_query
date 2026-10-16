@@ -117,6 +117,24 @@ def test_model_preview_starts_a_read_job_and_duplicate_request_does_not_duplicat
     assert len(app_module.service_model_jobs) == 1
 
 
+def test_manual_model_preview_keeps_server_validated_barcode_and_code(model_jobs):
+    response, status = start_model({'action':'preview', 'override':{
+        'barcode':'9232506010078', 'product_code':' 926051571 ',
+    }})
+    assert status == 200
+    job = app_module.service_model_jobs[response.get_json()['job_id']]
+    assert job['_override'] == {'barcode':'9232506010078', 'product_code':'926051571'}
+
+
+def test_manual_model_preview_rejects_invalid_code(model_jobs):
+    response, status = start_model({'action':'preview', 'override':{
+        'barcode':'9232506010078', 'product_code':'<script>',
+    }})
+    assert status == 400
+    assert not response.get_json()['success']
+    assert not app_module.service_model_jobs
+
+
 def ready_preview():
     import time
     job = {
@@ -142,6 +160,16 @@ def test_model_apply_uses_server_preview_and_rejects_repeat_submission(model_job
     assert repeated.get_json()['job_id'] == job['job_id']
     assert len(app_module.service_model_jobs) == 2
     assert source['_apply_job_id'] == job['job_id']
+
+
+def test_model_apply_keeps_manual_target_from_preview(model_jobs):
+    source = ready_preview()
+    source['_override'] = {'barcode':'9232506010078', 'product_code':'926051571'}
+    response, status = start_model({'action':'apply', 'preview_job_id':source['job_id'], 'option':0,
+                                    'override':{'barcode':'forged', 'product_code':'FORGED'}})
+    assert status == 200
+    job = app_module.service_model_jobs[response.get_json()['job_id']]
+    assert job['_override'] == source['_override']
 
 
 @pytest.mark.parametrize('change', ['actor', 'expired', 'other_service', 'invalid_option'])
