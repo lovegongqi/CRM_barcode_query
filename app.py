@@ -11498,11 +11498,11 @@ def api_service_order_detail(service_no):
     for product in detail.get('products') or []:
         barcode = product.get('barcode') or ''
         rule = library.get(product_prefix_from_barcode(barcode)) or {}
-        if (rule.get('source_barcode') == barcode and rule.get('product_code')
-                and str(rule['product_code']).strip().upper() != str(product.get('product_code') or '').strip().upper()):
+        if barcode and rule.get('product_code'):
             product['barcode_match'] = {
                 'product_code': rule['product_code'], 'product_name': rule.get('product_name') or '',
-                'exact': True, 'mismatch': True,
+                'exact': rule.get('source_barcode') == barcode,
+                'mismatch': str(rule['product_code']).strip().upper() != str(product.get('product_code') or '').strip().upper(),
             }
     return jsonify(detail)
 

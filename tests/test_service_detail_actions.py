@@ -52,6 +52,25 @@ def test_detail_annotates_exact_barcode_model_conflict(direct_close, monkeypatch
     }
 
 
+def test_detail_checks_barcode_prefix_before_order_service_agreement(direct_close, monkeypatch):
+    app_module._write_service_order_detail('FWD123456', {
+        'products': [{'barcode': '9232506010078', 'product_code': '926051587',
+                      'product_name': 'CTO-20替换滤芯成品'}],
+        'order_lookup': {'comparison': [{'product_code': '926051587', 'status': 'matched',
+                                         'status_label': '一致'}]},
+    })
+    monkeypatch.setattr(app_module, 'load_product_library', lambda: {
+        '923': {'source_barcode': '9232505290418', 'product_code': '926051571',
+                'product_name': 'H-CTO-12L滤芯'},
+    })
+    with app_module.app.test_request_context():
+        data = app_module.api_service_order_detail('FWD123456').get_json()
+    assert data['products'][0]['barcode_match'] == {
+        'product_code': '926051571', 'product_name': 'H-CTO-12L滤芯',
+        'exact': False, 'mismatch': True,
+    }
+
+
 @pytest.mark.parametrize('service_no', ['../../other', 'FWD-NOT-QUERIED'])
 def test_direct_close_rejects_invalid_or_unqueried_service(direct_close, service_no):
     response, _ = start_close({'service_no': service_no})

@@ -103,6 +103,31 @@ def test_service_detail_marks_exact_barcode_model_conflict(service_close_detail_
     assert '906042809' in text
 
 
+def test_barcode_model_conflict_takes_priority_over_order_service_agreement(service_close_detail_page):
+    page = service_close_detail_page
+    page.evaluate("""() => renderServiceOrderDetail({
+        service_no:'FWD202610140423',fields:[],products:[{
+            product_name:'CTO-20替换滤芯成品',product_code:'926051587',barcode:'9232506010078',
+            barcode_match:{product_code:'926051571',product_name:'H-CTO-12L滤芯',exact:false,mismatch:true}
+        }],order_lookup:{comparison:[{product_code:'926051587',order_quantity:1,
+            service_quantity:1,status:'matched',status_label:'一致'}]}})""")
+    result = page.locator('.service-detail-table tbody tr td').last
+    assert '条码型号不符' in result.inner_text()
+    assert '订单与服务单一致' in result.inner_text()
+    assert 'H-CTO-12L滤芯' in page.locator('.service-detail-table tbody tr').inner_text()
+
+
+def test_unknown_barcode_model_is_not_reported_as_fully_matched(service_close_detail_page):
+    page = service_close_detail_page
+    page.evaluate("""() => renderServiceOrderDetail({
+        service_no:'FWD100',fields:[],products:[{product_code:'A',barcode:'UNKNOWN'}],
+        order_lookup:{comparison:[{product_code:'A',order_quantity:1,
+            service_quantity:1,status:'matched',status_label:'一致'}]}})""")
+    result = page.locator('.service-detail-table tbody tr td').last
+    assert '条码型号未核实' in result.inner_text()
+    assert '订单与服务单一致' in result.inner_text()
+
+
 def test_mobile_service_information_defaults_collapsed_and_expands_on_tap(service_close_detail_page):
     service = service_close_detail_page.locator(".service-detail-service")
 

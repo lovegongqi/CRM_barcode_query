@@ -390,8 +390,10 @@ body[data-aurora-page] .service-detail-comparison.is-matched,
 body[data-aurora-page] .is-closed .service-close-state { color: #138153 !important; }
 body[data-aurora-page] .service-detail-comparison.is-mismatch { color: #9d6600 !important; }
 body[data-aurora-page] .service-detail-comparison.is-order-missing,
+body[data-aurora-page] .service-detail-comparison.is-barcode-mismatch,
 body[data-aurora-page] .is-failed .service-close-state { color: #be4056 !important; }
 body[data-aurora-page] .service-detail-comparison.is-service-missing { color: #7654ad !important; }
+body[data-aurora-page] .service-detail-comparison.is-unverified { color: #60758d !important; }
 
 /* Inventory and inbound use additional page-local component styles. */
 body[data-aurora-page="inventory"] .inventory-workspace-tab,
