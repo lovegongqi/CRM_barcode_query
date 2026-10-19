@@ -2,6 +2,7 @@ import unittest
 
 from playwright.sync_api import sync_playwright
 
+from app import CRMSession
 from inbound_crm import PackingSlipCRMReader, PackingSlipReadError, map_shipment_rows, map_table_rows
 
 
@@ -50,6 +51,41 @@ def detail_row(page, serial=None):
 
 
 class InboundCRMTest(unittest.TestCase):
+    def test_opens_packing_slip_list_from_portal_not_stale_report_tab(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                context = browser.new_context()
+                portal_html = (
+                    "<div id='app'></div><script>"
+                    "function render() { document.getElementById('app').innerHTML = "
+                    "location.hash.includes('/packingorder/list') ? "
+                    "\"<div class='el-form-item'><label>装箱单号</label><input></div>\" : "
+                    "\"<div>CRM 报表</div>\"; }"
+                    "window.addEventListener('hashchange', render); render();"
+                    "</script>"
+                )
+                context.route("**/*", lambda route: route.fulfill(
+                    body=portal_html, content_type="text/html; charset=utf-8"
+                ))
+                portal = context.new_page()
+                portal.goto("http://crmportal.ecowaterchina.net.cn/#/report/reportlist")
+                report = context.new_page()
+                report.goto("http://crmportal.ecowaterchina.net.cn/EcoCrystalReports/EcoCrystalRp")
+                session = CRMSession()
+                session.context = context
+                session.page = report
+
+                PackingSlipCRMReader(session)._navigate_to_packing_slips()
+
+                self.assertTrue(report.is_closed())
+                self.assertIs(session.page, portal)
+                self.assertTrue(portal.url.endswith("/#/packingorder/list"))
+                portal.wait_for_selector(".el-form-item input")
+                self.assertIsNotNone(PackingSlipCRMReader(session)._find_labeled_input("装箱单号"))
+            finally:
+                browser.close()
+
     def test_maps_shipment_details_with_unbarcoded_accessories(self):
         rows = map_shipment_rows(
             ["erp发货单号", "产品名称", "产品编码", "发货数量", "已发数量"],

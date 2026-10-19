@@ -196,12 +196,9 @@ class PackingSlipCRMReader:
         return {"rows": rows, "page_counts": page_counts}
 
     def _navigate_to_packing_slips(self):
-        if not self._click_exact_text("B2B订单管理"):
-            raise PackingSlipReadError("未找到 B2B订单管理")
-        self._pause()
-        if not self._click_exact_text("装箱单"):
-            raise PackingSlipReadError("未找到装箱单菜单")
-        self._pause()
+        opened, message = self.session._open_packing_slip_list()
+        if not opened:
+            raise PackingSlipReadError(message)
 
     def _search_and_open(self, packing_slip_no):
         if self._open_matching_result(packing_slip_no):

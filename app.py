@@ -955,6 +955,19 @@ class CRMSession:
             self.last_report_error = ""
         return closed_count
 
+    def _open_packing_slip_list(self):
+        self._close_query_report_pages_locked()
+        if not self.page:
+            return False, "未找到 CRM 系统页面"
+        cfg = load_crm_config()
+        target_url = f"{cfg['website']['url'].rstrip('/')}/#/packingorder/list"
+        ok, message = self._goto(target_url, timeout=60000)
+        if not ok:
+            return False, message
+        if "#/packingorder/list" not in (self.page.url or ""):
+            return False, "未进入 CRM 装箱单列表"
+        return True, ""
+
     def close_idle_report_tabs(self, idle_seconds=REPORT_IDLE_TIMEOUT_SECONDS):
         """查询报表页空闲超过指定时间后关闭，保留 CRM 系统页。"""
         with self.lock:
