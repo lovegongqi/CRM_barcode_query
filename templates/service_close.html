@@ -22,6 +22,13 @@
         .close-card h2 { margin:0; font-size:16px; } .close-card p { margin:5px 0 0; color:var(--aurora-muted); font-size:12px; }
         .close-card-head > p { grid-column:1 / -1; margin:0; }
         .close-history-actions { display:flex; align-items:center; justify-content:flex-end; gap:8px; }
+        .close-history-actions .batch-action { border-color:var(--aurora-line-strong); color:var(--aurora-text); background:var(--aurora-control-bg); }
+        .close-history-actions button:disabled { opacity:.55; cursor:wait; }
+        .service-close-select { display:flex; align-items:center; gap:5px; color:var(--aurora-muted); font-size:11px; white-space:nowrap; }
+        .service-close-select input { width:16px; height:16px; accent-color:#38bdf8; }
+        #serviceBatchActionStatus { grid-column:1 / -1; min-height:16px; color:var(--aurora-muted); font-size:12px; }
+        #serviceBatchActionResults { grid-column:1 / -1; margin:0; padding-left:24px; color:var(--aurora-text); font-size:12px; line-height:1.6; }
+        #serviceBatchActionResults[hidden] { display:none; }
         .service-close-latest-summary { display:block; margin-bottom:10px; color:var(--aurora-muted); font-size:11px; font-weight:700; text-align:right; }
         .service-close-latest-summary[hidden] { display:none; }
         .close-placeholder { min-height:90px; color:var(--aurora-muted); font-size:13px; }
@@ -95,12 +102,14 @@
             <p id="serviceSearchMessage" role="status" aria-live="polite"></p>
             <ol id="serviceBatchResults" aria-live="polite" hidden></ol>
         </section>
-        <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions">{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>查询过的服务单与结单记录均保存在这里；批量结单可在条码列表页发起。</p></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
+        <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions"><button class="batch-action" id="batchModelCorrection" type="button">批量修正</button><button class="batch-action" id="batchServiceClose" type="button">批量结单</button>{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>勾选服务单后，先批量修正已确认的条码型号差异，再批量结单；无法核实型号的服务单会跳过结单。</p><div id="serviceBatchActionStatus" role="status" aria-live="polite"></div><ol id="serviceBatchActionResults" aria-live="polite" hidden></ol></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
     </div>
     <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><span class="modal-title-text" id="modalTitle">服务单详情</span><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
     <script>
         const canManageHistory = {{ 'true' if can_manage_history else 'false' }};
         let closeLogSequence = 0, closeTimer = null, detailRequestId = 0, currentDetailServiceNo = '', historyRecords = [], currentCloseRecord = null;
+        const selectedServiceNos = new Set();
+        let batchActionRunning = false;
         const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
         const closeState = state => ({queried:['已查询','is-queried'],waiting:['等待','is-waiting'],running:['处理中','is-running'],closed:['新结单','is-closed'],already_closed:['原已结单','is-already-closed'],failed:['失败','is-failed']}[state] || [state || '等待','is-waiting']);
         const duration = value => { const seconds = Math.max(0, Number(value || 0)); return seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`; };
@@ -125,6 +134,7 @@
             input.disabled = true;
             button.textContent = '查询中…';
             let succeeded = 0, failed = 0;
+            const pendingOrders = [];
             try {
                 for (const [index, serviceNo] of serviceNos.entries()) {
                     message.textContent = batch ? `正在查询 ${index + 1}/${serviceNos.length}：${serviceNo}` : '正在从 CRM 查询服务单，请稍候…';
@@ -137,9 +147,15 @@
                         if (!response.ok || !data.success) throw new Error(data.error || '服务单查询失败');
                         succeeded += 1;
                         const note = data.history_saved === false ? '查询成功，记录保存失败' : '查询成功';
-                        if (item) item.textContent = `${serviceNo}：${note}`;
-                        else {
-                            message.textContent = data.history_saved === false ? `已查询服务单 ${serviceNo}，但记录保存失败，请重新查询以保存记录` : `已查询服务单 ${serviceNo}`;
+                        if (item) {
+                            item.textContent = `${serviceNo}：${note}，订单明细待查询`;
+                            pendingOrders.push({serviceNo, item, note});
+                        } else {
+                            try { await startOrderQuery(serviceNo); }
+                            catch (error) { message.textContent = `${note}；订单明细查询未启动：${error.message}`; }
+                        }
+                        if (!item) {
+                            if (!message.textContent.includes('订单明细查询未启动')) message.textContent = data.history_saved === false ? `已查询服务单 ${serviceNo}，但记录保存失败，请重新查询以保存记录` : `已查询服务单 ${serviceNo}`;
                             await loadHistory().catch(() => { message.textContent += '，记录列表刷新失败，请刷新页面查看'; });
                             await showServiceOrderDetail(serviceNo, data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
                         }
@@ -152,12 +168,37 @@
                 if (batch) {
                     message.textContent = `已查询 ${serviceNos.length} 张：成功 ${succeeded}，失败 ${failed}`;
                     await loadHistory().catch(() => { message.textContent += '；记录列表刷新失败，请刷新页面查看'; });
+                    for (const {serviceNo, item, note} of pendingOrders) {
+                        try { pollBatchOrder(serviceNo, await startOrderQuery(serviceNo), item, note); }
+                        catch (error) { item.textContent = `${serviceNo}：${note}；订单明细查询未启动：${error.message}`; }
+                    }
                 }
             } finally {
                 button.disabled = false;
                 input.disabled = false;
                 button.textContent = '查询服务单';
             }
+        }
+
+        async function startOrderQuery(serviceNo) {
+            const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/start`, {method:'POST'});
+            const data = await response.json();
+            if ((!response.ok && response.status !== 409) || !data.job_id) throw new Error(data.error || '订单明细查询未启动');
+            return data.job_id;
+        }
+
+        async function pollBatchOrder(serviceNo, jobId, item, note) {
+            try {
+                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/order-products/status?job_id=${encodeURIComponent(jobId)}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || '订单明细状态读取失败');
+                if (data.running) {
+                    item.textContent = `${serviceNo}：${note}；${data.message || '订单明细查询中'}`;
+                    setTimeout(() => pollBatchOrder(serviceNo, jobId, item, note), 1200);
+                } else {
+                    item.textContent = `${serviceNo}：${note}；${data.success ? '订单明细已查询' : (data.error || data.message || '订单明细查询失败')}`;
+                }
+            } catch (error) { item.textContent = `${serviceNo}：${note}；${error.message}`; }
         }
 
         function renderRows(rows, canDelete = false, record = {}) {
@@ -170,7 +211,9 @@
                 const barcodes = Array.from(new Set((row.barcodes || []).map(String).filter(Boolean))).map(barcode => `<span class="service-close-barcode ${selected.has(barcode) ? 'is-selected' : 'is-related'}"><span>${escapeHtml(barcode)}</span><em>${selected.has(barcode) ? '已选' : '关联'}</em></span>`).join('') || '<span class="service-close-barcode">无关联条码</span>';
                 const customers = Array.isArray(row.customer_names) && row.customer_names.length ? `<small>客户 ${escapeHtml(row.customer_names.join('、'))}</small>` : '';
                 const deleteButton = canDelete && serviceNo ? `<div class="service-close-row-actions"><button type="button" data-history-service-no="${escapeHtml(serviceNo)}">删除记录</button></div>` : '';
-                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><div class="service-close-order-top"><button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button>${recordMeta}</div>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
+                const selectable = serviceNo && !['closed','already_closed','waiting','running'].includes(row.state);
+                const selector = selectable ? `<label class="service-close-select"><input type="checkbox" data-select-service="${escapeHtml(serviceNo)}" ${selectedServiceNos.has(serviceNo) ? 'checked' : ''} aria-label="选择服务单 ${escapeHtml(serviceNo)}">选择</label>` : '';
+                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><div class="service-close-order-top"><div>${selector}<button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button></div>${recordMeta}</div>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
             }).join('');
         }
 
@@ -357,6 +400,7 @@
             summary.hidden = !records.length;
             if (records.length) summary.textContent = records[0].service_rows?.every(row => row.state === 'queried') ? '最近查询的服务单' : `本次批量结单：新结单${records[0].closed_count || 0}/失败${records[0].failed_count || 0}`;
             root.innerHTML = records.length ? records.map(record => renderRows(record.service_rows, canManageHistory && !record.isCurrent, record)).join('') : '暂无结单记录。';
+            if (typeof updateBatchButtons === 'function') updateBatchButtons();
             root.querySelectorAll('[data-history-service-no]').forEach(button => button.addEventListener('click', async () => { if (!confirm('确定删除这条服务单记录？')) return; await fetch(`/api/service-close/history/service/${encodeURIComponent(button.dataset.historyServiceNo)}`, {method:'DELETE'}); loadHistory(); }));
         }
         async function loadHistory() {
@@ -377,6 +421,102 @@
                 loadHistory();
             }
         }
+        function selectedBatchServices() {
+            return [...selectedServiceNos].filter(serviceNo => document.querySelector(`#serviceCloseRecordList input[data-select-service="${CSS.escape(serviceNo)}"]`));
+        }
+        function updateBatchButtons() {
+            const disabled = batchActionRunning || !selectedBatchServices().length;
+            document.getElementById('batchModelCorrection').disabled = disabled;
+            document.getElementById('batchServiceClose').disabled = disabled;
+        }
+        document.getElementById('serviceCloseRecordList').addEventListener('change', event => {
+            const serviceNo = event.target.dataset.selectService;
+            if (!serviceNo) return;
+            if (event.target.checked) selectedServiceNos.add(serviceNo);
+            else selectedServiceNos.delete(serviceNo);
+            updateBatchButtons();
+        });
+        async function waitModelJob(serviceNo, payload) {
+            const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/model-correction`, {
+                method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload),
+            });
+            const started = await response.json();
+            if (!response.ok || !started.job_id) throw new Error(started.error || '型号修正任务启动失败');
+            for (;;) {
+                const statusResponse = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/model-correction/status?job_id=${encodeURIComponent(started.job_id)}`);
+                const status = await statusResponse.json();
+                if (!statusResponse.ok) throw new Error(status.error || '型号修正状态读取失败');
+                if (!status.running) {
+                    if (!status.success) throw new Error(status.error || '型号修正失败');
+                    return status;
+                }
+                await new Promise(resolve => setTimeout(resolve, 1200));
+            }
+        }
+        async function runBatchCorrection() {
+            const selected = selectedBatchServices();
+            if (!selected.length || batchActionRunning) return;
+            batchActionRunning = true; updateBatchButtons();
+            const status = document.getElementById('serviceBatchActionStatus');
+            const results = document.getElementById('serviceBatchActionResults');
+            results.replaceChildren(); results.hidden = false;
+            let corrected = 0, unchanged = 0, skipped = 0;
+            try {
+                for (const [index, serviceNo] of selected.entries()) {
+                    status.textContent = `正在修正 ${index + 1}/${selected.length}：${serviceNo}`;
+                    const item = document.createElement('li');
+                    item.textContent = `${serviceNo}：正在核对`;
+                    results.append(item);
+                    try {
+                        const detailResponse = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                        const detail = await detailResponse.json();
+                        if (!detailResponse.ok || !detail.products?.length || detail.products.some(row => !row.barcode || !row.barcode_match?.product_code)) throw new Error('缺少条码或无法匹配真实型号');
+                        let changes = 0;
+                        for (let attempt = 0; attempt <= detail.products.length; attempt++) {
+                            const previewJob = await waitModelJob(serviceNo, {action:'preview'});
+                            const preview = previewJob.preview || {};
+                            if (preview.mode !== 'barcode') {
+                                if (preview.options?.length) throw new Error('订单与服务单型号有差异，但条码未提供可自动修正的目标');
+                                break;
+                            }
+                            const options = preview.options || [];
+                            if (!options.length) break;
+                            if (attempt === detail.products.length || options.some(option => option.source !== 'prefix')) throw new Error('型号修正未能完成，请在详情中核对');
+                            await waitModelJob(serviceNo, {action:'apply', preview_job_id:previewJob.job_id, option:0});
+                            changes++;
+                        }
+                        const checkedResponse = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                        const checked = await checkedResponse.json();
+                        if (!checkedResponse.ok || checked.products?.some(row => !row.barcode_match?.product_code || row.barcode_match.mismatch)) throw new Error('仍有无法自动修正的条码型号差异');
+                        if (changes) corrected++; else unchanged++;
+                        item.textContent = `${serviceNo}：${changes ? `已修正 ${changes} 处` : '无需修正'}`;
+                    } catch (error) {
+                        skipped++;
+                        item.textContent = `${serviceNo}：已跳过，${error.message || '型号修正失败'}`;
+                        status.textContent = `${serviceNo} 已跳过：${error.message || '型号修正失败'}；继续处理下一张`;
+                    }
+                }
+                status.textContent = `批量修正完成：已修正 ${corrected}，无需修正 ${unchanged}，跳过 ${skipped}。跳过的服务单不会自动结单。`;
+                await loadHistory();
+            } finally { batchActionRunning = false; updateBatchButtons(); }
+        }
+        async function runBatchClose() {
+            const selected = selectedBatchServices();
+            if (!selected.length || batchActionRunning) return;
+            batchActionRunning = true; updateBatchButtons();
+            const status = document.getElementById('serviceBatchActionStatus');
+            status.textContent = `正在提交 ${selected.length} 张服务单；每张将重新核对条码、订单和服务单型号。`;
+            try {
+                const response = await fetch('/api/service-close/start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({service_nos:selected})});
+                const data = await response.json();
+                if (!response.ok || !data.job_id) throw new Error(data.error || '批量结单启动失败');
+                status.textContent = `已提交 ${selected.length} 张服务单；进度和逐单结果显示在下方记录中。`;
+                pollCurrentJob().catch(() => {});
+            } catch (error) { status.textContent = error.message || '批量结单启动失败'; }
+            finally { batchActionRunning = false; updateBatchButtons(); }
+        }
+        document.getElementById('batchModelCorrection').addEventListener('click', runBatchCorrection);
+        document.getElementById('batchServiceClose').addEventListener('click', runBatchClose);
         const clearButton = document.getElementById('clearServiceCloseHistory'); if (clearButton) clearButton.addEventListener('click',async () => { if (!confirm('确定清空全部结单记录？')) return; await fetch('/api/service-close/history',{method:'DELETE'}); loadHistory(); });
         loadHistory(); pollCurrentJob();
     </script>

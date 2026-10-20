@@ -38,6 +38,53 @@ def test_direct_close_queues_only_the_current_cached_service_order(direct_close)
     assert job['selected_barcodes'] == []
 
 
+def test_batch_close_uses_only_selected_cached_services(direct_close):
+    app_module._write_service_order_detail('FWD654321', {'service_no': 'FWD654321', 'products': []})
+    response, status = start_close({'service_nos': ['FWD123456', 'FWD654321']})
+    assert status == 200
+    assert response.get_json()['total'] == 2
+    assert [row['service_no'] for row in response.get_json()['orders']] == ['FWD123456', 'FWD654321']
+    assert not start_close({'service_nos': ['FWD123456', 'FWD123456']})[0].get_json()['success']
+
+
+def test_batch_close_requires_fresh_barcode_model_agreement(monkeypatch):
+    worker = mock.Mock()
+    preview = {'service_lines': [{'barcode': '9232506010078', 'code': '926051587'}],
+               'rows': [{'new_productname': '926051571', 'new_qty': 1}], 'options': []}
+    worker.correct_service_order_model.return_value = (True, preview)
+    monkeypatch.setattr(app_module, 'load_product_library', lambda: {'923': {'product_code': '926051571'}})
+    ready, reason = app_module._service_batch_close_ready(worker, 'FWD123456', lambda *_: None)
+    assert not ready and '不一致' in reason
+    preview['service_lines'][0]['code'] = '926051571'
+    assert app_module._service_batch_close_ready(worker, 'FWD123456', lambda *_: None)[0]
+    preview['options'] = [{'new_code': '926051571'}]
+    assert not app_module._service_batch_close_ready(worker, 'FWD123456', lambda *_: None)[0]
+    preview['options'] = []
+    preview['service_lines'][0]['barcode'] = ''
+    assert not app_module._service_batch_close_ready(worker, 'FWD123456', lambda *_: None)[0]
+    preview['service_lines'][0]['barcode'] = '9232506010078'
+    preview['rows'][0]['new_qty'] = 2
+    assert not app_module._service_batch_close_ready(worker, 'FWD123456', lambda *_: None)[0]
+
+
+def test_batch_close_skips_mismatch_without_submitting_crm_close(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, 'service_close_jobs', {})
+    monkeypatch.setattr(app_module, '_append_service_close_history', lambda _record: True)
+    monkeypatch.setattr(app_module, '_start_order_product_job', lambda *_args, **_kwargs: (None, False))
+    monkeypatch.setattr(app_module, 'load_product_library', lambda: {'923': {'product_code': '926051571'}})
+    worker = mock.Mock()
+    worker.correct_service_order_model.return_value = (True, {
+        'service_lines': [{'barcode': '9232506010078', 'code': '926051587'}], 'options': [],
+    })
+    job = app_module._empty_service_close_job(orders=[{'service_no': 'FWD123456'}])
+    job.update(running=True, started_at='2026-10-20 12:00:00')
+    app_module.service_close_jobs[job['job_id']] = job
+    app_module._run_service_close_job(job['job_id'], [(worker, 'query-1', '查询1')], job['orders'], verify_models=True)
+    worker.close_service_orders.assert_not_called()
+    assert job['failed_count'] == 1
+    assert job['service_rows'][0]['state'] == 'failed'
+
+
 def test_detail_annotates_exact_barcode_model_conflict(direct_close, monkeypatch):
     app_module._write_service_order_detail('FWD123456', {
         'products':[{'barcode':'3752311060186','product_code':'906042810','product_name':'ERO131-3'}],

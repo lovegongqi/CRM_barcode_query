@@ -41,6 +41,10 @@ def search_page(request):
                 return route.fulfill(json={'success': True, 'history_saved':state['history_saved'], 'detail_url': '/api/service-orders/FWD123456'})
             if path == '/api/service-orders/FWD123456':
                 return route.fulfill(json={'service_no': 'FWD123456', 'fields': [{'label': '客户姓名', 'value': '测试客户'}], 'products': [{'barcode': 'SN1', 'product_name': '测试产品'}]})
+            if path.endswith('/order-products/start'):
+                return route.fulfill(json={'success': True, 'job_id': 'order-1', 'running': True})
+            if '/order-products/status' in path:
+                return route.fulfill(json={'success': True, 'job_id': 'order-1', 'running': False, 'message': '订单明细已查询'})
             return route.fulfill(json={'success': True, 'records': state['records'], 'running': False})
 
         page.route('http://service.test/**', route_request)
@@ -58,6 +62,7 @@ def test_single_service_number_queries_crm_and_opens_detail_without_closing_orde
     expect(page.locator('#serviceDetailContent')).to_contain_text('测试客户')
     expect(page.locator('#serviceDetailContent')).to_contain_text('SN1')
     assert ('POST', '/api/service-orders/FWD123456/refresh-products') in requests
+    assert ('POST', '/api/service-orders/FWD123456/order-products/start') in requests
     assert not any(path == '/api/service-close/start' for _, path in requests)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
@@ -85,8 +90,35 @@ def test_batch_service_numbers_deduplicates_and_continues_after_failure(search_p
         ('POST', 'FWD000002', {'record_query': True}),
         ('POST', 'FWD000003', {'record_query': True}),
     ]
+    expect(page.locator('#serviceBatchResults')).to_contain_text('订单明细已查询')
     expect(page.locator('#detailModal')).not_to_have_class(re.compile('overlay-show'))
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_selected_records_submit_only_checked_service_numbers_for_batch_close(search_page):
+    page, _, state = search_page
+    state['records'] = [{'id':'query-1', 'service_rows':[
+        {'service_no':'FWD000001', 'state':'queried'},
+        {'service_no':'FWD000002', 'state':'queried'},
+    ]}]
+    submitted = []
+    page.route('**/api/service-close/start', lambda route: (submitted.append(route.request.post_data_json), route.fulfill(json={'success':True, 'job_id':'close-batch'})))
+    page.reload()
+    expect(page.get_by_role('button', name='批量结单')).to_be_disabled()
+    page.get_by_label('选择服务单 FWD000002').check()
+    page.get_by_role('button', name='批量结单').click()
+    expect(page.locator('#serviceBatchActionStatus')).to_contain_text('已提交 1 张')
+    assert submitted == [{'service_nos':['FWD000002']}]
+
+
+def test_batch_correction_skips_unmatched_barcode_without_writing(search_page):
+    page, requests, state = search_page
+    state['records'] = [{'id':'query-1', 'service_rows':[{'service_no':'FWD123456', 'state':'queried'}]}]
+    page.reload()
+    page.get_by_label('选择服务单 FWD123456').check()
+    page.get_by_role('button', name='批量修正').click()
+    expect(page.locator('#serviceBatchActionResults')).to_contain_text('缺少条码或无法匹配真实型号')
+    assert not any(path.endswith('/model-correction') for _, path in requests)
 
 
 def test_query_validation_and_failure_allow_retry(search_page):

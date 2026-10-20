@@ -6498,7 +6498,40 @@ def _run_order_product_job(job_id, worker):
                     'finished_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 })
 
-def _run_service_close_job(job_id, workers, orders):
+def _service_batch_close_ready(worker, service_no, log):
+    ok, preview = worker.correct_service_order_model(service_no, log=log)
+    if not ok:
+        return False, (preview.get('error') if isinstance(preview, dict) else str(preview)) or '型号核对失败'
+    lines = preview.get('service_lines') or []
+    if not lines:
+        return False, '未读取到服务单产品行，已跳过结单'
+    library = load_product_library()
+    for line in lines:
+        barcode = str(line.get('barcode') or '').strip()
+        code = str(line.get('code') or '').strip().upper()
+        rule = library.get(product_prefix_from_barcode(barcode)) if barcode else None
+        if not rule or not rule.get('product_code'):
+            return False, f'条码 {barcode or "未录入"} 无法确定真实型号，已跳过结单'
+        if code != str(rule['product_code']).strip().upper():
+            return False, f'条码 {barcode} 与服务单型号不一致，已跳过结单'
+    if preview.get('options'):
+        return False, '关联订单仍有型号差异，已跳过结单'
+    order_rows = preview.get('rows') or []
+    if not order_rows:
+        return False, '未读取到关联订单产品行，已跳过结单'
+    try:
+        comparison = _build_service_order_product_comparison(
+            [{'product_code': line.get('code')} for line in lines],
+            [{'product_code': row.get('new_productname'), 'quantity': row.get('new_qty')} for row in order_rows],
+        )
+    except (TypeError, ValueError) as error:
+        return False, f'关联订单产品核对失败：{error}'
+    if not comparison or any(row['status'] != 'matched' for row in comparison):
+        return False, '关联订单与服务单产品或数量不一致，已跳过结单'
+    return True, ''
+
+
+def _run_service_close_job(job_id, workers, orders, verify_models=False):
     def log(message, level='dim'):
         _service_close_job_log(job_id, message, level)
 
@@ -6574,7 +6607,17 @@ def _run_service_close_job(job_id, workers, orders):
                             display_label=detail.get('display_label') or display_label,
                         )
 
-                    ok, result = worker.close_service_orders([row], worker_log, worker_progress)
+                    if verify_models:
+                        ready, reason = _service_batch_close_ready(worker, service_no, worker_log)
+                        if not ready:
+                            ok, result = False, {'results': [{
+                                'service_no': service_no, 'success': False,
+                                'status': 'failed', 'message': reason,
+                            }]}
+                        else:
+                            ok, result = worker.close_service_orders([row], worker_log, worker_progress)
+                    else:
+                        ok, result = worker.close_service_orders([row], worker_log, worker_progress)
                     result = result if isinstance(result, dict) else {"error": str(result), "results": []}
                     result_rows = result.get("results") or []
                     result_row = result_rows[0] if result_rows else {
@@ -10995,7 +11038,24 @@ def api_service_close_start():
     data = request.get_json() or {}
     barcodes = normalize_input_barcodes(data.get("barcodes") or [])
     service_no = _clean_export_value(data.get('service_no')).upper()
-    if service_no:
+    service_nos = data.get('service_nos')
+    if service_nos is not None:
+        if (service_no or barcodes or not isinstance(service_nos, list) or not 1 <= len(service_nos) <= 100
+                or any(not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9_-]{4,80}', value.strip()) for value in service_nos)):
+            return jsonify({'success': False, 'error': '请选择 1 到 100 张有效服务单'}), 400
+        normalized = [value.strip().upper() for value in service_nos]
+        if len(set(normalized)) != len(normalized):
+            return jsonify({'success': False, 'error': '勾选的服务单号重复'}), 400
+        orders = []
+        for number in normalized:
+            detail = _cached_service_order_detail(number)
+            if not detail:
+                return jsonify({'success': False, 'error': f'{number} 尚未查询，请先查询服务单'}), 400
+            customer = _service_detail_field_value(detail, ['客户名称', '客户姓名', '反馈人', '联系人'])
+            orders.append({'service_no': number, 'customer_names': [customer] if customer else [],
+                           'detail_url': f'/api/service-orders/{number}'})
+        prepared = {'orders': orders}
+    elif service_no:
         if not re.fullmatch(r'[A-Z0-9_-]{4,80}', service_no):
             return jsonify({'success': False, 'error': '服务单号格式不正确'}), 400
         detail = _cached_service_order_detail(service_no)
@@ -11028,12 +11088,12 @@ def api_service_close_start():
         closing_service_nos = {row['service_no'] for row in orders}
         if any(job['service_no'] in closing_service_nos and job['running'] for job in service_model_jobs.values()):
             return jsonify(success=False, error='正在处理型号修正，请完成后再结单'), 409
-        if service_no:
+        if service_no or service_nos is not None:
             for active_job in service_close_jobs.values():
                 if active_job.get('running') and any(
-                    row.get('service_no') == service_no for row in active_job.get('service_rows') or []
+                    row.get('service_no') in closing_service_nos for row in active_job.get('service_rows') or []
                 ):
-                    return jsonify({'success': False, 'error': '该服务单正在结单，请勿重复提交',
+                    return jsonify({'success': False, 'error': '勾选的服务单正在结单，请勿重复提交',
                                     'job_id': active_job['job_id']}), 409
         job = _empty_service_close_job('', orders)
         job.update({
@@ -11084,7 +11144,7 @@ def api_service_close_start():
 
         def run():
             try:
-                _run_service_close_job(job['job_id'], worker_entries, orders)
+                _run_service_close_job(job['job_id'], worker_entries, orders, verify_models=service_nos is not None)
             finally:
                 with service_close_job_lock:
                     for selected_slot_id in slot_ids:
