@@ -272,6 +272,7 @@ def test_model_correction_can_preview_a_manually_entered_product_code(search_pag
     page.get_by_role('button', name='查询服务单', exact=True).click()
     page.get_by_role('button', name='型号修正', exact=True).click()
     expect(page.locator('#modelCorrectionPanel')).to_contain_text('前缀型号')
+    page.get_by_label('服务单产品行').select_option('SN1')
     page.get_by_label('目标产品编码').fill('CUSTOM')
     page.get_by_role('button', name='预览手填编码').click()
     expect(page.locator('#modelCorrectionPanel')).to_contain_text('手填型号')
@@ -299,7 +300,11 @@ def test_model_correction_can_select_unbarcoded_service_line(search_page):
         route.fulfill(json={'action': 'preview', 'running': False, 'success': True,
                             'preview': {'order_no': 'ORD123', 'mode': 'barcode' if manual else 'order',
                                         'options': options, 'service_lines': [
-                                            {'id': 'service-line', 'name': '旧型号', 'code': 'OLD001', 'barcode': ''}]}})
+                                            {'id': 'service-line', 'name': '旧型号', 'code': 'OLD001', 'barcode': ''},
+                                            {'id': 'line-2', 'name': '产品二', 'code': 'OLD002', 'barcode': ''},
+                                            {'id': 'line-3', 'name': '产品三', 'code': 'OLD003', 'barcode': ''},
+                                            {'id': 'line-4', 'name': '产品四', 'code': 'OLD004', 'barcode': ''},
+                                            {'id': 'line-5', 'name': '产品五', 'code': 'OLD005', 'barcode': ''}]}})
 
     page.route('**/model-correction', model_start)
     page.route('**/model-correction/status?job_id=*', model_status)
@@ -307,9 +312,12 @@ def test_model_correction_can_select_unbarcoded_service_line(search_page):
     page.get_by_role('button', name='查询服务单', exact=True).click()
     page.get_by_role('button', name='型号修正', exact=True).click()
     expect(page.locator('#modelCorrectionPanel')).to_contain_text('未录条码')
+    expect(page.get_by_label('服务单产品行')).to_have_value('')
+    expect(page.locator('#modelCorrectionLine option')).to_have_count(6)
+    page.get_by_label('服务单产品行').select_option('line-3')
     page.get_by_label('目标产品编码').fill('NEW002')
     page.get_by_role('button', name='预览手填编码').click()
     expect(page.locator('#modelCorrectionPreview')).to_contain_text('旧型号')
     expect(page.locator('#modelCorrectionPreview')).to_contain_text('新型号')
     assert submitted == [{'action': 'preview'}, {'action': 'preview', 'override': {
-        'service_line_id': 'service-line', 'product_code': 'NEW002'}}]
+        'service_line_id': 'line-3', 'product_code': 'NEW002'}}]

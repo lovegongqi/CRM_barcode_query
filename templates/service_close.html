@@ -193,7 +193,7 @@
         }
         function modelManualControls() {
             if (!modelLines.length) return '';
-            return `<div class="model-correction-manual"><p>手填产品编码修正</p><label for="modelCorrectionLine">服务单产品行</label><select id="modelCorrectionLine">${modelLines.map((line,index) => { const value = line.id || line.barcode; return `<option value="${escapeHtml(value)}"${(modelOverride?.service_line_id || modelOverride?.barcode) === value ? ' selected' : ''}>${escapeHtml(`${index + 1}. ${line.name || line.code || '产品'}（${line.code || '无编码'}，${line.barcode || '未录条码'}）`)}</option>`; }).join('')}</select><label for="modelCorrectionCode">目标产品编码</label><input id="modelCorrectionCode" maxlength="40" placeholder="输入 CRM 产品编码" value="${escapeHtml(modelOverride?.product_code || '')}"><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,false,true)">预览手填编码</button></div>`;
+            return `<div class="model-correction-manual"><p>手动选择产品行并填写目标编码</p><label for="modelCorrectionLine">服务单产品行</label><select id="modelCorrectionLine"><option value="" disabled${modelOverride ? '' : ' selected'}>请选择服务单产品行</option>${modelLines.map((line,index) => { const value = line.id || line.barcode; return `<option value="${escapeHtml(value)}"${(modelOverride?.service_line_id || modelOverride?.barcode) === value ? ' selected' : ''}>${escapeHtml(`${index + 1}. ${line.name || line.code || '产品'}（${line.code || '无编码'}，${line.barcode || '未录条码'}）`)}</option>`; }).join('')}</select><label for="modelCorrectionCode">目标产品编码</label><input id="modelCorrectionCode" maxlength="40" placeholder="输入 CRM 产品编码" value="${escapeHtml(modelOverride?.product_code || '')}"><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,false,true)">预览手填编码</button></div>`;
         }
         async function startModelCorrection(serviceNo, apply = false, manual = false) {
             if (serviceNo !== currentDetailServiceNo) return;
@@ -202,7 +202,7 @@
                 const selected = document.getElementById('modelCorrectionLine')?.value || '';
                 const line = modelLines.find(row => (row.id || row.barcode) === selected);
                 const productCode = document.getElementById('modelCorrectionCode')?.value.trim().toUpperCase() || '';
-                if (!line || !productCode) { document.getElementById('modelCorrectionCode')?.focus(); return; }
+                if (!line || !productCode) { document.getElementById(line ? 'modelCorrectionCode' : 'modelCorrectionLine')?.focus(); return; }
                 modelOverride = line.id ? {service_line_id:line.id, product_code:productCode} : {barcode:line.barcode, product_code:productCode};
             } else if (!apply) modelOverride = null;
             const payload = apply ? {action:'apply', preview_job_id:modelPreview?.jobId, option:Number(document.getElementById('modelCorrectionChoice')?.value)} : {action:'preview', ...(manual ? {override:modelOverride} : {})};
@@ -256,7 +256,7 @@
                 if (data.action === 'preview') {
                     const preview = data.preview;
                     modelLines = Array.isArray(preview?.service_lines) ? preview.service_lines : modelBarcodes.map(barcode => ({barcode}));
-                    if (!preview?.options?.length) { const panel = document.getElementById('modelCorrectionPanel'); panel.innerHTML = `<p>${preview?.mode === 'barcode' ? '当前型号无法安全修正，请核对服务单状态、订单产品行、安装及退货数量。' : '没有可直接修正的型号差异。'}</p>${modelManualControls()}`; return; }
+                    if (!preview?.options?.length) { const panel = document.getElementById('modelCorrectionPanel'); panel.innerHTML = `<p>${preview?.mode === 'barcode' ? '当前型号无法安全修正，请核对服务单状态、订单产品行、安装及退货数量。' : '未发现可自动修正的型号差异；仍可在下方手动选择产品行。'}</p>${modelManualControls()}`; return; }
                     modelPreview = {...preview, jobId, serviceNo};
                     const panel = document.getElementById('modelCorrectionPanel');
                     panel.innerHTML = `<p>关联订单：${escapeHtml(preview.order_no)}</p><label for="modelCorrectionChoice">选择型号修正项</label><select id="modelCorrectionChoice" onchange="updateModelPreview()">${preview.options.map((option,index) => `<option value="${index}">第 ${escapeHtml(option.seq)} 行：${escapeHtml(option.old_name)} → ${escapeHtml(option.new_name)}</option>`).join('')}</select><p id="modelCorrectionPreview"></p><p>${preview.mode === 'barcode' ? (preview.options[0].source === 'manual' ? '手填编码已在 CRM 产品目录核实；' : '按条码前缀匹配；') + '确认后先修正关联订单，再修正服务单，并核验条码、数量与金额。' : '仅修正关联订单型号，保留原数量与金额。'}</p><button type="button" class="service-detail-refresh" onclick="startModelCorrection(currentDetailServiceNo,true)">确认修正</button>${modelManualControls()}`;
