@@ -12,10 +12,12 @@
         .service-search-form { display:flex; align-items:end; gap:10px; margin-top:14px; }
         .service-search-field { flex:1; min-width:0; }
         .service-search-field label { display:block; margin-bottom:6px; color:var(--aurora-muted); font-size:12px; }
-        .service-search-field input { width:100%; box-sizing:border-box; min-height:40px; padding:9px 12px; border:1px solid var(--aurora-line-strong); border-radius:10px; background:var(--aurora-control-bg); color:var(--aurora-text); }
+        .service-search-field textarea { width:100%; box-sizing:border-box; min-height:72px; padding:9px 12px; border:1px solid var(--aurora-line-strong); border-radius:10px; background:var(--aurora-control-bg); color:var(--aurora-text); resize:vertical; font:inherit; }
         .service-search-form button { min-height:40px; padding:9px 14px; border:1px solid var(--aurora-line-strong); border-radius:10px; background:var(--aurora-control-bg); color:var(--aurora-text); cursor:pointer; white-space:nowrap; }
         .service-search-form button:disabled { opacity:.6; cursor:wait; }
         #serviceSearchMessage { min-height:18px; margin-top:8px; }
+        #serviceBatchResults { margin:8px 0 0; padding-left:24px; color:var(--aurora-text); font-size:12px; line-height:1.7; }
+        #serviceBatchResults[hidden] { display:none; }
         .close-card-head { display:grid; grid-template-columns:1fr auto; align-items:start; gap:8px 12px; margin-bottom:14px; }
         .close-card h2 { margin:0; font-size:16px; } .close-card p { margin:5px 0 0; color:var(--aurora-muted); font-size:12px; }
         .close-card-head > p { grid-column:1 / -1; margin:0; }
@@ -85,12 +87,13 @@
         {% if not is_desktop_app %}<div class="status-bar aurora-account-status"><div class="aurora-workspace-links"><a href="/results">条码列表</a><a class="active" href="/service-close">结单管理</a></div><div class="aurora-account-session"><span class="aurora-account-name" id="appAccountStatus">{{ app_account_username }}</span><a class="aurora-account-logout" href="/logout">退出工具账号</a></div></div>{% endif %}
         <section class="card close-card">
             <h2>按服务单号查询</h2>
-            <p>输入服务单号，直接查询 CRM 客户与产品明细。</p>
+            <p>输入一个或多个服务单号，按换行、空格或逗号分隔；成功查询会写入下方记录。</p>
             <form class="service-search-form" onsubmit="searchServiceOrder(event)">
-                <div class="service-search-field"><label for="serviceSearchNumber">服务单号</label><input id="serviceSearchNumber" type="text" placeholder="例如 FWD202608170003" maxlength="80" autocomplete="off" spellcheck="false" required></div>
+                <div class="service-search-field"><label for="serviceSearchNumber">服务单号</label><textarea id="serviceSearchNumber" rows="3" placeholder="例如 FWD202608170003，多个服务单号可分行粘贴" autocomplete="off" spellcheck="false" required></textarea></div>
                 <button id="serviceSearchButton" type="submit">查询服务单</button>
             </form>
             <p id="serviceSearchMessage" role="status" aria-live="polite"></p>
+            <ol id="serviceBatchResults" aria-live="polite" hidden></ol>
         </section>
         <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions">{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>查询过的服务单与结单记录均保存在这里；批量结单可在条码列表页发起。</p></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
     </div>
@@ -107,27 +110,49 @@
             const input = document.getElementById('serviceSearchNumber');
             const button = document.getElementById('serviceSearchButton');
             const message = document.getElementById('serviceSearchMessage');
+            const results = document.getElementById('serviceBatchResults');
             if (button.disabled) return;
-            const serviceNo = input.value.trim().toUpperCase();
-            if (!/^[A-Z0-9_-]{4,80}$/.test(serviceNo)) {
+            const serviceNos = [...new Set(input.value.trim().toUpperCase().split(/[\s,，;；]+/).filter(Boolean))];
+            if (!serviceNos.length || serviceNos.some(serviceNo => !/^[A-Z0-9_-]{4,80}$/.test(serviceNo))) {
                 message.textContent = '请输入完整服务单号，仅支持字母、数字、下划线和短横线';
                 return;
             }
-            input.value = serviceNo;
+            const batch = serviceNos.length > 1;
+            input.value = serviceNos.join('\n');
+            results.replaceChildren();
+            results.hidden = !batch;
             button.disabled = true;
             input.disabled = true;
             button.textContent = '查询中…';
-            message.textContent = '正在从 CRM 查询服务单，请稍候…';
+            let succeeded = 0, failed = 0;
             try {
-                const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({record_query:true})});
-                if (!response.headers.get('content-type')?.includes('application/json')) throw new Error(`查询请求异常（HTTP ${response.status}），请稍后重试`);
-                const data = await response.json();
-                if (!response.ok || !data.success) throw new Error(data.error || '服务单查询失败');
-                message.textContent = data.history_saved === false ? `已查询服务单 ${serviceNo}，但记录保存失败，请重新查询以保存记录` : `已查询服务单 ${serviceNo}`;
-                await loadHistory().catch(() => { message.textContent += '，记录列表刷新失败，请刷新页面查看'; });
-                await showServiceOrderDetail(serviceNo, data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
-            } catch (error) {
-                message.textContent = error.message || '服务单查询失败，请稍后重试';
+                for (const [index, serviceNo] of serviceNos.entries()) {
+                    message.textContent = batch ? `正在查询 ${index + 1}/${serviceNos.length}：${serviceNo}` : '正在从 CRM 查询服务单，请稍候…';
+                    const item = batch ? document.createElement('li') : null;
+                    if (item) { item.textContent = `${serviceNo}：查询中…`; results.append(item); }
+                    try {
+                        const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({record_query:true})});
+                        if (!response.headers.get('content-type')?.includes('application/json')) throw new Error(`查询请求异常（HTTP ${response.status}），请稍后重试`);
+                        const data = await response.json();
+                        if (!response.ok || !data.success) throw new Error(data.error || '服务单查询失败');
+                        succeeded += 1;
+                        const note = data.history_saved === false ? '查询成功，记录保存失败' : '查询成功';
+                        if (item) item.textContent = `${serviceNo}：${note}`;
+                        else {
+                            message.textContent = data.history_saved === false ? `已查询服务单 ${serviceNo}，但记录保存失败，请重新查询以保存记录` : `已查询服务单 ${serviceNo}`;
+                            await loadHistory().catch(() => { message.textContent += '，记录列表刷新失败，请刷新页面查看'; });
+                            await showServiceOrderDetail(serviceNo, data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`);
+                        }
+                    } catch (error) {
+                        failed += 1;
+                        if (item) item.textContent = `${serviceNo}：${error.message || '服务单查询失败'}`;
+                        else message.textContent = error.message || '服务单查询失败，请稍后重试';
+                    }
+                }
+                if (batch) {
+                    message.textContent = `已查询 ${serviceNos.length} 张：成功 ${succeeded}，失败 ${failed}`;
+                    await loadHistory().catch(() => { message.textContent += '；记录列表刷新失败，请刷新页面查看'; });
+                }
             } finally {
                 button.disabled = false;
                 input.disabled = false;

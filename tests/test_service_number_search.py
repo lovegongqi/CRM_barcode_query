@@ -50,15 +50,42 @@ def search_page(request):
         browser.close()
 
 
-def test_service_number_enter_queries_crm_and_opens_detail_without_closing_order(search_page):
+def test_single_service_number_queries_crm_and_opens_detail_without_closing_order(search_page):
     page, requests, _ = search_page
     page.get_by_label('服务单号', exact=True).fill(' fwd123456 ')
-    page.get_by_label('服务单号', exact=True).press('Enter')
+    page.get_by_role('button', name='查询服务单', exact=True).click()
     expect(page.locator('#detailModal')).to_have_class(re.compile('overlay-show'))
     expect(page.locator('#serviceDetailContent')).to_contain_text('测试客户')
     expect(page.locator('#serviceDetailContent')).to_contain_text('SN1')
     assert ('POST', '/api/service-orders/FWD123456/refresh-products') in requests
     assert not any(path == '/api/service-close/start' for _, path in requests)
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+
+def test_batch_service_numbers_deduplicates_and_continues_after_failure(search_page):
+    page, _, _ = search_page
+    requested = []
+
+    def query(route):
+        service_no = route.request.url.split('/api/service-orders/')[1].split('/')[0]
+        requested.append((route.request.method, service_no, route.request.post_data_json))
+        if service_no == 'FWD000002':
+            route.fulfill(json={'success': False, 'error': '服务单不存在'})
+        else:
+            route.fulfill(json={'success': True, 'history_saved': True})
+
+    page.route('**/api/service-orders/*/refresh-products', query)
+    page.get_by_label('服务单号', exact=True).fill('fwd000001，FWD000002\nFWD000001 FWD000003')
+    page.get_by_role('button', name='查询服务单', exact=True).click()
+    expect(page.locator('#serviceBatchResults li')).to_have_count(3)
+    expect(page.locator('#serviceBatchResults')).to_contain_text('FWD000002：服务单不存在')
+    expect(page.locator('#serviceSearchMessage')).to_contain_text('成功 2，失败 1')
+    assert requested == [
+        ('POST', 'FWD000001', {'record_query': True}),
+        ('POST', 'FWD000002', {'record_query': True}),
+        ('POST', 'FWD000003', {'record_query': True}),
+    ]
+    expect(page.locator('#detailModal')).not_to_have_class(re.compile('overlay-show'))
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
