@@ -2232,6 +2232,8 @@ class CRMSession:
                     if (!el) return;
                     const text = clean(el.innerText || el.textContent || '');
                     if (text.includes('产品明细') || text.includes('订单产品')) {
+                        const panel = el.closest('.el-collapse-item,.ant-collapse-item');
+                        if (panel?.classList.contains('is-active') || panel?.classList.contains('ant-collapse-item-active')) return;
                         if (typeof el.click === 'function') el.click();
                     }
                 };
@@ -2241,7 +2243,11 @@ class CRMSession:
                     clickIfMatch(panel.querySelector('.el-collapse-item__header, .ant-collapse-header') || panel);
                 }
                 const headers = Array.from(scope.querySelectorAll('.el-collapse-item__header, .ant-collapse-header, .panel-title, .el-tabs__item, .ant-tabs-tab'));
-                for (const h of headers) clickIfMatch(h);
+                for (const h of headers) {
+                    if (h.closest('.el-collapse-item,.ant-collapse-item')) continue;
+                    if (h.classList.contains('is-active') || h.classList.contains('ant-tabs-tab-active')) continue;
+                    clickIfMatch(h);
+                }
                 return true;
             }""")
         except Exception:
@@ -2270,24 +2276,25 @@ class CRMSession:
                     const headers = headerCells.map(cellText);
                     if (!headers.length) continue;
                     const barcodeIndex = headers.findIndex(text => barcodeHeaders.some(label => text === label || text.includes(label)));
-                    if (barcodeIndex < 0) continue;
                     const nameIndex = headers.findIndex(text => nameHeaders.some(label => text === label || text.includes(label)));
                     const modelIndex = headers.findIndex(text => modelHeaders.some(label => text === label || text.includes(label)));
                     const codeIndex = headers.findIndex(text => codeHeaders.some(label => text === label || text.includes(label)));
                     const context = clean((root.closest('.el-card,.ivu-card,.ant-card,.panel,.tab-pane,.el-tab-pane') || root.parentElement || root).innerText || '');
-                    if (nameIndex < 0 && codeIndex < 0 && !/订单产品明细|产品明细/.test(context)) continue;
+                    if (nameIndex < 0 && codeIndex < 0) continue;
+                    if (barcodeIndex < 0 && !/订单产品明细|产品明细/.test(context)) continue;
                     const bodyRows = Array.from(root.querySelectorAll('.el-table__body-wrapper tbody tr, .ivu-table-body tbody tr, .ant-table-tbody tr, tbody tr'));
                     for (const tr of bodyRows) {
                         const cells = Array.from(tr.querySelectorAll(':scope > td'));
-                        if (barcodeIndex >= cells.length) continue;
-                        const barcodeValue = cellText(cells[barcodeIndex]);
+                        if (nameIndex >= cells.length && codeIndex >= cells.length) continue;
+                        const barcodeValue = barcodeIndex >= 0 && barcodeIndex < cells.length ? cellText(cells[barcodeIndex]) : '';
                         const productName = nameIndex >= 0 && nameIndex < cells.length ? cellText(cells[nameIndex]) : '';
                         const productModel = modelIndex >= 0 && modelIndex < cells.length ? cellText(cells[modelIndex]) : '';
                         const productCode = codeIndex >= 0 && codeIndex < cells.length ? cellText(cells[codeIndex]) : '';
-                        const barcodes = barcodeValue.split(/[\\s,,,;;/]+/).map(clean).filter(Boolean);
-                        for (const barcode of barcodes) {
-                            if (!/^[A-Za-z0-9-]{6,40}$/.test(barcode) || seen.has(barcode)) continue;
-                            seen.add(barcode);
+                        const barcodes = /^[—–-]+$/.test(barcodeValue) ? [] : barcodeValue.split(/[\\s,,,;;/]+/).map(clean).filter(Boolean);
+                        for (const barcode of barcodes.length ? barcodes : ['']) {
+                            if (barcode && (!/^[A-Za-z0-9-]{6,40}$/.test(barcode) || seen.has(barcode))) continue;
+                            if (!barcode && !productName && !productCode) continue;
+                            if (barcode) seen.add(barcode);
                             result.push({ barcode, product_name: productName, product_model: productModel, product_code: productCode });
                         }
                     }
@@ -2307,9 +2314,10 @@ class CRMSession:
             if not isinstance(row, dict):
                 continue
             barcode = _clean_export_value(row.get("barcode"))
-            if not re.fullmatch(r"[A-Za-z0-9-]{6,40}", barcode or "") or barcode in seen:
+            if barcode and (not re.fullmatch(r"[A-Za-z0-9-]{6,40}", barcode) or barcode in seen):
                 continue
-            seen.add(barcode)
+            if barcode:
+                seen.add(barcode)
             products.append({
                 "barcode": barcode,
                 "product_name": _clean_export_value(row.get("product_name")),
@@ -2317,6 +2325,23 @@ class CRMSession:
                 "product_code": _clean_export_value(row.get("product_code")),
             })
         return products
+
+    def _service_detail_products_with_fallback(self, service_no):
+        products = self._service_detail_products()
+        if products or '#/workOrder/edit/' not in str(self.page.url):
+            return products
+        snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
+        return self._service_products_from_snapshot(snapshot)
+
+    @staticmethod
+    def _service_products_from_snapshot(snapshot):
+        return [
+            {'barcode': _clean_export_value(row.get('new_userprofile_number')),
+             'product_name': _clean_export_value((row.get('new_product_id') or {}).get('name')),
+             'product_model': '', 'product_code': _clean_export_value(row.get('productnumber'))}
+            for row in snapshot['rows']
+            if row.get('productnumber') or (row.get('new_product_id') or {}).get('name')
+        ]
 
     def _service_detail_fields(self):
         try:
@@ -2564,7 +2589,7 @@ class CRMSession:
                 ok, message = self._open_service_order_detail(service_no)
                 if not ok:
                     return False, {"error": message or "无法打开服务单详情"}
-                products = self._service_detail_products()
+                products = self._service_detail_products_with_fallback(service_no)
                 # Product loading also gives the asynchronously populated form time to render.
                 fields = self._service_detail_fields()
                 return True, {"fields": fields, "products": products}
@@ -2577,8 +2602,8 @@ class CRMSession:
                 log(message, level)
 
         def refresh_related_order():
-            nonlocal fields, service_products
-            emit("关联订单号无效，正在自动重查服务单详情", "info")
+            nonlocal fields, service_products, refreshed
+            emit("正在自动重查服务单产品明细与关联订单号", "info")
             for operation in (
                 lambda: self._open_service_order_list(emit),
                 lambda: self._search_service_order(service_no),
@@ -2589,7 +2614,7 @@ class CRMSession:
                     return "", message or "自动重查服务单失败"
 
             fresh_fields = list(self._service_detail_fields() or [])
-            fresh_products = list(self._service_detail_products() or [])
+            fresh_products = list(self._service_detail_products_with_fallback(service_no) or [])
             fresh_order_no = _related_order_no_from_service_fields(fresh_fields)
             if not fresh_order_no:
                 return "", "自动重查后仍未获取到有效关联订单号"
@@ -2597,29 +2622,7 @@ class CRMSession:
             fields = fresh_fields
             if fresh_products:
                 service_products = fresh_products
-            with _service_order_cache_lock(service_no):
-                filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
-                latest = {}
-                if os.path.exists(filepath):
-                    try:
-                        with open(filepath, "r", encoding="utf-8") as file:
-                            latest = json.load(file) or {}
-                    except (OSError, ValueError, TypeError):
-                        latest = {}
-                if not isinstance(latest, dict):
-                    latest = {}
-                latest["service_no"] = service_no
-                latest["fields"] = fresh_fields
-                if fresh_products:
-                    latest["products"] = fresh_products
-                old_lookup = latest.get("order_lookup")
-                old_order_no = (
-                    _valid_related_order_no(old_lookup.get("order_no"))
-                    if isinstance(old_lookup, dict) else ""
-                )
-                if isinstance(old_lookup, dict) and old_lookup and old_order_no != fresh_order_no:
-                    latest["order_lookup"] = {}
-                _write_service_order_detail(service_no, latest)
+            refreshed = True
             return fresh_order_no, ""
 
         try:
@@ -2630,15 +2633,14 @@ class CRMSession:
             fields = list(cached_detail.get("fields") or [])
             service_products = list(cached_detail.get("products") or [])
             order_no = _related_order_no_from_cached_detail(cached_detail)
-            if order_no and not service_products:
-                return False, {"error": "本地服务单详情缺少产品明细，请先重查产品明细"}
+            refreshed = False
             with self.lock:
                 if not self.is_alive() and not self._ensure_browser():
                     return False, {"error": "浏览器未启动，请先登录 CRM"}
                 if not self.logged_in and not self._is_current_page_logged_in():
                     return False, {"error": "CRM 当前未登录，请先登录 CRM"}
 
-                if not order_no:
+                if not order_no or not service_products:
                     order_no, message = refresh_related_order()
                     if not order_no:
                         return False, {"error": message}
@@ -2662,6 +2664,23 @@ class CRMSession:
                 order_products = self._store_order_detail_products()
                 if not order_products:
                     return False, {"error": "订单详情未读取到产品明细"}
+                if refreshed:
+                    with _service_order_cache_lock(service_no):
+                        filepath = os.path.join(SERVICE_ORDER_DIR, f"{service_no}.json")
+                        try:
+                            with open(filepath, "r", encoding="utf-8") as file:
+                                latest = json.load(file) or {}
+                        except (OSError, ValueError, TypeError):
+                            latest = {}
+                        if not isinstance(latest, dict):
+                            latest = {}
+                        old_lookup = latest.get('order_lookup')
+                        old_order_no = _valid_related_order_no(old_lookup.get('order_no')) if isinstance(old_lookup, dict) else ''
+                        latest['fields'] = fields
+                        latest['products'] = service_products
+                        if old_lookup and old_order_no != order_no:
+                            latest['order_lookup'] = {}
+                        _write_service_order_detail(service_no, latest)
                 return True, {
                     "service_no": service_no,
                     "order_no": order_no,
@@ -2690,10 +2709,8 @@ class CRMSession:
                 and str(rule.get('product_code') or '').strip().upper() != str(product.get('product_code') or '').strip().upper()
                 for product in detail['products']
             )
-            service_snapshot = None
-            if barcode_conflict:
-                with self.lock:
-                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
+            with self.lock:
+                service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
             with _service_order_cache_lock(service_no):
                 # Preserve barcode relationships while replacing stale order associations.
                 filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
@@ -2712,13 +2729,22 @@ class CRMSession:
                 snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
                 overrides = {}
                 if override:
-                    barcode = override['barcode']
-                    if not any(product.get('barcode') == barcode for product in detail['products']):
+                    line_id = override.get('service_line_id')
+                    barcode = override.get('barcode')
+                    if line_id:
+                        if not any(str(row.get('id') or '') == line_id for row in service_snapshot['rows']):
+                            return False, {'error': '服务单产品行已变化，请重新打开详情后预览'}
+                    elif not any(product.get('barcode') == barcode for product in detail['products']):
                         return False, {'error': '服务单条码已变化，请重新打开详情后预览'}
                     target = self.page.evaluate(MODEL_LOOKUP_JS, override['product_code'])
-                    overrides[barcode] = target
+                    overrides[line_id or barcode] = target
                 preview = (build_barcode_model_correction_preview(snapshot, service_snapshot, library, overrides)
                            if barcode_conflict else build_model_correction_preview(snapshot, detail['products']))
+                preview['service_lines'] = [
+                    {'id': row.get('id'), 'name': (row.get('new_product_id') or {}).get('name') or '',
+                     'code': row.get('productnumber') or '', 'barcode': row.get('new_userprofile_number') or ''}
+                    for row in service_snapshot['rows'] if row.get('id')
+                ] if service_snapshot.get('editable') else []
                 if expected is not None:
                     if preview['fingerprint'] != expected.get('fingerprint') or option not in preview['options']:
                         return False, {'error': '服务单或关联订单已变化，请重新预览型号修正'}
@@ -2744,10 +2770,17 @@ class CRMSession:
                             result = self.page.evaluate(SERVICE_APPLY_JS, {'preview': preview, 'option': option})
                         except Exception as error:
                             return False, {'error': f'关联订单可能已修正，服务单修改未确认：{error}。请重新查询核对，勿重复提交'}
-                        for product in detail['products']:
-                            if product.get('barcode') == result['barcode']:
-                                product['product_code'] = result['new_code']
-                                product['product_name'] = result['new_name']
+                        try:
+                            saved_service = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
+                            detail['products'] = self._service_products_from_snapshot(saved_service)
+                        except Exception as error:
+                            return False, {'error': f'型号已提交，但重新读取服务单产品明细失败：{error}。请在 CRM 核对，勿重复提交'}
+                        if not any(row.get('id') == result['service_line_id'] and
+                                   str(row.get('productnumber') or '').strip().upper() == result['new_code']
+                                   for row in saved_service['rows']):
+                            return False, {'error': '型号已提交，但服务单产品行再次读取不一致；请在 CRM 核对，勿重复提交'}
+                        if not detail['products']:
+                            return False, {'error': '型号已提交，但重新读取服务单产品明细为空；请在 CRM 核对，勿重复提交'}
                     else:
                         emit('正在保存关联订单型号并重新读取核验', 'info')
                         result = self.page.evaluate(MODEL_APPLY_JS, {'preview': preview, 'option': option})
@@ -11626,7 +11659,7 @@ def _service_model_job_payload(job):
     )}
     if job.get('success') and job['action'] == 'preview':
         preview = job['result']
-        result['preview'] = {key: preview[key] for key in ('order_no', 'options')}
+        result['preview'] = {key: preview[key] for key in ('order_no', 'options', 'service_lines')}
         result['preview']['mode'] = preview.get('mode') or 'order'
     return result
 
@@ -11698,12 +11731,15 @@ def api_service_model_correction_start(service_no):
         elif data.get('override') is not None:
             raw_override = data['override']
             if not isinstance(raw_override, dict):
-                return jsonify(success=False, error='请填写条码和目标产品编码'), 400
+                return jsonify(success=False, error='请选择产品行并填写目标产品编码'), 400
+            service_line_id = _clean_export_value(raw_override.get('service_line_id'))
             barcode = _clean_export_value(raw_override.get('barcode'))
             product_code = _clean_export_value(raw_override.get('product_code')).upper()
-            if not re.fullmatch(r'[A-Za-z0-9_-]{4,40}', barcode) or not re.fullmatch(r'[A-Z0-9._-]{2,40}', product_code):
-                return jsonify(success=False, error='条码或目标产品编码格式不正确'), 400
-            override = {'barcode': barcode, 'product_code': product_code}
+            if ((not re.fullmatch(r'[A-Za-z0-9_-]{4,80}', service_line_id or '')
+                 and not re.fullmatch(r'[A-Za-z0-9_-]{4,40}', barcode or ''))
+                    or not re.fullmatch(r'[A-Z0-9._-]{2,40}', product_code)):
+                return jsonify(success=False, error='产品行或目标产品编码格式不正确'), 400
+            override = {'service_line_id': service_line_id, 'product_code': product_code} if service_line_id else {'barcode': barcode, 'product_code': product_code}
         job = {
             'job_id': uuid.uuid4().hex, 'service_no': service_no, 'actor': actor, 'action': action,
             'running': True, 'done': False, 'success': False, 'error': '', 'message': '等待可用查询通道',

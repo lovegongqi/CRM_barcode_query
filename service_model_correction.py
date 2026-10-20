@@ -37,12 +37,13 @@ def build_barcode_model_correction_preview(order, service, library, overrides=No
     order_rows = order.get('rows') or []
     for line in (service.get('rows') or []) if service.get('editable') else []:
         barcode = str(line.get('new_userprofile_number') or '').strip()
-        if overrides and barcode not in overrides:
+        line_id = str(line.get('id') or '').strip()
+        if overrides and line_id not in overrides and barcode not in overrides:
             continue
-        rule = overrides.get(barcode) or library.get(barcode) or library.get(barcode[:-10]) or {}
+        rule = overrides.get(line_id) or overrides.get(barcode) or library.get(barcode) or library.get(barcode[:-10]) or {}
         old_code = str(line.get('productnumber') or '').strip().upper()
         target = str(rule.get('product_code') or '').strip().upper()
-        if not barcode or not old_code or not target or old_code == target:
+        if (not barcode and line_id not in overrides) or not old_code or not target or old_code == target:
             continue
         linked = line.get('new_mem_salesorderlineid') or ''
         linked = linked.get('id') if isinstance(linked, dict) else linked
@@ -63,7 +64,7 @@ def build_barcode_model_correction_preview(order, service, library, overrides=No
             'seq': row.get('new_seq'), 'old_code': old_code,
             'old_name': (line.get('new_product_id') or {}).get('name') or old_code,
             'new_code': target, 'new_name': rule.get('product_name') or target,
-            'quantity': 1, 'source': 'manual' if barcode in overrides else 'prefix',
+            'quantity': 1, 'source': 'manual' if line_id in overrides or barcode in overrides else 'prefix',
             'steps': (['order'] if order_code != target else []) + ['service'],
         })
     fingerprint = hashlib.sha256(json.dumps(

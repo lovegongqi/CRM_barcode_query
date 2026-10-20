@@ -147,6 +147,44 @@ class CRMRelatedOrderTests(unittest.TestCase):
         self.assertTrue(ok, result)
         self.assertEqual(result, {"fields": fields, "products": products})
 
+    def test_service_detail_keeps_product_lines_without_barcodes(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.set_content('''<section class="el-card"><h3>产品明细</h3><table>
+                <thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th></tr></thead>
+                <tbody><tr><td>型号 A</td><td>A001</td><td></td></tr>
+                <tr><td>型号 A</td><td>A001</td><td>—</td></tr>
+                <tr><td>型号 B</td><td>B002</td><td>12345678</td></tr></tbody>
+                </table></section>''')
+            session = make_crm_session()
+            session.page = page
+            products = session._service_detail_products()
+            browser.close()
+
+        self.assertEqual([(row['product_code'], row['barcode']) for row in products],
+                         [('A001', ''), ('A001', ''), ('B002', '12345678')])
+
+    def test_service_detail_does_not_collapse_visible_products(self):
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page()
+            page.set_content('''<section class="el-collapse-item is-active">
+                <button class="el-collapse-item__header" onclick="document.querySelector('table').remove()">产品明细</button>
+                <table><thead><tr><th>产品名称</th><th>产品编码</th><th>条码</th></tr></thead>
+                <tbody><tr><td>型号 A</td><td>A001</td><td></td></tr></tbody></table>
+                </section>''')
+            session = make_crm_session()
+            session.page = page
+            products = session._service_detail_products()
+            browser.close()
+
+        self.assertEqual([row['product_code'] for row in products], ['A001'])
+
     def test_refresh_reads_related_order_after_detail_data_finishes_loading(self):
         session = make_crm_session()
         fields = [{"label": "关联订单", "value": "ORD2610040175"}]
@@ -169,6 +207,28 @@ class CRMRelatedOrderTests(unittest.TestCase):
         self.assertTrue(ok, result)
         self.assertEqual(result["fields"], fields)
         self.assertEqual(result["products"], products)
+
+    def test_refresh_uses_crm_product_lines_when_table_has_no_readable_rows(self):
+        session = make_crm_session()
+        session.page.url = 'http://crmportal.ecowaterchina.net.cn/#/workOrder/edit/service-id'
+        session.page.evaluate.return_value = {'rows': [
+            {'id': 'line-1', 'productnumber': 'A001',
+             'new_product_id': {'name': '型号 A'}, 'new_userprofile_number': ''},
+            {'id': 'line-2', 'productnumber': 'B002',
+             'new_product_id': {'name': '型号 B'}, 'new_userprofile_number': ''},
+        ]}
+        with mock.patch.object(session, 'is_alive', return_value=True), \
+                mock.patch.object(session, '_is_current_page_logged_in', return_value=True), \
+                mock.patch.object(session, '_open_service_order_list', return_value=(True, '')), \
+                mock.patch.object(session, '_search_service_order', return_value=(True, '')), \
+                mock.patch.object(session, '_open_service_order_detail', return_value=(True, '')), \
+                mock.patch.object(session, '_service_detail_products', return_value=[]), \
+                mock.patch.object(session, '_service_detail_fields', return_value=[]):
+            ok, result = session.refresh_service_order_products('FWD202610200133')
+
+        self.assertTrue(ok, result)
+        self.assertEqual([(row['product_code'], row['barcode']) for row in result['products']],
+                         [('A001', ''), ('B002', '')])
 
     def test_store_order_list_uses_live_crm_route_and_accepts_live_or_legacy_heading(self):
         session = make_crm_session()
@@ -486,19 +546,28 @@ class CRMRelatedOrderTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("自动重查后仍未获取到有效关联订单号", result["error"])
 
-    def test_query_related_order_products_requires_cached_service_products(self):
+    def test_query_related_order_products_refreshes_missing_cached_service_products(self):
         session = make_crm_session()
         service_no = "FWD20260914001"
+        fields = [{"label": "关联订单号", "value": "SO20260914001"}]
+        service_products = [{"product_name": "型号 A", "product_code": "A001", "barcode": ""}]
+        order_products = [{"product_name": "型号 A", "product_code": "A001", "quantity": 1}]
         with tempfile.TemporaryDirectory() as tempdir, \
                 mock.patch.object(app_module, "SERVICE_ORDER_DIR", tempdir):
             app_module._write_service_order_detail(service_no, {
-                "fields": [{"label": "关联订单号", "value": "SO20260914001"}],
+                "fields": fields,
                 "order_lookup": {"order_no": "SO20260914001"},
             })
-            ok, result = session.query_related_order_products(service_no)
+            with self._success_patches(session, order_products), \
+                    mock.patch.object(session, "_open_service_order_list", return_value=(True, "")), \
+                    mock.patch.object(session, "_search_service_order", return_value=(True, "")), \
+                    mock.patch.object(session, "_open_service_order_detail", return_value=(True, "")), \
+                    mock.patch.object(session, "_service_detail_fields", return_value=fields), \
+                    mock.patch.object(session, "_service_detail_products", return_value=service_products):
+                ok, result = session.query_related_order_products(service_no)
 
-        self.assertFalse(ok)
-        self.assertIn("本地服务单详情缺少产品明细，请先重查产品明细", result["error"])
+        self.assertTrue(ok, result)
+        self.assertEqual(result["service_products"], service_products)
 
     def test_query_related_order_products_names_exact_order_search_failure_stage(self):
         session = make_crm_session()

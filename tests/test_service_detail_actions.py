@@ -126,6 +126,26 @@ def test_manual_model_preview_keeps_server_validated_barcode_and_code(model_jobs
     assert job['_override'] == {'barcode':'9232506010078', 'product_code':'926051571'}
 
 
+def test_manual_model_preview_accepts_service_line_without_barcode(model_jobs):
+    response, status = start_model({'action':'preview', 'override':{
+        'service_line_id':'12345678-1234-1234-1234-123456789abc', 'product_code':' NEW002 ',
+    }})
+    assert status == 200
+    job = app_module.service_model_jobs[response.get_json()['job_id']]
+    assert job['_override'] == {
+        'service_line_id':'12345678-1234-1234-1234-123456789abc', 'product_code':'NEW002',
+    }
+
+
+def test_model_preview_status_exposes_service_lines_for_manual_selection():
+    job = {'job_id': 'preview-1', 'service_no': 'FWD123456', 'action': 'preview',
+           'success': True, 'result': {'order_no': 'ORD123', 'options': [],
+                                       'service_lines': [{'id': 'line-1', 'name': '旧型号',
+                                                          'code': 'OLD001', 'barcode': ''}]}}
+    payload = app_module._service_model_job_payload(job)
+    assert payload['preview']['service_lines'][0]['id'] == 'line-1'
+
+
 def test_manual_model_preview_rejects_invalid_code(model_jobs):
     response, status = start_model({'action':'preview', 'override':{
         'barcode':'9232506010078', 'product_code':'<script>',

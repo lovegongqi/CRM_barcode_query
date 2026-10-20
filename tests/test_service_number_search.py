@@ -277,3 +277,39 @@ def test_model_correction_can_preview_a_manually_entered_product_code(search_pag
     expect(page.locator('#modelCorrectionPanel')).to_contain_text('手填型号')
     assert submitted == [{'action':'preview'},
                          {'action':'preview', 'override':{'barcode':'SN1', 'product_code':'CUSTOM'}}]
+
+
+def test_model_correction_can_select_unbarcoded_service_line(search_page):
+    page, _, _ = search_page
+    submitted = []
+    page.route('**/api/service-orders/FWD123456', lambda route: route.fulfill(json={
+        'service_no': 'FWD123456', 'products': [
+            {'product_name': '旧型号', 'product_code': 'OLD001', 'barcode': ''}],
+    }))
+
+    def model_start(route):
+        submitted.append(route.request.post_data_json)
+        route.fulfill(json={'job_id': str(len(submitted)), 'action': 'preview', 'running': False})
+
+    def model_status(route):
+        manual = route.request.url.rsplit('=', 1)[1] == '2'
+        options = [{'seq': 10, 'old_name': '旧型号', 'old_code': 'OLD001',
+                    'new_name': '新型号', 'new_code': 'NEW002', 'quantity': 1,
+                    'source': 'manual'}] if manual else []
+        route.fulfill(json={'action': 'preview', 'running': False, 'success': True,
+                            'preview': {'order_no': 'ORD123', 'mode': 'barcode' if manual else 'order',
+                                        'options': options, 'service_lines': [
+                                            {'id': 'service-line', 'name': '旧型号', 'code': 'OLD001', 'barcode': ''}]}})
+
+    page.route('**/model-correction', model_start)
+    page.route('**/model-correction/status?job_id=*', model_status)
+    page.get_by_label('服务单号', exact=True).fill('FWD123456')
+    page.get_by_role('button', name='查询服务单', exact=True).click()
+    page.get_by_role('button', name='型号修正', exact=True).click()
+    expect(page.locator('#modelCorrectionPanel')).to_contain_text('未录条码')
+    page.get_by_label('目标产品编码').fill('NEW002')
+    page.get_by_role('button', name='预览手填编码').click()
+    expect(page.locator('#modelCorrectionPreview')).to_contain_text('旧型号')
+    expect(page.locator('#modelCorrectionPreview')).to_contain_text('新型号')
+    assert submitted == [{'action': 'preview'}, {'action': 'preview', 'override': {
+        'service_line_id': 'service-line', 'product_code': 'NEW002'}}]

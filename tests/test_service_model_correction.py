@@ -107,12 +107,33 @@ def test_model_correction_manual_code_overrides_prefix_for_selected_barcode():
     assert option['steps'] == ['order', 'service']
 
 
-def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, model_snapshot):
+def test_manual_model_correction_can_target_service_line_without_barcode():
+    order = {'order_id': 'order-id', 'order_no': 'ORD2610200062', 'rows': [{
+        'detailid': 'order-line', 'new_seq': 10, 'new_type': 1, 'new_isgifts': False,
+        'new_productname': 'OLD001', 'new_productid': {'name': '旧型号'},
+        'new_qty': 1, 'new_installedqty': 0, 'new_returnqty': 0,
+    }]}
+    service = {'service_no': 'FWD202610200133', 'editable': True, 'rows': [{
+        'id': 'service-line', 'new_userprofile_number': '', 'productnumber': 'OLD001',
+        'new_product_id': {'name': '旧型号'}, 'new_mem_salesorderlineid': 'order-line',
+    }]}
+    target = {'product_code': 'NEW002', 'product_name': '新型号'}
+    result = build_barcode_model_correction_preview(order, service, {}, {'service-line': target})
+    assert result['options'] == [{
+        'barcode': '', 'service_line_id': 'service-line', 'order_detail_id': 'order-line',
+        'seq': 10, 'old_code': 'OLD001', 'old_name': '旧型号',
+        'new_code': 'NEW002', 'new_name': '新型号', 'quantity': 1,
+        'source': 'manual', 'steps': ['order', 'service'],
+    }]
+
+
+@pytest.mark.parametrize('barcode', ['3752311060186', ''])
+def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, model_snapshot, barcode):
     from service_model_correction import SERVICE_APPLY_JS
     model_snapshot['rows'][0]['new_productname'] = '906042809'
-    model_page.evaluate('''() => {
+    model_page.evaluate('''barcode => {
         const s = window.testState;
-        s.service = {id:'service-line',new_userprofile_number:'3752311060186',productnumber:'906042810',
+        s.service = {id:'service-line',new_userprofile_number:barcode,productnumber:'906042810',
                      new_product_id:{id:'old-id',name:'ERO131-3'},new_mem_salesorderlineid:'row-1'};
         s.serviceWrites = [];
         const previousGet = rt.get;
@@ -124,7 +145,7 @@ def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, m
         };
         rt.post = async (url,payload) => { s.serviceWrites.push({url,payload:structuredClone(payload)});
             s.service = {...payload,productnumber:payload.productnumber}; };
-    }''')
+    }''', barcode)
     service = {'service_no':'FWD202610040292','work_order_id':'service-id','editable':True,
                'rows':[model_page.evaluate('testState.service')]}
     option = {'service_line_id':'service-line','order_detail_id':'row-1','new_code':'906042809'}
@@ -139,7 +160,7 @@ def test_service_model_apply_waits_for_order_and_preserves_barcode(model_page, m
     writes = model_page.evaluate('testState.serviceWrites')
     assert len(writes) == 1
     assert writes[0]['url'] == 'api/WorkOrder/UpdateSrvProductline'
-    assert writes[0]['payload']['new_userprofile_number'] == '3752311060186'
+    assert writes[0]['payload']['new_userprofile_number'] == barcode
     assert writes[0]['payload']['new_mem_salesorderlineid'] == 'row-1'
 
 
