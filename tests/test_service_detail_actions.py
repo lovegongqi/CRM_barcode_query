@@ -99,6 +99,14 @@ def test_detail_annotates_exact_barcode_model_conflict(direct_close, monkeypatch
     }
 
 
+def test_detail_close_status_comes_from_service_fields(direct_close):
+    app_module._write_service_order_detail('FWD123456', {
+        'fields': [{'label': '结单状态', 'value': '未结单'}], 'products': [],
+    })
+    with app_module.app.test_request_context():
+        assert app_module.api_service_order_detail('FWD123456').get_json()['close_status'] == '未结单'
+
+
 def test_detail_checks_barcode_prefix_before_order_service_agreement(direct_close, monkeypatch):
     app_module._write_service_order_detail('FWD123456', {
         'products': [{'barcode': '9232506010078', 'product_code': '926051587',

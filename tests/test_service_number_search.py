@@ -111,6 +111,38 @@ def test_selected_records_submit_only_checked_service_numbers_for_batch_close(se
     assert submitted == [{'service_nos':['FWD000002']}]
 
 
+def test_select_all_and_clear_only_operable_service_orders(search_page):
+    page, _, state = search_page
+    state['records'] = [{'id':'query-1', 'service_rows':[
+        {'service_no':'FWD000001', 'state':'queried', 'close_status':'未结单'},
+        {'service_no':'FWD000002', 'state':'failed', 'close_status':'未结单'},
+        {'service_no':'FWD000003', 'state':'closed', 'close_status':'已结单'},
+        {'service_no':'FWD000004', 'state':'queried', 'close_status':'已结单'},
+    ]}]
+    page.reload()
+    page.get_by_role('button', name='全选', exact=True).click()
+    assert page.locator('input[data-select-service]:checked').count() == 2
+    assert page.evaluate('selectedBatchServices()') == ['FWD000001', 'FWD000002']
+    page.get_by_role('button', name='取消全选').click()
+    assert page.locator('input[data-select-service]:checked').count() == 0
+    expect(page.get_by_role('button', name='批量结单')).to_be_disabled()
+
+
+@pytest.mark.parametrize('close_status', ['未结单', '已结单'])
+def test_modal_and_record_show_actual_service_close_status(search_page, close_status):
+    page, _, state = search_page
+    state['records'] = [{'id':'query-1', 'service_rows':[
+        {'service_no':'FWD123456', 'state':'queried', 'close_status':close_status},
+    ]}]
+    page.route('**/api/service-orders/FWD123456', lambda route: route.fulfill(json={
+        'service_no':'FWD123456', 'close_status':close_status, 'fields':[], 'products':[],
+    }))
+    page.reload()
+    expect(page.locator('#serviceCloseRecordList')).to_contain_text(close_status)
+    page.locator('.service-close-order-link').click()
+    expect(page.locator('#modalCloseStatus')).to_have_text(close_status)
+
+
 def test_batch_correction_skips_unmatched_barcode_without_writing(search_page):
     page, requests, state = search_page
     state['records'] = [{'id':'query-1', 'service_rows':[{'service_no':'FWD123456', 'state':'queried'}]}]

@@ -2399,9 +2399,11 @@ class CRMSession:
         return fields
 
     def _save_service_detail(self, service_no, row):
+        _closed, close_status = self._service_detail_closed_state()
         detail = {
             "service_no": _clean_export_value(service_no),
             "fields": self._service_detail_fields(),
+            "close_status": close_status if close_status in {'已结单', '未结单'} else '',
             "products": list((row or {}).get("service_products") or []),
             "selected_barcodes": list((row or {}).get("selected_barcodes") or []),
             "related_barcodes": list((row or {}).get("related_barcodes") or []),
@@ -2592,7 +2594,9 @@ class CRMSession:
                 products = self._service_detail_products_with_fallback(service_no)
                 # Product loading also gives the asynchronously populated form time to render.
                 fields = self._service_detail_fields()
-                return True, {"fields": fields, "products": products}
+                _closed, close_status = self._service_detail_closed_state()
+                return True, {"fields": fields, "products": products,
+                              "close_status": close_status if close_status in {'已结单', '未结单'} else ''}
         except Exception as e:
             return False, {"error": str(e)}
 
@@ -6641,6 +6645,8 @@ def _run_service_close_job(job_id, workers, orders, verify_models=False):
                         job_id,
                         index,
                         state=final_state,
+                        close_status=('已结单' if final_state in {'closed', 'already_closed'}
+                                      else _service_order_close_status(_cached_service_order_detail(service_no))),
                         barcodes=list(result_row.get('barcodes') or []),
                         selected_barcodes=list(result_row.get('selected_barcodes') or []),
                         related_barcodes=list(result_row.get('related_barcodes') or []),
@@ -9083,9 +9089,21 @@ def _infer_service_product_model(product_name):
         model += " PLUS"
     return model
 
+
+def _service_order_close_status(detail):
+    status = _clean_export_value((detail or {}).get('close_status'))
+    if status in {'已结单', '未结单'}:
+        return status
+    for field in (detail or {}).get('fields') or []:
+        if (isinstance(field, dict) and _clean_export_value(field.get('label')).rstrip('：:') in {'结单状态', '是否结单'}
+                and _clean_export_value(field.get('value')) in {'已结单', '未结单'}):
+            return _clean_export_value(field['value'])
+    return ''
+
 def _normalize_service_order_detail(detail, service_no=""):
     payload = dict(detail or {})
     payload["service_no"] = _clean_export_value(service_no or payload.get("service_no"))
+    payload["close_status"] = _service_order_close_status(payload)
     products = []
     for source in payload.get("products") or []:
         if not isinstance(source, dict):
@@ -10366,6 +10384,7 @@ def _record_service_order_query(service_no, detail, slot_id, slot_label):
                    actor=_clean_export_value((current_account() or {}).get('username')))
         job['service_rows'][0].update(
             state='queried', message='已查询服务单，尚未提交结单', selected_barcodes=[],
+            close_status=_service_order_close_status(detail),
             slot_id=slot_id, slot_label=slot_label, started_at=now, finished_at=now,
         )
         return _append_service_close_history(job)
@@ -11175,7 +11194,13 @@ def api_service_close_start():
 
 @app.route("/api/service-close/history", methods=["GET"])
 def api_service_close_history():
-    return jsonify({'success': True, 'records': load_service_close_history()})
+    records = load_service_close_history()
+    for record in records:
+        for row in record.get('service_rows') or []:
+            if not row.get('close_status'):
+                row['close_status'] = ('已结单' if row.get('state') in {'closed', 'already_closed'}
+                                       else _service_order_close_status(_cached_service_order_detail(row.get('service_no'))))
+    return jsonify({'success': True, 'records': records})
 
 @app.route("/api/service-close/history/<job_id>", methods=["DELETE"])
 def api_service_close_history_delete(job_id):
@@ -11879,6 +11904,12 @@ def api_service_order_refresh_products(service_no):
         existing["products"] = products
         if fields:
             existing["fields"] = fields
+        refreshed_close_status = _service_order_close_status({
+            'close_status': result.get('close_status') if isinstance(result, dict) else '',
+            'fields': fields,
+        })
+        if refreshed_close_status:
+            existing["close_status"] = refreshed_close_status
         order_lookup = existing.get("order_lookup")
         if isinstance(order_lookup, dict) and order_lookup.get("order_no"):
             order_lookup["comparison"] = _build_service_order_product_comparison(

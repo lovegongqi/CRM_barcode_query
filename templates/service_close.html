@@ -26,6 +26,11 @@
         .close-history-actions button:disabled { opacity:.55; cursor:wait; }
         .service-close-select { display:flex; align-items:center; gap:5px; color:var(--aurora-muted); font-size:11px; white-space:nowrap; }
         .service-close-select input { width:16px; height:16px; accent-color:#38bdf8; }
+        .service-close-crm-status,.modal-close-status { display:inline-flex; align-items:center; width:fit-content; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; white-space:nowrap; }
+        .service-close-crm-status.is-closed,.modal-close-status.is-closed { color:#166534; background:#dcfce7; }
+        .service-close-crm-status.is-open,.modal-close-status.is-open { color:#9a3412; background:#ffedd5; }
+        .service-close-crm-status.is-unknown,.modal-close-status.is-unknown { color:var(--aurora-muted); background:var(--aurora-control-bg); }
+        .modal-title-group { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
         #serviceBatchActionStatus { grid-column:1 / -1; min-height:16px; color:var(--aurora-muted); font-size:12px; }
         #serviceBatchActionResults { grid-column:1 / -1; margin:0; padding-left:24px; color:var(--aurora-text); font-size:12px; line-height:1.6; }
         #serviceBatchActionResults[hidden] { display:none; }
@@ -102,9 +107,9 @@
             <p id="serviceSearchMessage" role="status" aria-live="polite"></p>
             <ol id="serviceBatchResults" aria-live="polite" hidden></ol>
         </section>
-        <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions"><button class="batch-action" id="batchModelCorrection" type="button">批量修正</button><button class="batch-action" id="batchServiceClose" type="button">批量结单</button>{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>勾选服务单后，先批量修正已确认的条码型号差异，再批量结单；无法核实型号的服务单会跳过结单。</p><div id="serviceBatchActionStatus" role="status" aria-live="polite"></div><ol id="serviceBatchActionResults" aria-live="polite" hidden></ol></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
+        <section class="card close-card"><div class="close-card-head"><h2>结单记录</h2><div class="close-history-actions"><button class="batch-action" id="selectAllServices" type="button">全选</button><button class="batch-action" id="clearSelectedServices" type="button">取消全选</button><button class="batch-action" id="batchModelCorrection" type="button">批量修正</button><button class="batch-action" id="batchServiceClose" type="button">批量结单</button>{% if can_manage_history %}<button id="clearServiceCloseHistory" type="button">清空记录</button>{% endif %}</div><p>勾选服务单后，先批量修正已确认的条码型号差异，再批量结单；无法核实型号的服务单会跳过结单。</p><div id="serviceBatchActionStatus" role="status" aria-live="polite"></div><ol id="serviceBatchActionResults" aria-live="polite" hidden></ol></div><div class="close-placeholder" id="serviceCloseRecords"><span class="service-close-latest-summary" id="serviceCloseLatestSummary" hidden></span><div id="serviceCloseRecordList">正在加载结单记录…</div></div></section>
     </div>
-    <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><span class="modal-title-text" id="modalTitle">服务单详情</span><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
+    <div class="modal-overlay" id="detailModal"><div class="modal-content"><div class="modal-header"><div class="modal-title-group"><span class="modal-title-text" id="modalTitle">服务单详情</span><span class="modal-close-status is-unknown" id="modalCloseStatus" aria-live="polite">状态读取中</span></div><button class="modal-close" type="button" onclick="closeDetailModal()">✕</button></div><div id="serviceDetailContent" class="service-detail-content"></div></div></div>
     <script>
         const canManageHistory = {{ 'true' if can_manage_history else 'false' }};
         let closeLogSequence = 0, closeTimer = null, detailRequestId = 0, currentDetailServiceNo = '', historyRecords = [], currentCloseRecord = null;
@@ -211,17 +216,26 @@
                 const barcodes = Array.from(new Set((row.barcodes || []).map(String).filter(Boolean))).map(barcode => `<span class="service-close-barcode ${selected.has(barcode) ? 'is-selected' : 'is-related'}"><span>${escapeHtml(barcode)}</span><em>${selected.has(barcode) ? '已选' : '关联'}</em></span>`).join('') || '<span class="service-close-barcode">无关联条码</span>';
                 const customers = Array.isArray(row.customer_names) && row.customer_names.length ? `<small>客户 ${escapeHtml(row.customer_names.join('、'))}</small>` : '';
                 const deleteButton = canDelete && serviceNo ? `<div class="service-close-row-actions"><button type="button" data-history-service-no="${escapeHtml(serviceNo)}">删除记录</button></div>` : '';
-                const selectable = serviceNo && !['closed','already_closed','waiting','running'].includes(row.state);
+                const closeStatus = ['已结单','未结单'].includes(row.close_status) ? row.close_status : (['closed','already_closed'].includes(row.state) ? '已结单' : '状态未读取');
+                const closeStatusClass = closeStatus === '已结单' ? 'is-closed' : closeStatus === '未结单' ? 'is-open' : 'is-unknown';
+                const selectable = serviceNo && closeStatus !== '已结单' && !['closed','already_closed','waiting','running'].includes(row.state);
                 const selector = selectable ? `<label class="service-close-select"><input type="checkbox" data-select-service="${escapeHtml(serviceNo)}" ${selectedServiceNos.has(serviceNo) ? 'checked' : ''} aria-label="选择服务单 ${escapeHtml(serviceNo)}">选择</label>` : '';
-                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><div class="service-close-order-top"><div>${selector}<button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button></div>${recordMeta}</div>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
+                return `<div class="service-close-status-row ${stateClass}"><div class="service-close-order"><div class="service-close-order-top"><div>${selector}<button type="button" class="service-close-order-link" data-service-no="${escapeHtml(serviceNo)}" data-detail-url="${escapeHtml(detailUrl)}" onclick="showServiceOrderDetail(this.dataset.serviceNo, this.dataset.detailUrl)">${escapeHtml(serviceNo || '未知服务单')}</button></div>${recordMeta}</div>${customers}<div class="service-close-barcodes">${barcodes}</div></div><div class="service-close-channel">${escapeHtml(row.slot_label || '待分配')}</div><div class="service-close-progress"><span class="service-close-state">${escapeHtml(label)}</span><span class="service-close-crm-status ${closeStatusClass}">${escapeHtml(closeStatus)}</span><div>${escapeHtml(row.message || (row.state === 'waiting' ? '等待处理' : '处理中'))}</div></div><div class="service-close-elapsed">${duration(row.elapsed)}</div>${deleteButton}</div>`;
             }).join('');
         }
 
         function fieldValue(fields, labels) { for (const label of labels) { const found = fields.find(row => String(row.label || '') === label); if (found) return String(found.value || ''); } return '—'; }
         function detailField(label, value) { return `<div class="service-detail-field"><label>${label}</label><div>${escapeHtml(value)}</div></div>`; }
+        function setModalCloseStatus(status) {
+            const badge = document.getElementById('modalCloseStatus');
+            if (!badge) return;
+            badge.textContent = ['已结单','未结单'].includes(status) ? status : '状态未读取';
+            badge.className = `modal-close-status ${status === '已结单' ? 'is-closed' : status === '未结单' ? 'is-open' : 'is-unknown'}`;
+        }
         function renderServiceOrderDetail(detail) {
             modelBarcodes = [...new Set((detail.products || []).map(product => String(product.barcode || '').trim()).filter(Boolean))];
             const fields = (detail.fields || []).filter(row => row && row.label), selected = new Set((detail.selected_barcodes || []).map(String)), related = new Set((detail.related_barcodes || []).map(String));
+            setModalCloseStatus(detail.close_status || fieldValue(fields,['结单状态','是否结单']));
             const comparisons = new Map((detail.order_lookup?.comparison || []).map(row => [String(row.product_code || '').trim().toUpperCase(), row]));
             const customer = `<section class="service-detail-section"><h3>客户信息</h3><div class="service-detail-fields service-detail-customer-fields">${detailField('客户姓名', fieldValue(fields,['客户名称','客户姓名','反馈人','联系人']))}${detailField('联系电话', fieldValue(fields,['联系电话','客户电话','反馈电话','联系人电话','手机号码']))}${detailField('联系地址',[fieldValue(fields,['所属省份','省份']),fieldValue(fields,['所属城市','城市']),fieldValue(fields,['所属县区','县区']),fieldValue(fields,['联系地址','客户地址','地址'])].filter(value => value !== '—').join(' ') || '—')}</div></section>`;
             const serviceOpen = window.matchMedia('(min-width:761px)').matches ? ' open' : '';
@@ -234,9 +248,9 @@
 
         async function showServiceOrderDetail(serviceNo, detailUrl) {
             if (!serviceNo || !detailUrl) return; const requestId = ++detailRequestId; currentDetailServiceNo = serviceNo; modelPreview = null; modelOverride = null; modelLines = [];
-            document.getElementById('modalTitle').textContent = `服务单详情 - ${serviceNo}`; document.getElementById('serviceDetailContent').innerHTML = '<div class="service-detail-empty">正在读取服务单详情…</div>'; document.getElementById('detailModal').classList.add('overlay-show');
+            document.getElementById('modalTitle').textContent = `服务单详情 - ${serviceNo}`; document.getElementById('modalCloseStatus').textContent = '状态读取中'; document.getElementById('modalCloseStatus').className = 'modal-close-status is-unknown'; document.getElementById('serviceDetailContent').innerHTML = '<div class="service-detail-empty">正在读取服务单详情…</div>'; document.getElementById('detailModal').classList.add('overlay-show');
             try { const response = await fetch(detailUrl), detail = await response.json(); if (requestId !== detailRequestId) return; if (!response.ok || detail.success === false) throw new Error(detail.error || '服务单详情不存在'); renderServiceOrderDetail(detail); if (modelTasks.has(serviceNo)) { setModelBusy(true); pollModelCorrection(serviceNo,modelTasks.get(serviceNo),requestId); } else await resumeOrderProductQuery(serviceNo); }
-            catch (error) { if (requestId === detailRequestId) document.getElementById('serviceDetailContent').innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`; }
+            catch (error) { if (requestId === detailRequestId) { setModalCloseStatus(''); document.getElementById('serviceDetailContent').innerHTML = `<div class="service-detail-empty">${escapeHtml(error.message || '服务单详情读取失败')}</div>`; } }
         }
         async function refreshServiceOrderProducts(serviceNo) { const button = document.querySelector('.service-detail-refresh:not(.service-detail-order-query)'); if (!serviceNo || serviceNo !== currentDetailServiceNo) return; if (button) { button.disabled = true; button.textContent = '重查中…'; } try { const response = await fetch(`/api/service-orders/${encodeURIComponent(serviceNo)}/refresh-products`,{method:'POST'}), data = await response.json(); if (!response.ok || data.success === false) throw new Error(data.error || '重查失败'); await showServiceOrderDetail(serviceNo,data.detail_url || `/api/service-orders/${encodeURIComponent(serviceNo)}`); } catch (error) { if (button) { button.disabled = false; button.textContent = '↻ 重查产品明细'; } alert(error.message || '重查失败'); } }
         function setOrderProductQueryStatus(data) { const element = document.getElementById('serviceOrderQueryStatus'); if (!element) return; if (!data) { element.hidden = true; element.textContent = ''; element.className = 'service-detail-order-attempt'; return; } const elapsed = duration(data.elapsed); const channel = data.slot_label ? ` · ${data.slot_label}` : ''; const message = data.message || (data.stage === 'waiting' ? '正在等待可用查询通道' : '正在查询订单产品明细'); element.hidden = false; element.className = data.running ? 'service-detail-order-attempt is-live' : 'service-detail-order-attempt'; element.textContent = `本次查询：${data.started_at || '—'}\n状态：${message}${channel}\n已等待：${elapsed}`; }
@@ -378,6 +392,7 @@
                 const row = (data.service_rows || []).find(row => row.service_no === serviceNo);
                 status.textContent = row?.message || data.error || '等待查询通道';
                 button.disabled = data.running || ['closed','already_closed'].includes(row?.state);
+                if (['closed','already_closed'].includes(row?.state)) setModalCloseStatus('已结单');
                 if (data.running) setTimeout(() => pollDetailServiceClose(serviceNo,jobId,requestId),1200);
                 else await loadHistory();
             } catch (error) {
@@ -422,18 +437,35 @@
             }
         }
         function selectedBatchServices() {
-            return [...selectedServiceNos].filter(serviceNo => document.querySelector(`#serviceCloseRecordList input[data-select-service="${CSS.escape(serviceNo)}"]`));
+            return [...document.querySelectorAll('#serviceCloseRecordList input[data-select-service]:checked')].map(input => input.dataset.selectService);
         }
         function updateBatchButtons() {
-            const disabled = batchActionRunning || !selectedBatchServices().length;
+            const selected = selectedBatchServices().length;
+            const disabled = batchActionRunning || !selected;
             document.getElementById('batchModelCorrection').disabled = disabled;
             document.getElementById('batchServiceClose').disabled = disabled;
+            document.getElementById('selectAllServices').disabled = batchActionRunning || !document.querySelector('#serviceCloseRecordList input[data-select-service]:not(:checked)');
+            document.getElementById('clearSelectedServices').disabled = batchActionRunning || !selected;
         }
         document.getElementById('serviceCloseRecordList').addEventListener('change', event => {
             const serviceNo = event.target.dataset.selectService;
             if (!serviceNo) return;
             if (event.target.checked) selectedServiceNos.add(serviceNo);
             else selectedServiceNos.delete(serviceNo);
+            updateBatchButtons();
+        });
+        document.getElementById('selectAllServices').addEventListener('click', () => {
+            if (batchActionRunning) return;
+            document.querySelectorAll('#serviceCloseRecordList input[data-select-service]').forEach(input => {
+                input.checked = true;
+                selectedServiceNos.add(input.dataset.selectService);
+            });
+            updateBatchButtons();
+        });
+        document.getElementById('clearSelectedServices').addEventListener('click', () => {
+            if (batchActionRunning) return;
+            selectedServiceNos.clear();
+            document.querySelectorAll('#serviceCloseRecordList input[data-select-service]').forEach(input => { input.checked = false; });
             updateBatchButtons();
         });
         async function waitModelJob(serviceNo, payload) {
