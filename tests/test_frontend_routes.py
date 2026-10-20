@@ -116,6 +116,25 @@ class FrontendRouteSmokeTest(unittest.TestCase):
         self.assertEqual(viewer_page.status_code, 200)
         self.assertNotIn(b'id="editCard"', viewer_page.data)
 
+    def test_admin_manages_query_exclusions_and_lookup_explains_skip(self):
+        prefix = "ZXQ"
+        barcode = "ZXQ0000000001"
+        client = app_module.app.test_client()
+        self.assertEqual(client.post("/api/product-library/exclusions", json={"prefix": prefix}).status_code, 401)
+
+        saved = self.client.post("/api/product-library/exclusions", json={"prefix": prefix})
+        self.assertEqual(saved.status_code, 200)
+        self.assertTrue(saved.get_json()["success"])
+        self.assertIn(prefix, self.client.get("/api/product-library").get_json()["excluded_prefixes"])
+
+        lookup = client.get(f"/api/product-library/lookup?barcode={barcode}").get_json()
+        self.assertFalse(lookup["need_query"])
+        self.assertEqual(lookup["excluded_prefix"], prefix)
+
+        self.assertEqual(client.delete(f"/api/product-library/exclusions/{prefix}").status_code, 401)
+        self.assertTrue(self.client.delete(f"/api/product-library/exclusions/{prefix}").get_json()["success"])
+        self.assertNotIn(prefix, self.client.get("/api/product-library").get_json()["excluded_prefixes"])
+
     def test_launcher_forces_a_fresh_login_without_desktop_mode(self):
         source = (Path(app_module.__file__).parent / "app_launcher.py").read_text(encoding="utf-8")
         self.assertIn('url = f"http://127.0.0.1:{port}/api/app-auth/status"', source)

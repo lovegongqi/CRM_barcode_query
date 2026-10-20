@@ -43,6 +43,11 @@
         .library-inline-query-logs { background:#0f172a; color:#d4d4d4; border-radius:6px; padding:8px 10px; max-height:150px; overflow:auto; font-family:"Courier New", monospace; font-size:12px; line-height:1.7; }
         .library-inline-query-logs .info { color:#4fc3f7; } .library-inline-query-logs .success { color:#81c784; } .library-inline-query-logs .error { color:#e57373; } .library-inline-query-logs .warn { color:#ffb74d; } .library-inline-query-logs .dim { color:#94a3b8; }
         .library-form { display:grid; grid-template-columns: .7fr 1fr 1.2fr auto; gap:8px; align-items:end; margin-bottom:12px; }
+        .exclusion-form { display:flex; align-items:end; gap:8px; max-width:440px; margin-bottom:12px; }
+        .exclusion-form > div { flex:1; }
+        .excluded-prefix-list { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; }
+        .excluded-prefix-item { display:inline-flex; align-items:center; gap:8px; padding:5px 6px 5px 10px; border:1px solid #cfd8e3; border-radius:8px; font-size:13px; }
+        .excluded-prefix-item button { min-height:28px; padding:4px 8px; }
         .search-form { display:grid; grid-template-columns: 1fr auto auto auto; gap:8px; align-items:end; margin-bottom:12px; }
         .auth-form { display:flex; gap:8px; flex-wrap:wrap; align-items:end; }
         .auth-form input { width:160px; }
@@ -57,7 +62,7 @@
         th { background:#f8fafc; color:#475569; }
         .header-actions { display:flex; gap:8px; align-items:center; justify-content:flex-end; flex-wrap:wrap; }
         .header-actions .btn { text-decoration:none; display:inline-flex; align-items:center; justify-content:center; }
-        @media (max-width: 860px) { .container { padding:14px; } .library-form, .search-form { grid-template-columns:1fr; } .library-search-head { flex-wrap:wrap; } }
+        @media (max-width: 860px) { .container { padding:14px; } .library-form, .search-form { grid-template-columns:1fr; } .library-search-head { flex-wrap:wrap; } .exclusion-form { max-width:none; } }
         @media (max-width: 640px) {
             .lookup-line { grid-template-columns:68px minmax(0,1fr); }
             .lookup-result-table, .lookup-result-table tbody, .lookup-result-table tr, .lookup-result-table td { display:block; width:100%; }
@@ -145,6 +150,13 @@
             <div><label>产品名称</label><input id="libName" placeholder="软水机6系列 609ECM"></div>
             <button class="btn btn-primary" onclick="saveLibrary()">保存</button>
         </div>
+        <h2>自动查询排除前缀</h2>
+        <div class="note">条码以所填前缀开头且没有本地匹配时，跳过自动 CRM 查询。手动在线查询仍可使用。</div>
+        <div class="exclusion-form">
+            <div><label for="excludePrefix">排除查询前缀</label><input id="excludePrefix" placeholder="如 923" inputmode="latin" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"></div>
+            <button class="btn btn-primary" type="button" onclick="saveExclusion()">添加排除前缀</button>
+        </div>
+        <div class="excluded-prefix-list" id="excludedPrefixList"></div>
         <div id="libraryBox"></div>
     </div>
     {% endif %}
@@ -182,6 +194,10 @@ async function loadLibrary() {
                 </tr>
             `).join('') || '<tr><td colspan="6">暂无条码匹配规则</td></tr>'}</tbody>
         </table>`;
+    const excludedPrefixList = document.getElementById('excludedPrefixList');
+    if (excludedPrefixList) excludedPrefixList.innerHTML = (data.excluded_prefixes || []).map(prefix => `
+        <span class="excluded-prefix-item">${escapeHtml(prefix)}<button class="btn btn-danger" type="button" data-delete-exclusion="${escapeHtml(prefix)}" aria-label="删除 ${escapeHtml(prefix)}">删除</button></span>
+    `).join('') || '<span class="muted">暂无排除前缀</span>';
     if (document.getElementById('lookupInput')?.value.trim()) unifiedSearch(false);
 }
 
@@ -210,6 +226,27 @@ async function deleteLibrary(prefix) {
     if (!data.success) return alert(data.error || '删除失败');
     loadLibrary();
 }
+
+async function saveExclusion() {
+    const input = document.getElementById('excludePrefix');
+    const res = await fetch('/api/product-library/exclusions', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prefix: input.value.trim()})
+    });
+    const data = await res.json();
+    if (!data.success) return alert(data.error || '添加失败');
+    input.value = '';
+    loadLibrary();
+}
+
+document.getElementById('excludedPrefixList')?.addEventListener('click', async event => {
+    const prefix = event.target.closest('button[data-delete-exclusion]')?.dataset.deleteExclusion;
+    if (!prefix) return;
+    const res = await fetch('/api/product-library/exclusions/' + encodeURIComponent(prefix), {method: 'DELETE'});
+    const data = await res.json();
+    if (!data.success) return alert(data.error || '删除失败');
+    loadLibrary();
+});
 
 loadLibrary();
 
@@ -329,7 +366,11 @@ async function lookupBarcode(barcodeValue = '') {
             </div>`;
         return;
     }
-    box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。是否立即查询该条码并自动补充条码匹配？ <button class="btn btn-primary" onclick="confirmQueryBarcode()">确认查询</button>`;
+    if (data.need_query === false && data.excluded_prefix) {
+        box.innerHTML = `条码前缀 <strong>${escapeHtml(data.excluded_prefix)}</strong> 已排除自动 CRM 查询。需要时仍可点击上方“在线查询”。`;
+    } else {
+        box.innerHTML = `没有匹配到前缀 <strong>${escapeHtml(data.prefix || '')}</strong>。是否立即查询该条码并自动补充条码匹配？ <button class="btn btn-primary" onclick="confirmQueryBarcode()">确认查询</button>`;
+    }
 }
 
 async function confirmQueryBarcode() {

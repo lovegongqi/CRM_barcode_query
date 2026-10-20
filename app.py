@@ -2595,8 +2595,10 @@ class CRMSession:
                 # Product loading also gives the asynchronously populated form time to render.
                 fields = self._service_detail_fields()
                 _closed, close_status = self._service_detail_closed_state()
-                return True, {"fields": fields, "products": products,
-                              "close_status": close_status if close_status in {'已结单', '未结单'} else ''}
+                result = {"fields": fields, "products": products}
+                if close_status in {'已结单', '未结单'}:
+                    result["close_status"] = close_status
+                return True, result
         except Exception as e:
             return False, {"error": str(e)}
 
@@ -7997,6 +7999,9 @@ def _ensure_product_library_db(conn):
         )
         """
     )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS product_query_exclusions (prefix TEXT PRIMARY KEY)"
+    )
     migrated = conn.execute(
         "SELECT value FROM product_library_meta WHERE key = ?",
         (PRODUCT_LIBRARY_MIGRATION_KEY,),
@@ -8116,6 +8121,53 @@ def delete_product_library(prefix):
             return deleted > 0
         finally:
             conn.close()
+
+def load_product_query_exclusions():
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            return [row[0] for row in conn.execute(
+                "SELECT prefix FROM product_query_exclusions ORDER BY prefix"
+            ).fetchall()]
+        finally:
+            conn.close()
+
+def add_product_query_exclusion(prefix):
+    prefix = _clean_export_value(prefix).upper()
+    if not re.fullmatch(r"[A-Z0-9_-]{1,32}", prefix):
+        return False
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            conn.execute(
+                "INSERT OR IGNORE INTO product_query_exclusions (prefix) VALUES (?)", (prefix,)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return True
+
+def delete_product_query_exclusion(prefix):
+    with product_library_lock:
+        conn = _connect_product_library_db()
+        try:
+            _ensure_product_library_db(conn)
+            deleted = conn.execute(
+                "DELETE FROM product_query_exclusions WHERE prefix = ?",
+                (_clean_export_value(prefix).upper(),),
+            ).rowcount
+            conn.commit()
+            return deleted > 0
+        finally:
+            conn.close()
+
+def excluded_product_query_prefix(barcode, prefixes=None):
+    barcode = _clean_export_value(barcode).upper()
+    rules = load_product_query_exclusions() if prefixes is None else prefixes
+    return next((prefix for prefix in sorted(rules, key=len, reverse=True)
+                 if barcode.startswith(prefix)), '')
 
 def update_product_library_from_info(info):
     barcode = _clean_export_value(info.get('barcode'))
@@ -8252,8 +8304,11 @@ def _missing_product_library_representatives(selected_barcodes):
             wanted[barcode] = True
 
     all_items = {item['barcode']: item for item in scan_barcodes()}
+    excluded_prefixes = load_product_query_exclusions()
     groups = OrderedDict()
     for barcode in wanted:
+        if excluded_product_query_prefix(barcode, excluded_prefixes):
+            continue
         if match_product_library(barcode):
             continue
 
@@ -13529,7 +13584,8 @@ def login_page():
 @app.route("/api/product-library", methods=["GET"])
 def api_product_library():
     rows = sorted(load_product_library().values(), key=lambda row: row.get('prefix', ''))
-    return jsonify({'success': True, 'products': rows, 'can_edit': is_admin_account(), 'account': current_account_public()})
+    return jsonify({'success': True, 'products': rows, 'excluded_prefixes': load_product_query_exclusions(),
+                    'can_edit': is_admin_account(), 'account': current_account_public()})
 
 @app.route("/api/product-library/lookup")
 def api_product_library_lookup():
@@ -13538,12 +13594,14 @@ def api_product_library_lookup():
         return jsonify({'success': False, 'error': '请输入条码'})
     info = lookup_product_by_barcode(barcode)
     if not info or info.get('source') == 'unmatched':
+        excluded_prefix = excluded_product_query_prefix(barcode)
         return jsonify({
             'success': False,
-            'error': '条码匹配没有匹配到该条码前缀',
+            'error': '该前缀已排除自动 CRM 查询' if excluded_prefix else '条码匹配没有匹配到该条码前缀',
             'barcode': barcode,
             'prefix': product_prefix_from_barcode(barcode),
-            'need_query': True,
+            'need_query': not bool(excluded_prefix),
+            'excluded_prefix': excluded_prefix,
         })
     return jsonify({'success': True, 'info': info})
 
@@ -13630,6 +13688,23 @@ def api_product_library_save():
     if not prefix or not product_code or not product_name:
         return jsonify({'success': False, 'error': '前缀、产品编码、产品名称都不能为空'})
     upsert_product_library(prefix, product_code, product_name, data.get('source_barcode') or '')
+    return jsonify({'success': True})
+
+@app.route("/api/product-library/exclusions", methods=["POST"])
+def api_product_query_exclusion_save():
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '只有管理员可以修改自动查询排除规则'}), 403
+    prefix = (request.get_json(silent=True) or {}).get('prefix')
+    if not add_product_query_exclusion(prefix):
+        return jsonify({'success': False, 'error': '请输入 1 至 32 位字母、数字、下划线或连字符前缀'}), 400
+    return jsonify({'success': True})
+
+@app.route("/api/product-library/exclusions/<prefix>", methods=["DELETE"])
+def api_product_query_exclusion_delete(prefix):
+    if not is_admin_account():
+        return jsonify({'success': False, 'error': '只有管理员可以删除自动查询排除规则'}), 403
+    if not delete_product_query_exclusion(prefix):
+        return jsonify({'success': False, 'error': '排除前缀不存在'}), 404
     return jsonify({'success': True})
 
 @app.route("/api/product-library/<prefix>", methods=["DELETE"])

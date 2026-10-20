@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import app as app_module
 
@@ -62,6 +63,29 @@ class ProductLibraryPersistenceTests(unittest.TestCase):
         self._write_legacy_rules(legacy_rules)
 
         self.assertNotIn("16", app_module.load_product_library())
+
+    def test_excluded_prefix_skips_only_automatic_representative_query(self):
+        barcodes = ["9232506010078", "162501010001"]
+        with mock.patch.object(app_module, "scan_barcodes", return_value=[]):
+            self.assertEqual(
+                app_module._missing_product_library_representatives(barcodes),
+                {"923": "9232506010078", "16": "162501010001"},
+            )
+            self.assertTrue(app_module.add_product_query_exclusion("923"))
+            self.assertEqual(
+                app_module._missing_product_library_representatives(barcodes),
+                {"16": "162501010001"},
+            )
+            self.assertEqual(app_module.load_product_query_exclusions(), ["923"])
+
+            app_module.upsert_product_library("923", "926051571", "H-CTO-12L滤芯")
+            self.assertEqual(
+                app_module.match_product_library("9232506010078")["product_code"],
+                "926051571",
+            )
+
+            self.assertTrue(app_module.delete_product_query_exclusion("923"))
+            self.assertEqual(app_module.load_product_query_exclusions(), [])
 
 
 if __name__ == "__main__":
