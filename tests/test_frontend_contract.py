@@ -1885,7 +1885,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertIn("previewLog.style.display = showLookupProgress ? 'block' : 'none';", render_logs)
         self.assertEqual(
             transfer.count("renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true)"),
-            2,
+            1,
         )
 
     def test_transfer_preview_uses_one_live_row_per_representative_barcode(self):
