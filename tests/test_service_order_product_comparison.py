@@ -655,6 +655,13 @@ class CRMOrderProductDOMTests(unittest.TestCase):
             self.page.unroute("**/*", fulfill)
         self.page.set_content(html)
 
+    def test_service_search_fills_service_number_not_contact_filter(self):
+        self.page.set_content('''<input id="contact" placeholder="联系人/联系电话">
+            <input id="service-no" placeholder="请输入单号"><button>查询</button>''')
+        self.assertTrue(self.session._set_service_search_keyword('FWD202306280970'))
+        self.assertEqual(self.page.locator('#service-no').input_value(), 'FWD202306280970')
+        self.assertEqual(self.page.locator('#contact').input_value(), '')
+
     def test_service_detail_heading_does_not_bypass_loading_form_checks(self):
         self.set_crm_page('#/workOrder/edit/service-id', '<a>FWD202610040293</a>')
         self.session.context = self.page.context

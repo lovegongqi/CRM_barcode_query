@@ -724,7 +724,8 @@ function renderSummaryTasks() {
             <div class="transfer-summary-task-info"><strong>${escapeHtml(task.distributor || '未填写分销商')}</strong>
             <small>${escapeHtml(task.transfer_type)} · 条码 ${task.barcodes.length} 个 · ${escapeHtml(task.slot_id)} · ${escapeHtml(task.started_at || '')}</small></div>
             <div class="transfer-summary-task-actions"><span class="transfer-summary-task-state ${task.expired || (task.done && !task.summary_success) ? 'is-error' : ''}">${escapeHtml(status)}</span>
-            <button type="button" class="mini-link-btn" onclick="reuseSummaryTask('${escapeHtml(task.job_id)}')">复用条码</button></div></div>`;
+            <button type="button" class="mini-link-btn" onclick="reuseSummaryTask('${escapeHtml(task.job_id)}')">复用条码</button>
+            ${task.done || task.expired ? `<button type="button" class="mini-link-btn" onclick="deleteSummaryTask('${escapeHtml(task.job_id)}')">删除汇总任务</button>` : ''}</div></div>`;
     }).join('');
 }
 
@@ -734,6 +735,15 @@ function detachSummarySelection() {
     sessionStorage.removeItem('crm_transfer_selected_summary_task');
     hidePreviewLog();
     resetTransferActionUi();
+    renderSummaryTasks();
+}
+
+function deleteSummaryTask(jobId) {
+    const task = summaryTasks.find(row => row.job_id === jobId);
+    if (!task || (!task.done && !task.expired)) return;
+    if (selectedSummaryTaskId === jobId) detachSummarySelection();
+    summaryTasks = summaryTasks.filter(row => row.job_id !== jobId);
+    saveSummaryTasks();
     renderSummaryTasks();
 }
 

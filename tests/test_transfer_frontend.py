@@ -186,6 +186,38 @@ def test_editing_reused_summary_detaches_submit(transfer_page):
     assert page.evaluate("lastSummary") is None
 
 
+def test_delete_completed_summary_task_removes_it_without_touching_transfer_history(transfer_page):
+    page = transfer_page
+    page.evaluate("""() => {
+        summaryTasks = [{job_id: 'summary-done', slot_id: 'transfer-1', barcodes: ['CODE1'],
+            distributor: '甲分销商', transfer_type: '移出', remark: '', done: true,
+            summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}}];
+        transferRealtimeRecords = [{record_id: 'transfer-1', distributor: '甲分销商'}];
+        saveSummaryTasks();
+        renderSummaryTasks();
+        reuseSummaryTask('summary-done');
+    }""")
+    assert page.locator("#submitBtn").is_enabled()
+    page.get_by_role("button", name="删除汇总任务").click()
+    assert page.locator("#transferSummaryTaskCard").is_hidden()
+    assert page.locator("#submitBtn").is_disabled()
+    assert page.locator("#barcodeInput").input_value() == "CODE1"
+    assert page.evaluate("summaryTasks.length") == 0
+    assert page.evaluate("transferRealtimeRecords.length") == 1
+    assert page.evaluate("JSON.parse(sessionStorage.getItem('crm_transfer_summary_tasks_v1')).length") == 0
+
+
+def test_running_summary_task_cannot_be_deleted(transfer_page):
+    page = transfer_page
+    page.evaluate("""() => {
+        summaryTasks = [{job_id: 'summary-running', slot_id: 'transfer-1', barcodes: ['CODE1'],
+            distributor: '甲分销商', transfer_type: '移出', done: false}];
+        renderSummaryTasks();
+    }""")
+    assert page.get_by_role("button", name="删除汇总任务").count() == 0
+    assert page.evaluate("summaryTasks.length") == 1
+
+
 def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
     result = transfer_page.evaluate("""async () => {
         document.getElementById('barcodeInput').value = '435250509H274';

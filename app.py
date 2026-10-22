@@ -1702,14 +1702,14 @@ class CRMSession:
             };
             let target = Array.from(document.querySelectorAll('input:not([disabled]), textarea:not([disabled])'))
                 .filter(visible)
-                .find(input => /请输入单号|服务单号|平台订单号|联系人|联系电话/.test(input.getAttribute('placeholder') || ''));
+                .find(input => /请输入单号|服务单号|服务工单号/.test(input.getAttribute('placeholder') || ''));
             if (target) {
                 target.scrollIntoView({ block: 'center', inline: 'nearest' });
                 setValue(target, serviceNo);
                 target.setAttribute('data-codex-service-search', '1');
                 return true;
             }
-            const formItems = Array.from(document.querySelectorAll('.el-form-item, .ant-form-item, .form-group, tr, div'))
+            const formItems = Array.from(document.querySelectorAll('.el-form-item, .ant-form-item, .form-group, tr'))
                 .filter(visible);
             const scored = [];
             for (const item of formItems) {
@@ -1724,11 +1724,8 @@ class CRMSession:
                         input.getAttribute('id') || '',
                     ].join(' '));
                     let score = 0;
-                    if (text.includes('服务单号')) score += 8;
-                    if (text.includes('服务单')) score += 5;
-                    if (attrs.includes('服务单号')) score += 8;
-                    if (attrs.includes('服务单')) score += 5;
-                    if (attrs.includes('搜索') || attrs.includes('查询') || attrs.includes('请输入')) score += 2;
+                    if (text.includes('服务单号') || text.includes('服务工单号')) score += 8;
+                    if (attrs.includes('服务单号') || attrs.includes('服务工单号')) score += 8;
                     if (score) scored.push({ input, score });
                 }
             }
@@ -1737,7 +1734,7 @@ class CRMSession:
                 target = Array.from(document.querySelectorAll('input:not([disabled]), textarea:not([disabled])'))
                     .filter(visible)
                     .filter(input => !['hidden', 'checkbox', 'radio'].includes((input.getAttribute('type') || 'text').toLowerCase()))
-                    .find(input => /服务单|搜索|查询|请输入/i.test([
+                    .find(input => /服务单号|服务工单号|请输入单号/i.test([
                         input.getAttribute('placeholder') || '',
                         input.getAttribute('name') || '',
                         input.getAttribute('id') || '',
@@ -1757,7 +1754,7 @@ class CRMSession:
             const input = document.querySelector('[data-codex-service-search="1"]')
                 || Array.from(document.querySelectorAll('input:not([disabled]), textarea:not([disabled])'))
                     .filter(visible)
-                    .find(el => /请输入单号|服务单号|平台订单号|联系人|联系电话/.test(el.getAttribute('placeholder') || ''));
+                    .find(el => /请输入单号|服务单号|服务工单号/.test(el.getAttribute('placeholder') || ''));
             const buttonText = (btn) => clean([
                 btn.innerText || btn.textContent || '',
                 btn.getAttribute('title') || '',
@@ -2697,40 +2694,44 @@ class CRMSession:
         except Exception as error:
             return False, {"error": str(error)}
 
-    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None):
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None, require_service_snapshot=False):
         emit = log or (lambda *_args: None)
         try:
-            emit('正在重新读取服务单与关联订单', 'info')
-            ok, detail = self.refresh_service_order_products(service_no, log)
+            emit('正在读取关联订单与已查询的服务单产品', 'info')
+            ok, related = self.query_related_order_products(service_no, log)
             if not ok:
-                return False, detail
-            order_no = _related_order_no_from_service_fields(detail.get('fields') or [])
+                return False, related
+            detail = {'fields': related['service_fields'], 'products': related['service_products']}
+            order_no = related['order_no']
             if not order_no:
-                return False, {'error': '本次未读取到 CRM 关联订单号，请稍后重新预览'}
+                return False, {'error': '未找到有效关联订单号，请重新查询服务单'}
             if not detail.get('products'):
-                return False, {'error': '本次未读取到 CRM 服务单产品明细，请稍后重新预览'}
+                return False, {'error': '未找到服务单产品明细，请重新查询服务单'}
             library = load_product_library()
             barcode_conflict = bool(override) or any(
                 (rule := library.get(product_prefix_from_barcode(product.get('barcode') or '')) or {}).get('product_code')
                 and str(rule.get('product_code') or '').strip().upper() != str(product.get('product_code') or '').strip().upper()
                 for product in detail['products']
             )
-            with self.lock:
-                service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
-            with _service_order_cache_lock(service_no):
-                # Preserve barcode relationships while replacing stale order associations.
-                filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
-                try:
+            filepath = os.path.join(SERVICE_ORDER_DIR, f'{service_no}.json')
+            service_snapshot = None
+            if barcode_conflict or require_service_snapshot or any(not product.get('barcode') for product in detail['products']):
+                ok, detail = self.refresh_service_order_products(service_no, log)
+                if not ok:
+                    return False, detail
+                if _related_order_no_from_service_fields(detail.get('fields') or []) != order_no:
+                    return False, {'error': '服务单关联订单号已变化，请重新查询后预览'}
+                with self.lock:
+                    service_snapshot = self.page.evaluate(SERVICE_SNAPSHOT_JS, service_no)
+                with _service_order_cache_lock(service_no):
                     with open(filepath, encoding='utf-8') as file:
                         cached = json.load(file)
-                except (OSError, ValueError):
-                    cached = {}
-                cached.update(detail)
-                cached['order_lookup'] = {}
-                _write_service_order_detail(service_no, cached)
-            ok, related = self.query_related_order_products(service_no, log)
-            if not ok:
-                return False, related
+                    cached.update(detail)
+                    cached['order_lookup'] = {}
+                    _write_service_order_detail(service_no, cached)
+                ok, related = self.query_related_order_products(service_no, log)
+                if not ok:
+                    return False, related
             with self.lock:
                 snapshot = self.page.evaluate(MODEL_SNAPSHOT_JS, order_no)
                 overrides = {}
@@ -2746,11 +2747,18 @@ class CRMSession:
                     overrides[line_id or barcode] = target
                 preview = (build_barcode_model_correction_preview(snapshot, service_snapshot, library, overrides)
                            if barcode_conflict else build_model_correction_preview(snapshot, detail['products']))
-                preview['service_lines'] = [
-                    {'id': row.get('id'), 'name': (row.get('new_product_id') or {}).get('name') or '',
-                     'code': row.get('productnumber') or '', 'barcode': row.get('new_userprofile_number') or ''}
-                    for row in service_snapshot['rows'] if row.get('id')
-                ] if service_snapshot.get('editable') else []
+                if service_snapshot:
+                    preview['service_lines'] = [
+                        {'id': row.get('id'), 'name': (row.get('new_product_id') or {}).get('name') or '',
+                         'code': row.get('productnumber') or '', 'barcode': row.get('new_userprofile_number') or ''}
+                        for row in service_snapshot['rows'] if row.get('id')
+                    ] if service_snapshot.get('editable') else []
+                else:
+                    preview['service_lines'] = [
+                        {'id': '', 'name': product.get('product_name') or '',
+                         'code': product.get('product_code') or '', 'barcode': product.get('barcode') or ''}
+                        for product in detail['products'] if product.get('barcode')
+                    ]
                 if expected is not None:
                     if preview['fingerprint'] != expected.get('fingerprint') or option not in preview['options']:
                         return False, {'error': '服务单或关联订单已变化，请重新预览型号修正'}
@@ -4178,8 +4186,8 @@ class CRMWorker:
     def query_related_order_products(self, service_no, log=None):
         return self._call("query_related_order_products", service_no, log)
 
-    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None):
-        return self._call("correct_service_order_model", service_no, expected, option, log, override)
+    def correct_service_order_model(self, service_no, expected=None, option=None, log=None, override=None, require_service_snapshot=False):
+        return self._call("correct_service_order_model", service_no, expected, option, log, override, require_service_snapshot)
 
     def create_transfer(self, summary, distributor, transfer_type="移出", remark="", log=None, progress=None):
         return self._call("create_transfer", summary, distributor, transfer_type, remark, log, progress)
@@ -6505,7 +6513,7 @@ def _run_order_product_job(job_id, worker):
                 })
 
 def _service_batch_close_ready(worker, service_no, log):
-    ok, preview = worker.correct_service_order_model(service_no, log=log)
+    ok, preview = worker.correct_service_order_model(service_no, log=log, require_service_snapshot=True)
     if not ok:
         return False, (preview.get('error') if isinstance(preview, dict) else str(preview)) or '型号核对失败'
     lines = preview.get('service_lines') or []

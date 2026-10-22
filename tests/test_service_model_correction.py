@@ -1,4 +1,6 @@
 import copy
+import tempfile
+from unittest import mock
 
 import pytest
 
@@ -52,6 +54,42 @@ def test_model_preview_fingerprint_changes_when_price_or_service_model_changes(m
     assert preview(model_snapshot)['fingerprint'] != first
     model_snapshot['rows'][0]['new_price'] = 3980
     assert preview(model_snapshot, [{'product_code':'OTHER'}])['fingerprint'] != first
+
+
+def test_order_model_preview_uses_known_related_order_without_researching_service(model_snapshot):
+    session = app_module.CRMSession.__new__(app_module.CRMSession)
+    session.lock = mock.MagicMock()
+    service_no = 'FWD202306280970'
+    order_no = 'ORD2306280837'
+    model_snapshot['order_no'] = order_no
+    products = [{'product_code':'906042810', 'product_name':'目标型号', 'barcode':'243221114K129'}]
+    session.page = mock.Mock()
+    order = copy.deepcopy(model_snapshot)
+    def evaluate(script, value):
+        if script == app_module.MODEL_SNAPSHOT_JS:
+            return copy.deepcopy(order)
+        if script == app_module.MODEL_APPLY_JS:
+            order['rows'][0]['new_productname'] = value['option']['new_code']
+            return {'new_code': value['option']['new_code']}
+        raise AssertionError('不应读取服务单编辑页')
+    session.page.evaluate.side_effect = evaluate
+    with tempfile.TemporaryDirectory() as directory, \
+         mock.patch.object(app_module, 'SERVICE_ORDER_DIR', directory), \
+         mock.patch.object(session, 'query_related_order_products', return_value=(True, {
+             'order_no':order_no, 'service_fields':[{'label':'关联订单', 'value':order_no}],
+             'service_products':products,
+         })), mock.patch.object(session, 'refresh_service_order_products', side_effect=AssertionError('不应重新搜索服务单')), \
+         mock.patch.object(app_module, 'load_product_library', return_value={}):
+        app_module._write_service_order_detail(service_no, {'fields':[{'label':'关联订单', 'value':order_no}], 'products':products})
+        ok, result = session.correct_service_order_model(service_no)
+        assert ok, result
+        option = result['options'][0]
+        applied, saved = session.correct_service_order_model(service_no, expected=result, option=option)
+    assert ok, result
+    assert option['new_code'] == '906042810'
+    assert applied, saved
+    assert saved['new_code'] == '906042810'
+    assert session.page.evaluate.call_args_list[2] == mock.call(app_module.MODEL_APPLY_JS, {'preview':result, 'option':option})
 
 
 def test_barcode_preview_targets_verified_model_and_orders_writes_first(model_snapshot):
