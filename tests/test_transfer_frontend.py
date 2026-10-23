@@ -27,9 +27,7 @@ def transfer_page():
             <select id="transferType" onchange="saveTransferInput()"><option value="移出">移出</option><option value="移入">移入</option></select>
             <input id="transferRemark" oninput="saveTransferInput()">
             <button id="previewBtn">汇总预览</button>
-            <button id="submitBtn">提交移库</button>
             <div id="transferSummaryTaskCard" hidden><div id="transferSummaryTaskList"></div></div>
-            <div id="transferSummaryCard"><button id="transferSummaryToggle"></button><div id="summaryBox"></div><span id="transferSummaryTotal"></span></div>
             <div id="previewLog"></div>
             <div id="transferLog">等待操作...</div>
             <table><tbody id="transferRealtimeRows"></tbody></table>
@@ -60,8 +58,6 @@ def test_log_reuse_restores_transfer_form_without_submitting(transfer_page):
             started_at: '2026-09-29 10:43:25', finished_at: '2026-09-29 10:44:00',
             logs: [{time: '10:44:00', message: '移库完成', level: 'success'}]
         }];
-        lastSummary = {groups: [{product_code: 'OLD'}]};
-        document.getElementById('submitBtn').disabled = false;
         openTransferChannelLog('reuse-1');
     }""")
 
@@ -73,8 +69,7 @@ def test_log_reuse_restores_transfer_form_without_submitting(transfer_page):
     assert page.locator("#transferDistributor").input_value() == "测试分销商"
     assert page.locator("#transferType").input_value() == "移入"
     assert page.locator("#transferRemark").input_value() == "需要重做"
-    assert page.locator("#submitBtn").is_disabled()
-    assert page.evaluate("lastSummary") is None
+    assert page.get_by_role("button", name="提交移库").count() == 0
     assert not page.locator("#auroraLogDialog").evaluate("element => element.classList.contains('show')")
 
 
@@ -127,7 +122,7 @@ def test_preview_lets_server_assign_an_idle_transfer_channel(transfer_page):
     assert result["started"] == ["transfer-3", "summary-1"]
 
 
-def test_two_summaries_continue_independently_and_reuse_restores_correct_order(transfer_page):
+def test_two_summaries_continue_independently_with_their_own_details(transfer_page):
     page = transfer_page
     result = page.evaluate("""async () => {
         ensureCrmLoggedIn = async () => true;
@@ -156,34 +151,30 @@ def test_two_summaries_continue_independently_and_reuse_restores_correct_order(t
         await pollSummaryStatus('transfer-1', 'summary-1');
         return {tasks: summaryTasks.map(task => [task.distributor, task.job_id]),
             previewEnabled: !document.getElementById('previewBtn').disabled,
-            submitEnabled: !document.getElementById('submitBtn').disabled,
-            currentSummary: lastSummary.groups[0].product_code};
+            summaries: summaryTasks.map(task => task.summary?.groups?.[0]?.product_code)};
     }""")
     assert result["tasks"] == [["乙分销商", "summary-2"], ["甲分销商", "summary-1"]]
     assert result["previewEnabled"]
-    assert result["submitEnabled"]
-    assert result["currentSummary"] == "summary-2"
+    assert result["summaries"] == ["summary-2", "summary-1"]
     assert page.locator("#transferSummaryTaskList").get_by_text("甲分销商").count() == 1
     assert page.locator("#transferSummaryTaskList").get_by_text("乙分销商").count() == 1
-    page.get_by_role("button", name="复用条码").last.click()
-    assert page.locator("#barcodeInput").input_value() == "CODE1"
-    assert page.locator("#transferDistributor").input_value() == "甲分销商"
-    assert page.locator("#submitBtn").is_enabled()
+    assert page.locator("#barcodeInput").input_value() == "CODE2"
+    assert page.get_by_role("button", name="提交移库").count() == 2
+    page.get_by_role("button", name="展开明细").last.click()
+    assert page.locator("#summary-summary-1 .summary-product-quantity").inner_text() == "数量 1"
 
 
-def test_editing_reused_summary_detaches_submit(transfer_page):
+def test_editing_form_does_not_change_completed_task(transfer_page):
     page = transfer_page
     page.evaluate("""() => {
         summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['CODE1'],
             distributor: '甲分销商', transfer_type: '移出', remark: '', done: true,
             summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}}];
         renderSummaryTasks();
-        reuseSummaryTask('summary-1');
     }""")
-    assert page.locator("#submitBtn").is_enabled()
+    assert page.get_by_role("button", name="提交移库").is_enabled()
     page.locator("#barcodeInput").fill("DIFFERENT")
-    assert page.locator("#submitBtn").is_disabled()
-    assert page.evaluate("lastSummary") is None
+    assert page.get_by_role("button", name="提交移库").is_enabled()
 
 
 def test_delete_completed_summary_task_removes_it_without_touching_transfer_history(transfer_page):
@@ -195,13 +186,11 @@ def test_delete_completed_summary_task_removes_it_without_touching_transfer_hist
         transferRealtimeRecords = [{record_id: 'transfer-1', distributor: '甲分销商'}];
         saveSummaryTasks();
         renderSummaryTasks();
-        reuseSummaryTask('summary-done');
     }""")
-    assert page.locator("#submitBtn").is_enabled()
+    assert page.get_by_role("button", name="提交移库").is_enabled()
     page.get_by_role("button", name="删除汇总任务").click()
     assert page.locator("#transferSummaryTaskCard").is_hidden()
-    assert page.locator("#submitBtn").is_disabled()
-    assert page.locator("#barcodeInput").input_value() == "CODE1"
+    assert page.locator("#barcodeInput").input_value() == ""
     assert page.evaluate("summaryTasks.length") == 0
     assert page.evaluate("transferRealtimeRecords.length") == 1
     assert page.evaluate("JSON.parse(sessionStorage.getItem('crm_transfer_summary_tasks_v1')).length") == 0
@@ -215,14 +204,70 @@ def test_running_summary_task_cannot_be_deleted(transfer_page):
         renderSummaryTasks();
     }""")
     assert page.get_by_role("button", name="删除汇总任务").count() == 0
+    assert page.get_by_role("button", name="提交移库").is_disabled()
     assert page.evaluate("summaryTasks.length") == 1
+
+
+def test_summary_task_copy_barcodes_on_http_page(transfer_page):
+    result = transfer_page.evaluate("""async () => {
+        summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1',
+            barcodes: ['CODE1', 'CODE2'], distributor: '甲分销商', transfer_type: '移出', done: false}];
+        renderSummaryTasks();
+        document.execCommand = command => {
+            window.copied = command === 'copy' ? document.activeElement.value : '';
+            return true;
+        };
+        await copySummaryBarcodes('summary-1');
+        return {copied: window.copied, form: document.getElementById('barcodeInput').value};
+    }""")
+    assert result == {"copied": "CODE1\nCODE2", "form": ""}
+
+
+def test_failed_submit_leaves_task_available_for_retry(transfer_page):
+    result = transfer_page.evaluate("""async () => {
+        summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['CODE1'],
+            distributor: '甲分销商', transfer_type: '移出', done: true,
+            summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}}];
+        ensureCrmLoggedIn = async () => true;
+        fetch = async () => ({json: async () => ({success: false, error: '通道忙'})});
+        await submitTransferTask('summary-1');
+        return {submitting: summaryTasks[0].submitting,
+            submitted: summaryTasks[0].submitted_job_id || '',
+            disabled: document.querySelector('#transferSummaryTaskList button[onclick^="submitTransferTask"]').disabled};
+    }""")
+    assert result == {"submitting": False, "submitted": "", "disabled": False}
+
+
+def test_double_click_starts_only_one_transfer(transfer_page):
+    result = transfer_page.evaluate("""async () => {
+        summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['CODE1'],
+            distributor: '甲分销商', transfer_type: '移出', done: true,
+            summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}}];
+        let allowLogin;
+        ensureCrmLoggedIn = () => new Promise(resolve => {allowLogin = resolve;});
+        let posts = 0;
+        fetch = async () => {
+            posts++;
+            return {json: async () => ({success: true, slot_id: 'transfer-1', job_id: 'job-1'})};
+        };
+        startTransferPolling = () => {};
+        const first = submitTransferTask('summary-1');
+        const second = submitTransferTask('summary-1');
+        allowLogin(true);
+        await Promise.all([first, second]);
+        return {posts, submitted: summaryTasks[0].submitted_job_id};
+    }""")
+    assert result == {"posts": 1, "submitted": "job-1"}
 
 
 def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
     result = transfer_page.evaluate("""async () => {
-        document.getElementById('barcodeInput').value = '435250509H274';
-        document.getElementById('transferDistributor').value = '测试分销商';
-        lastSummary = {groups: [{product_code: 'P1'}]};
+        document.getElementById('barcodeInput').value = 'NEXT-ORDER';
+        document.getElementById('transferDistributor').value = '下一单分销商';
+        summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['435250509H274'],
+            distributor: '测试分销商', transfer_type: '移入', remark: '原单备注', done: true,
+            summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}}];
+        renderSummaryTasks();
         ensureCrmLoggedIn = async () => true;
         transferSlots = [{id: 'transfer-4', label: '移库4', logged_in: true}];
         let sentPayload = null;
@@ -233,12 +278,14 @@ def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
             sentPayload = JSON.parse(options.body);
             return {json: async () => ({success: true, slot_id: 'transfer-4', job_id: 'transfer-job-1'})};
         };
-        await submitTransfer();
+        await submitTransferTask('summary-1');
         return {
             sentPayload,
             slot: currentTransferSlot,
             started: window.startedTransfer,
-            record: transferRealtimeRecords[0]
+            record: transferRealtimeRecords[0],
+            form: document.getElementById('barcodeInput').value,
+            submitted: summaryTasks[0].submitted_job_id
         };
     }""")
 
@@ -248,3 +295,9 @@ def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
     assert result["record"]["slot_id"] == "transfer-4"
     assert result["record"]["slot_label"] == "移库4"
     assert result["record"]["barcodes"] == ["435250509H274"]
+    assert result["sentPayload"]["barcodes"] == ["435250509H274"]
+    assert result["sentPayload"]["distributor"] == "测试分销商"
+    assert result["sentPayload"]["transfer_type"] == "移入"
+    assert result["sentPayload"]["remark"] == "原单备注"
+    assert result["form"] == "NEXT-ORDER"
+    assert result["submitted"] == "transfer-job-1"

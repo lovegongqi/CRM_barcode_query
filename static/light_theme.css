@@ -337,7 +337,7 @@ body[data-aurora-page] .preview-query-table code,
 body[data-aurora-page] .summary-detail-table code { color: #17698f !important; }
 body[data-aurora-page] .summary-detail-table td,
 body[data-aurora-page] .preview-query-table td { color: var(--aurora-text) !important; }
-body[data-aurora-page="transfer"] .summary {
+body[data-aurora-page="transfer"] .transfer-summary-task-detail {
     background: rgba(246, 250, 255, .82) !important;
     border-color: var(--aurora-line) !important;
 }

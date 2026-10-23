@@ -54,19 +54,18 @@
         table { width:100%; border-collapse:collapse; font-size:13px; }
         th, td { border-bottom:1px solid #e5e7eb; padding:8px 10px; text-align:left; vertical-align:top; }
         th { background:#f8fafc; color:#475569; }
-        .summary { border:1px solid #d9e1ec; border-radius:8px; overflow:hidden; margin-top:12px; display:none; }
         .transfer-summary-task-list { display:grid; gap:8px; }
-        .transfer-summary-task { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #d9e1ec; border-radius:8px; }
+        .transfer-summary-task { display:grid; gap:10px; padding:10px 12px; border:1px solid #d9e1ec; border-radius:8px; }
+        .transfer-summary-task-head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
         .transfer-summary-task.is-selected { border-color:#2563eb; background:#eff6ff; }
         .transfer-summary-task-info { display:grid; gap:4px; min-width:0; font-size:13px; }
         .transfer-summary-task-info small { color:#64748b; overflow-wrap:anywhere; }
-        .transfer-summary-task-actions { display:flex; align-items:center; gap:10px; flex:0 0 auto; }
+        .transfer-summary-task-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; flex:0 0 auto; }
+        .transfer-summary-task-detail { border:1px solid rgba(139,190,220,.18); border-radius:7px; background:rgba(8,18,32,.5); padding:8px 0; }
+        .transfer-summary-task-total { display:block; margin:0 10px 8px; }
         .transfer-summary-task-state { font-size:12px; font-weight:800; color:#0369a1; }
         .transfer-summary-task-state.is-error { color:#b91c1c; }
-        @media (max-width: 600px) { .transfer-summary-task { align-items:flex-start; flex-direction:column; } .transfer-summary-task-actions { width:100%; justify-content:space-between; } }
-        .summary-header-actions { display:flex; align-items:center; gap:8px; min-width:0; }
-        .transfer-summary-card.is-collapsed .aurora-realtime-head { margin-bottom:0; }
-        .transfer-summary-card.is-collapsed .summary { display:none !important; }
+        @media (max-width: 600px) { .transfer-summary-task-head { align-items:flex-start; flex-direction:column; } .transfer-summary-task-actions { width:100%; justify-content:space-between; } }
         .summary-product-list { display:grid; gap:8px; padding:10px; }
         .summary-product-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto; gap:12px; align-items:center; width:100%; padding:11px 12px; border:1px solid rgba(139,190,220,.18); border-radius:7px; background:rgba(15, 31, 52, .82); color:#d7edf4; text-align:left; cursor:pointer; }
         .summary-product-row:hover, .summary-product-row:focus-visible { border-color:rgba(87,227,255,.56); box-shadow:0 0 0 3px rgba(62,198,230,.12); background:rgba(20,44,70,.9); outline:none; }
@@ -193,7 +192,6 @@
                     <div class="actions">
                         <button class="btn btn-secondary transfer-desktop-clear" onclick="clearForm()">清空</button>
                         <button class="btn btn-primary" id="previewBtn" onclick="previewTransfer()">汇总预览</button>
-                        <button class="btn btn-transfer" id="submitBtn" onclick="submitTransfer()" disabled>提交移库</button>
                     </div>
                 </div>
                 <div class="preview-log" id="previewLog" style="display:none">
@@ -213,17 +211,6 @@
             <div class="card" id="transferSummaryTaskCard" hidden>
                 <h2>汇总查询任务</h2>
                 <div class="transfer-summary-task-list" id="transferSummaryTaskList"></div>
-            </div>
-
-            <div class="card transfer-summary-card" id="transferSummaryCard" hidden>
-                <div class="aurora-realtime-head">
-                    <h2>汇总产品数量明细</h2>
-                    <div class="summary-header-actions">
-                        <span class="aurora-live-badge" id="transferSummaryTotal"></span>
-                        <button type="button" class="aurora-live-action" id="transferSummaryToggle" onclick="toggleTransferSummary()" aria-expanded="true" aria-controls="summaryBox" title="收起汇总明细">收起</button>
-                    </div>
-                </div>
-                <div class="summary" id="summaryBox"></div>
             </div>
 
             <div class="card aurora-realtime">
@@ -306,13 +293,11 @@
 </div>
 
 <script>
-let lastSummary = null;
-let transferSummaryData = null;
-let transferSummaryAutoCollapseJobId = '';
 let pollTimer = null;
 let previewTimer = null;
 const SUMMARY_TASK_STORAGE_KEY = 'crm_transfer_summary_tasks_v1';
 let summaryTasks = JSON.parse(sessionStorage.getItem(SUMMARY_TASK_STORAGE_KEY) || '[]');
+const expandedSummaryTaskIds = new Set();
 let selectedSummaryTaskId = sessionStorage.getItem('crm_transfer_selected_summary_task') || '';
 let lastRenderedLogKey = '';
 let highlightedDistributorIndex = -1;
@@ -490,8 +475,7 @@ function findActiveTransferRecord(slotId, jobId='') {
         || null;
 }
 
-function createTransferRealtimeRecord(slotId, distributor) {
-    const barcodes = parseBarcodes();
+function createTransferRealtimeRecord(slotId, task) {
     const record = {
         record_id: transferRecordId(),
         job_id: '',
@@ -500,10 +484,10 @@ function createTransferRealtimeRecord(slotId, distributor) {
         order_no: '',
         state: 'running',
         status: '正在创建移库任务',
-        distributor: distributor || '',
-        transfer_type: document.getElementById('transferType')?.value || '移出',
-        remark: document.getElementById('transferRemark')?.value.trim() || '',
-        barcodes,
+        distributor: task.distributor || '',
+        transfer_type: task.transfer_type || '移出',
+        remark: task.remark || '',
+        barcodes: task.barcodes.slice(),
         actor: document.getElementById('appAccountStatus')?.textContent.trim() || '',
         started_at: new Date().toISOString(),
         finished_at: '',
@@ -720,13 +704,47 @@ function renderSummaryTasks() {
     list.innerHTML = summaryTasks.map(task => {
         const status = task.expired ? '任务已失效，请重新汇总' : task.done ?
             (task.summary_success ? '汇总完成' : `汇总失败${task.error ? '：' + task.error : ''}`) : '查询中';
+        const expanded = expandedSummaryTaskIds.has(task.job_id);
+        const canSubmit = task.done && task.summary_success && task.summary && !task.expired && !task.submitting && !task.submitted_job_id;
         return `<div class="transfer-summary-task ${task.job_id === selectedSummaryTaskId ? 'is-selected' : ''}">
-            <div class="transfer-summary-task-info"><strong>${escapeHtml(task.distributor || '未填写分销商')}</strong>
+            <div class="transfer-summary-task-head"><div class="transfer-summary-task-info"><strong>${escapeHtml(task.distributor || '未填写分销商')}</strong>
             <small>${escapeHtml(task.transfer_type)} · 条码 ${task.barcodes.length} 个 · ${escapeHtml(task.slot_id)} · ${escapeHtml(task.started_at || '')}</small></div>
             <div class="transfer-summary-task-actions"><span class="transfer-summary-task-state ${task.expired || (task.done && !task.summary_success) ? 'is-error' : ''}">${escapeHtml(status)}</span>
-            <button type="button" class="mini-link-btn" onclick="reuseSummaryTask('${escapeHtml(task.job_id)}')">复用条码</button>
-            ${task.done || task.expired ? `<button type="button" class="mini-link-btn" onclick="deleteSummaryTask('${escapeHtml(task.job_id)}')">删除汇总任务</button>` : ''}</div></div>`;
+            <button type="button" class="mini-link-btn" onclick="toggleSummaryTask('${escapeHtml(task.job_id)}')" aria-expanded="${expanded}" aria-controls="summary-${escapeHtml(task.job_id)}">${expanded ? '收起明细' : '展开明细'}</button>
+            <button type="button" class="mini-link-btn" onclick="copySummaryBarcodes('${escapeHtml(task.job_id)}')">复制条码</button>
+            <button type="button" class="mini-link-btn" onclick="submitTransferTask('${escapeHtml(task.job_id)}')" ${canSubmit ? '' : 'disabled'}>${task.submitting ? '提交中...' : task.submitted_job_id ? '已提交' : '提交移库'}</button>
+            ${(task.done || task.expired) && !task.submitting ? `<button type="button" class="mini-link-btn" onclick="deleteSummaryTask('${escapeHtml(task.job_id)}')">删除汇总任务</button>` : ''}</div></div>
+            <div class="transfer-summary-task-detail" id="summary-${escapeHtml(task.job_id)}" ${expanded ? '' : 'hidden'}>${expanded ? (task.summary ? renderSummary(task) : '<div class="summary-detail-empty">' + (task.done ? '汇总明细不可用，请重新汇总' : '正在查询汇总明细...') + '</div>') : ''}</div></div>`;
     }).join('');
+}
+
+function toggleSummaryTask(jobId) {
+    if (expandedSummaryTaskIds.has(jobId)) expandedSummaryTaskIds.delete(jobId);
+    else expandedSummaryTaskIds.add(jobId);
+    renderSummaryTasks();
+}
+
+async function copySummaryBarcodes(jobId) {
+    const task = summaryTasks.find(row => row.job_id === jobId);
+    if (!task) return;
+    const value = task.barcodes.join('\n');
+    try {
+        if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(value);
+        else {
+            const input = document.createElement('textarea');
+            input.value = value;
+            input.style.position = 'fixed';
+            input.style.opacity = '0';
+            document.body.appendChild(input);
+            input.select();
+            const copied = document.execCommand('copy');
+            input.remove();
+            if (!copied) throw new Error('复制失败');
+        }
+        appendLog(`已复制 ${task.barcodes.length} 个条码`, 'success');
+    } catch (error) {
+        appendLog('复制条码失败，请检查浏览器剪贴板权限', 'error');
+    }
 }
 
 function detachSummarySelection() {
@@ -740,33 +758,12 @@ function detachSummarySelection() {
 
 function deleteSummaryTask(jobId) {
     const task = summaryTasks.find(row => row.job_id === jobId);
-    if (!task || (!task.done && !task.expired)) return;
+    if (!task || task.submitting || (!task.done && !task.expired)) return;
     if (selectedSummaryTaskId === jobId) detachSummarySelection();
+    expandedSummaryTaskIds.delete(jobId);
     summaryTasks = summaryTasks.filter(row => row.job_id !== jobId);
     saveSummaryTasks();
     renderSummaryTasks();
-}
-
-function reuseSummaryTask(jobId) {
-    const task = summaryTasks.find(row => row.job_id === jobId);
-    if (!task) return;
-    document.getElementById('barcodeInput').value = task.barcodes.join('\n');
-    document.getElementById('transferDistributor').value = task.distributor;
-    document.getElementById('transferType').value = task.transfer_type;
-    document.getElementById('transferRemark').value = task.remark || '';
-    resetTransferActionUi();
-    selectedSummaryTaskId = task.job_id;
-    currentSummaryJobId = task.job_id;
-    currentTransferSlot = task.slot_id;
-    sessionStorage.setItem('crm_transfer_selected_summary_task', task.job_id);
-    saveTransferInput();
-    renderSummaryTasks();
-    if (task.summary) {
-        renderSummary(task.summary);
-        lastSummary = task.summary_success ? task.summary : null;
-        document.getElementById('submitBtn').disabled = !lastSummary;
-    }
-    if (!task.expired) pollSummaryStatus(task.slot_id, task.job_id);
 }
 
 function restoreTransferInput() {
@@ -814,18 +811,8 @@ function stopActivePolling() {
 }
 
 function resetTransferActionUi() {
-    const transferSummaryCard = document.getElementById('transferSummaryCard');
-    transferSummaryCard.hidden = true;
-    transferSummaryCard.classList.remove('is-collapsed');
-    document.getElementById('summaryBox').style.display = 'none';
-    document.getElementById('summaryBox').innerHTML = '';
-    document.getElementById('transferSummaryTotal').textContent = '';
-    document.getElementById('submitBtn').disabled = true;
     document.getElementById('previewBtn').disabled = false;
     document.getElementById('previewBtn').textContent = '汇总预览';
-    lastSummary = null;
-    transferSummaryData = null;
-    transferSummaryAutoCollapseJobId = '';
 }
 
 function parseBarcodes() {
@@ -1070,14 +1057,12 @@ function clearForm() {
     lastRenderedLogKey = '';
 }
 
-function renderSummary(summary) {
-    const box = document.getElementById('summaryBox');
-    const transferSummaryCard = document.getElementById('transferSummaryCard');
-    transferSummaryData = summary || {};
+function renderSummary(task) {
+    const summary = task.summary;
     mergeDistributorHistory((summary.details || []).flatMap(row => [row.current_dealer, row.service_dealer]));
     const totalQty = (summary.groups || []).reduce((sum, row) => sum + Number(row.quantity || 0), 0);
     const rows = (summary.groups || []).map((row, index) => `
-        <button type="button" class="summary-product-row" onclick="openTransferSummaryProduct(${index})">
+        <button type="button" class="summary-product-row" onclick="openTransferSummaryProduct('${escapeHtml(task.job_id)}', ${index})">
             <span class="summary-product-name">
                 <strong>${escapeHtml(row.product_name || row.product_model || '未命名产品')}</strong>
                 <small>${escapeHtml(row.product_model || row.product_code || '')}</small>
@@ -1092,39 +1077,21 @@ function renderSummary(summary) {
         const reason = (summary.excluded_unmatched || []).includes(bc) ? '在线查询后仍无产品信息，已临时排除' : '拆机条码，已排除';
         return `<tr><td>${escapeHtml(bc)}</td><td>${escapeHtml(reason)}</td></tr>`;
     }).join('');
-    box.innerHTML = `
+    return `<span class="aurora-live-badge transfer-summary-task-total">产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个</span>
         <div class="summary-product-list">${rows || '<div class="summary-detail-empty">无可移库产品</div>'}</div>
-        ${(summary.failure_details || []).length ? `<button type="button" class="summary-failure-row" onclick="openTransferSummaryFailures()">汇总失败/排除条码 ${(summary.failure_details || []).length} 个，点击查看失败原因 →</button>` : ''}
+        ${(summary.failure_details || []).length ? `<button type="button" class="summary-failure-row" onclick="openTransferSummaryFailures('${escapeHtml(task.job_id)}')">汇总失败/排除条码 ${(summary.failure_details || []).length} 个，点击查看失败原因 →</button>` : ''}
         ${blockedRows ? `<div class="note blocked">以下条码方向不匹配，仅提示。确认后仍会提交移库。</div><table><thead><tr><th>条码</th><th>提示</th></tr></thead><tbody>${blockedRows}</tbody></table>` : ''}
         ${missingRows ? `<div class="note blocked">以下条码无法识别产品。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${missingRows}</tbody></table>` : ''}
         ${excludedRows ? `<div class="note blocked">以下条码不会参与本次移库。</div><table><thead><tr><th>条码</th><th>原因</th></tr></thead><tbody>${excludedRows}</tbody></table>` : ''}
     `;
-    document.getElementById('transferSummaryTotal').textContent =
-        `产品 ${(summary.groups || []).length} 条 · 数量 ${totalQty} · 条码 ${summary.total || 0} 个`;
-    transferSummaryCard.hidden = false;
-    box.style.display = 'block';
-}
-
-function setTransferSummaryCollapsed(collapsed) {
-    const transferSummaryCard = document.getElementById('transferSummaryCard');
-    const toggle = document.getElementById('transferSummaryToggle');
-    transferSummaryCard.classList.toggle('is-collapsed', Boolean(collapsed));
-    toggle.textContent = collapsed ? '展开' : '收起';
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    toggle.title = collapsed ? '展开汇总明细' : '收起汇总明细';
-}
-
-function toggleTransferSummary() {
-    const transferSummaryCard = document.getElementById('transferSummaryCard');
-    setTransferSummaryCollapsed(!transferSummaryCard.classList.contains('is-collapsed'));
 }
 
 function closeTransferSummaryDetail() {
     document.getElementById('transferSummaryDetailModal')?.classList.remove('show');
 }
 
-function openTransferSummaryProduct(index) {
-    const summary = transferSummaryData || {};
+function openTransferSummaryProduct(jobId, index) {
+    const summary = summaryTasks.find(task => task.job_id === jobId)?.summary || {};
     const product = (summary.groups || [])[index];
     if (!product) return;
     const modal = document.getElementById('transferSummaryDetailModal');
@@ -1147,8 +1114,8 @@ function openTransferSummaryProduct(index) {
     modal.classList.add('show');
 }
 
-function openTransferSummaryFailures() {
-    const summary = transferSummaryData || {};
+function openTransferSummaryFailures(jobId) {
+    const summary = summaryTasks.find(task => task.job_id === jobId)?.summary || {};
     const failures = summary.failure_details || [];
     const modal = document.getElementById('transferSummaryDetailModal');
     const title = document.getElementById('transferSummaryDetailTitle');
@@ -1407,11 +1374,8 @@ async function previewTransfer() {
     };
     detachSummarySelection();
     const previewBtn = document.getElementById('previewBtn');
-    const submitBtn = document.getElementById('submitBtn');
     previewBtn.disabled = true;
     previewBtn.textContent = '汇总中...';
-    submitBtn.disabled = true;
-    lastSummary = null;
     hidePreviewLog();
     appendLog('开始汇总预览，缺少条码匹配前缀时会自动查询代表条码...', 'info');
     let data = null;
@@ -1492,7 +1456,7 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
         if (selectedSummaryTaskId === jobId) detachSummarySelection();
         return;
     }
-    const statusChanged = task.done !== Boolean(data.done) || task.summary_success !== Boolean(data.summary_success) || task.error !== (data.error || '');
+    const statusChanged = task.done !== Boolean(data.done) || task.summary_success !== Boolean(data.summary_success) || task.error !== (data.error || '') || (!task.summary && Boolean(data.summary));
     task.done = Boolean(data.done);
     task.summary_success = Boolean(data.summary_success);
     task.error = data.error || '';
@@ -1503,45 +1467,47 @@ async function pollSummaryStatus(slotId=currentTransferSlot, jobId=currentSummar
     }
     if (selectedSummaryTaskId !== jobId || !summaryTaskMatchesInput(task)) return;
     renderLogs(data.logs || [], data, '汇总已耗时', '汇总总耗时', '', true);
-    if (data.summary) renderSummary(data.summary);
     if (!data.done) return;
 
     // The unmatched-barcode lookup is done; replace its temporary progress
     // with the product summary rendered above.
     hidePreviewLog();
 
-    lastSummary = data.summary_success ? data.summary : null;
-    document.getElementById('submitBtn').disabled = !lastSummary;
     if (!data.summary_success && data.error) {
         appendLog(data.error, 'error');
     }
 }
 
-async function submitTransfer() {
-    if (!lastSummary) return alert('请先汇总预览');
-    const selectedTask = summaryTasks.find(task => task.job_id === selectedSummaryTaskId);
-    if (selectedTask && !summaryTaskMatchesInput(selectedTask)) {
-        detachSummarySelection();
-        return alert('输入内容已变化，请复用对应汇总或重新预览');
+async function submitTransferTask(summaryJobId) {
+    const task = summaryTasks.find(row => row.job_id === summaryJobId);
+    if (!task || !task.done || !task.summary_success || !task.summary || task.expired || task.submitting || task.submitted_job_id) return;
+    if (!task.distributor) return alert('请为该任务填写目标分销商后重新汇总');
+    task.submitting = true;
+    renderSummaryTasks();
+    if (!await ensureCrmLoggedIn('提交移库')) {
+        task.submitting = false;
+        renderSummaryTasks();
+        return;
     }
-    const distributor = document.getElementById('transferDistributor').value.trim();
-    if (!distributor) return alert('请输入目标分销商');
-    if (!await ensureCrmLoggedIn('提交移库')) return;
-    document.getElementById('submitBtn').disabled = true;
-    const activeRecord = createTransferRealtimeRecord('', distributor);
+    const activeRecord = createTransferRealtimeRecord('', task);
     appendLog('提交移库任务...', 'info', activeRecord.record_id);
-    const res = await fetch('/api/crm/transfer', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(transferPayloadForSlot('', {
-            record_id: activeRecord.record_id,
-            barcodes: parseBarcodes(),
-            distributor,
-            transfer_type: document.getElementById('transferType').value,
-            remark: document.getElementById('transferRemark').value.trim()
-        }))
-    });
-    const data = await res.json();
+    let data;
+    try {
+        const res = await fetch('/api/crm/transfer', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(transferPayloadForSlot('', {
+                record_id: activeRecord.record_id,
+                barcodes: task.barcodes,
+                distributor: task.distributor,
+                transfer_type: task.transfer_type,
+                remark: task.remark || ''
+            }))
+        });
+        data = await res.json();
+    } catch (error) {
+        data = {success: false, error: '提交请求失败，请检查网络后重试'};
+    }
     if (!data.success) {
         appendLog(data.error || '提交失败', 'error', activeRecord.record_id);
         activeRecord.state = 'error';
@@ -1549,7 +1515,8 @@ async function submitTransfer() {
         activeRecord.finished_at = new Date().toISOString();
         saveTransferRealtimeRecords();
         renderTransferRealtimeRecords();
-        document.getElementById('submitBtn').disabled = !lastSummary;
+        task.submitting = false;
+        renderSummaryTasks();
         return;
     }
     const slotId = data.slot_id || '';
@@ -1560,7 +1527,8 @@ async function submitTransfer() {
         activeRecord.finished_at = new Date().toISOString();
         saveTransferRealtimeRecords();
         renderTransferRealtimeRecords();
-        document.getElementById('submitBtn').disabled = !lastSummary;
+        task.submitting = false;
+        renderSummaryTasks();
         return;
     }
     currentTransferSlot = slotId;
@@ -1572,10 +1540,13 @@ async function submitTransfer() {
     if (jobId) sessionStorage.setItem(`crm_transfer_job_id_${slotId}`, jobId);
     activeRecord.job_id = jobId;
     saveTransferRealtimeRecords();
-    submittedTransferDistributor = distributor;
+    submittedTransferDistributor = task.distributor;
     currentTransferJobId = jobId;
-    setTransferSummaryCollapsed(true);
-    transferSummaryAutoCollapseJobId = jobId;
+    task.submitting = false;
+    task.submitted_job_id = jobId;
+    expandedSummaryTaskIds.delete(task.job_id);
+    saveSummaryTasks();
+    renderSummaryTasks();
     startTransferPolling(slotId, jobId, activeRecord.record_id);
 }
 
@@ -1664,7 +1635,6 @@ async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId
     const activeRecord = findActiveTransferRecord(slotId, data.job_id || jobId || '');
     const activeRecordId = recordId || (activeRecord && activeRecord.record_id) || '';
     if (activeRecordId) renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时', activeRecordId);
-    if (data.summary && !selectedSummaryTaskId) renderSummary(data.summary);
     if (data.done) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -1672,12 +1642,7 @@ async function pollStatus(slotId=currentTransferSlot, jobId=currentTransferJobId
         if (data.transfer_success) {
             saveDistributorHistory((data.transfer && data.transfer.distributor) || submittedTransferDistributor);
             submittedTransferDistributor = '';
-            if (transferSummaryAutoCollapseJobId !== data.job_id) {
-                setTransferSummaryCollapsed(true);
-                transferSummaryAutoCollapseJobId = data.job_id || currentTransferJobId;
-            }
         }
-        document.getElementById('submitBtn').disabled = !lastSummary;
     }
 }
 
@@ -1695,13 +1660,7 @@ async function restoreTransferStatus() {
     const activeRecord = findActiveTransferRecord(slotId, data.job_id || currentTransferJobId || '');
     const activeRecordId = activeRecord ? activeRecord.record_id : '';
     if (activeRecordId) renderLogs(data.logs || [], data, '移库已耗时', '移库总耗时', activeRecordId);
-    if (data.summary && !selectedSummaryTaskId) {
-        renderSummary(data.summary);
-    }
-
-    const submitBtn = document.getElementById('submitBtn');
     if (data.running) {
-        submitBtn.disabled = true;
         if (!pollTimer) {
             startTransferPolling(slotId, currentTransferJobId, activeRecordId);
         }
@@ -1716,12 +1675,7 @@ async function restoreTransferStatus() {
         if (data.transfer_success) {
             saveDistributorHistory((data.transfer && data.transfer.distributor) || submittedTransferDistributor);
             submittedTransferDistributor = '';
-            if (transferSummaryAutoCollapseJobId !== data.job_id) {
-                setTransferSummaryCollapsed(true);
-                transferSummaryAutoCollapseJobId = data.job_id || currentTransferJobId;
-            }
         }
-        submitBtn.disabled = !lastSummary;
         return true;
     }
 
@@ -1732,10 +1686,8 @@ async function restoreSummaryStatus() {
     renderSummaryTasks();
     if (!summaryTasks.length) return false;
     startSummaryPolling();
-    const selected = summaryTasks.find(task => task.job_id === selectedSummaryTaskId);
-    if (selected && summaryTaskMatchesInput(selected) && !selected.expired) {
-        await pollSummaryStatus(selected.slot_id, selected.job_id);
-    }
+    await Promise.all(summaryTasks.filter(task => task.done && !task.expired && !task.summary)
+        .map(task => pollSummaryStatus(task.slot_id, task.job_id)));
     return true;
 }
 

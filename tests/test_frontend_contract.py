@@ -1718,7 +1718,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             'id="transferType"',
             'id="transferDistributor"',
             'id="previewBtn"',
-            'id="submitBtn"',
+            'id="transferSummaryTaskList"',
             "生成的移库单号",
         ):
             with self.subTest(token=token):
@@ -1808,31 +1808,31 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         self.assertIn("? 1000 : 5000", transfer)
         self.assertIn("if (document.hidden)", transfer)
 
-    def test_transfer_summary_has_a_dedicated_product_quantity_card(self):
+    def test_transfer_summary_is_nested_in_each_task(self):
         transfer = self.source("transfer.html")
-        self.assertIn('id="transferSummaryCard"', transfer)
-        self.assertIn("汇总产品数量明细", transfer)
-        self.assertIn("transferSummaryCard.hidden = false", transfer)
+        self.assertIn('class="transfer-summary-task-detail"', transfer)
+        self.assertIn('onclick="toggleSummaryTask(', transfer)
+        self.assertNotIn('id="transferSummaryCard"', transfer)
 
     def test_transfer_summary_reveals_product_name_and_quantity_rows(self):
         transfer = self.source("transfer.html")
         self.assertIn('class="summary-product-list"', transfer)
         self.assertIn("row.product_name", transfer)
         self.assertIn("row.quantity", transfer)
-        self.assertIn("box.style.display = 'block'", transfer)
+        self.assertIn("renderSummary(task)", transfer)
 
-    def test_transfer_summary_can_collapse_after_a_successful_transfer(self):
+    def test_transfer_summary_can_expand_per_task(self):
         transfer = self.source("transfer.html")
-        self.assertIn('id="transferSummaryToggle"', transfer)
-        self.assertIn("function setTransferSummaryCollapsed(collapsed)", transfer)
-        self.assertIn("setTransferSummaryCollapsed(true)", transfer)
-        self.assertIn("transferSummaryCard.classList.toggle('is-collapsed', Boolean(collapsed))", transfer)
+        self.assertIn("function toggleSummaryTask(jobId)", transfer)
+        self.assertIn("expandedSummaryTaskIds", transfer)
 
-    def test_transfer_summary_collapses_when_submission_is_accepted(self):
+    def test_transfer_summary_submits_its_own_snapshot(self):
         transfer = self.source("transfer.html")
-        submit = transfer.split("async function submitTransfer()", 1)[1].split("function appendLog", 1)[0]
-        self.assertIn("setTransferSummaryCollapsed(true)", submit)
-        self.assertLess(submit.index("setTransferSummaryCollapsed(true)"), submit.index("startTransferPolling"))
+        submit = transfer.split("async function submitTransferTask(summaryJobId)", 1)[1].split("function appendLog", 1)[0]
+        self.assertIn("barcodes: task.barcodes", submit)
+        self.assertIn("distributor: task.distributor", submit)
+        self.assertIn("expandedSummaryTaskIds.delete(task.job_id)", submit)
+        self.assertNotIn('id="submitBtn"', transfer)
 
     def test_transfer_summary_uses_product_rows_without_duplicate_detail_table(self):
         transfer = self.source("transfer.html")

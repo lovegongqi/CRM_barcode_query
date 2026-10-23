@@ -230,12 +230,12 @@ class LightThemeTest(unittest.TestCase):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             page = browser.new_page()
-            page.set_content('''<body data-aurora-page="transfer"><div class="card transfer-summary-card">
-                <div class="summary" id="summaryBox" style="display:block">
+            page.set_content('''<body data-aurora-page="transfer"><div class="card">
+                <div class="transfer-summary-task-detail">
                     <div class="summary-product-list"><button class="summary-product-row">产品</button></div>
                 </div></div></body>''')
             page.add_style_tag(content=styles)
-            colors = page.evaluate('''() => ['#summaryBox', '.summary-product-row'].map(selector => {
+            colors = page.evaluate('''() => ['.transfer-summary-task-detail', '.summary-product-row'].map(selector => {
                 const style = getComputedStyle(document.querySelector(selector));
                 return {background: style.backgroundColor, image: style.backgroundImage};
             })''')
