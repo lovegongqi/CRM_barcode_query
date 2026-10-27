@@ -238,6 +238,34 @@ def test_failed_submit_leaves_task_available_for_retry(transfer_page):
     assert result == {"submitting": False, "submitted": "", "disabled": False}
 
 
+def test_accepted_transfer_removes_only_its_summary_task(transfer_page):
+    result = transfer_page.evaluate("""async () => {
+        summaryTasks = [
+            {job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['CODE1'],
+                distributor: '甲分销商', transfer_type: '移出', done: true,
+                summary_success: true, summary: {groups: [{product_code: 'P1'}], details: []}},
+            {job_id: 'summary-2', slot_id: 'transfer-2', barcodes: ['CODE2'],
+                distributor: '乙分销商', transfer_type: '移出', done: true,
+                summary_success: true, summary: {groups: [{product_code: 'P2'}], details: []}}
+        ];
+        selectedSummaryTaskId = 'summary-1';
+        document.getElementById('barcodeInput').value = 'NEXT-ORDER';
+        saveSummaryTasks();
+        renderSummaryTasks();
+        ensureCrmLoggedIn = async () => true;
+        fetch = async () => ({json: async () => ({success: true, slot_id: 'transfer-1', job_id: 'job-1'})});
+        startTransferPolling = () => {};
+        await submitTransferTask('summary-1');
+        return {tasks: summaryTasks.map(task => task.job_id),
+            stored: JSON.parse(sessionStorage.getItem('crm_transfer_summary_tasks_v1')).map(task => task.job_id),
+            record: transferRealtimeRecords[0].job_id,
+            selected: selectedSummaryTaskId,
+            form: document.getElementById('barcodeInput').value};
+    }""")
+    assert result == {"tasks": ["summary-2"], "stored": ["summary-2"],
+                      "record": "job-1", "selected": "", "form": "NEXT-ORDER"}
+
+
 def test_double_click_starts_only_one_transfer(transfer_page):
     result = transfer_page.evaluate("""async () => {
         summaryTasks = [{job_id: 'summary-1', slot_id: 'transfer-1', barcodes: ['CODE1'],
@@ -255,9 +283,9 @@ def test_double_click_starts_only_one_transfer(transfer_page):
         const second = submitTransferTask('summary-1');
         allowLogin(true);
         await Promise.all([first, second]);
-        return {posts, submitted: summaryTasks[0].submitted_job_id};
+        return {posts, remaining: summaryTasks.length};
     }""")
-    assert result == {"posts": 1, "submitted": "job-1"}
+    assert result == {"posts": 1, "remaining": 0}
 
 
 def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
@@ -285,7 +313,7 @@ def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
             started: window.startedTransfer,
             record: transferRealtimeRecords[0],
             form: document.getElementById('barcodeInput').value,
-            submitted: summaryTasks[0].submitted_job_id
+            remaining: summaryTasks.length
         };
     }""")
 
@@ -300,4 +328,4 @@ def test_submit_lets_server_assign_channel_and_updates_record(transfer_page):
     assert result["sentPayload"]["transfer_type"] == "移入"
     assert result["sentPayload"]["remark"] == "原单备注"
     assert result["form"] == "NEXT-ORDER"
-    assert result["submitted"] == "transfer-job-1"
+    assert result["remaining"] == 0

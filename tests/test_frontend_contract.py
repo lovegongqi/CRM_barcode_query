@@ -1831,7 +1831,7 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
         submit = transfer.split("async function submitTransferTask(summaryJobId)", 1)[1].split("function appendLog", 1)[0]
         self.assertIn("barcodes: task.barcodes", submit)
         self.assertIn("distributor: task.distributor", submit)
-        self.assertIn("expandedSummaryTaskIds.delete(task.job_id)", submit)
+        self.assertIn("deleteSummaryTask(task.job_id)", submit)
         self.assertNotIn('id="submitBtn"', transfer)
 
     def test_transfer_summary_uses_product_rows_without_duplicate_detail_table(self):

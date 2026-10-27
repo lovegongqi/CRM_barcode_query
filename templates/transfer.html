@@ -296,7 +296,8 @@
 let pollTimer = null;
 let previewTimer = null;
 const SUMMARY_TASK_STORAGE_KEY = 'crm_transfer_summary_tasks_v1';
-let summaryTasks = JSON.parse(sessionStorage.getItem(SUMMARY_TASK_STORAGE_KEY) || '[]');
+let summaryTasks = JSON.parse(sessionStorage.getItem(SUMMARY_TASK_STORAGE_KEY) || '[]')
+    .filter(task => !task.submitted_job_id);
 const expandedSummaryTaskIds = new Set();
 let selectedSummaryTaskId = sessionStorage.getItem('crm_transfer_selected_summary_task') || '';
 let lastRenderedLogKey = '';
@@ -1543,10 +1544,7 @@ async function submitTransferTask(summaryJobId) {
     submittedTransferDistributor = task.distributor;
     currentTransferJobId = jobId;
     task.submitting = false;
-    task.submitted_job_id = jobId;
-    expandedSummaryTaskIds.delete(task.job_id);
-    saveSummaryTasks();
-    renderSummaryTasks();
+    deleteSummaryTask(task.job_id);
     startTransferPolling(slotId, jobId, activeRecord.record_id);
 }
 
