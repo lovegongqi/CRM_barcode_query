@@ -20,6 +20,7 @@ import queue
 import uuid
 import shutil
 import hashlib
+import hmac
 import gzip
 from contextlib import closing, contextmanager
 from collections import OrderedDict
@@ -10788,6 +10789,8 @@ def is_public_product_library_request(path, method):
 @app.before_request
 def require_app_login():
     path = request.path
+    if path == "/api/crm/sms-webhook" and request.method == "POST":
+        return None
     if path.startswith("/api/app-auth"):
         return None
     if path == "/login":
@@ -14125,6 +14128,58 @@ def api_crm_bulk_login_captcha():
         payload = _bulk_login_status_payload(job)
     threading.Thread(target=_submit_bulk_login_pending, args=(job_id,), daemon=True).start()
     return jsonify(payload)
+
+@app.route("/api/crm/sms-webhook", methods=["POST"])
+def api_crm_sms_webhook():
+    try:
+        with open(os.path.join(_runtime_config_dir(), "crm_sms_webhook_token"), encoding="utf-8") as source:
+            token = source.read().strip()
+    except OSError:
+        token = ""
+    if not token:
+        return jsonify({"success": False, "error": "接收端未启用"}), 503
+    if not hmac.compare_digest(request.headers.get("X-Webhook-Token", ""), token):
+        return jsonify({"success": False, "error": "未授权"}), 403
+
+    if request.content_length is None or request.content_length > 4096:
+        return jsonify({"success": False, "error": "短信格式无效"}), 400
+    data = request.get_json(silent=True)
+    message = data.get("message") if isinstance(data, dict) else None
+    if not isinstance(message, str) or len(message) > 500:
+        return jsonify({"success": False, "error": "短信格式无效"}), 400
+    match = re.match(r"^【怡口净水】您的验证码([0-9]{4})(?![0-9])", message.strip())
+    if not match:
+        return jsonify({"success": True, "accepted": False})
+    captcha = match.group(1)
+
+    with bulk_login_job_lock:
+        now = datetime.now()
+        eligible = []
+        for job in bulk_login_jobs.values():
+            if not job.get("running") or job.get("done") or job.get("stop_requested"):
+                continue
+            try:
+                age = (now - datetime.fromisoformat(job.get("started_at") or "")).total_seconds()
+            except ValueError:
+                continue
+            if not 0 <= age <= 600:
+                continue
+            if any(slot.get("status") in {"pending", "opening", "waiting_captcha"} for slot in job.get("slots") or []):
+                eligible.append(job)
+        if len(eligible) != 1:
+            return jsonify({"success": True, "accepted": False})
+        job = eligible[0]
+        digest = hashlib.sha256(captcha.encode("ascii")).hexdigest()
+        if job.get("captcha_submitting") or job.get("_sms_code_digest") == digest:
+            return jsonify({"success": True, "accepted": False})
+        job["_sms_code_digest"] = digest
+        job["captcha"] = captcha
+        job["captcha_generation"] = int(job.get("captcha_generation") or 0) + 1
+        job["captcha_submitting"] = True
+        _append_job_log_unlocked(job, "已收到 CRM 验证码短信，正在提交到等待中的通道", "info", 1000)
+        job_id = job["job_id"]
+    threading.Thread(target=_submit_bulk_login_pending, args=(job_id,), daemon=True).start()
+    return jsonify({"success": True, "accepted": True}), 202
 
 @app.route("/api/crm/bulk-login/cancel", methods=["POST"])
 def api_crm_bulk_login_cancel():
