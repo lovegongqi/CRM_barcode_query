@@ -221,6 +221,38 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
 
 
 class GYJLoginFlowTest(unittest.TestCase):
+    def test_missing_captcha_image_does_not_leave_session_stuck_waiting(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage(app_module.GYJ_PURCHASE_IN_URL)
+        page.url = session.login_url
+        session.page = page
+        session.waiting_captcha = True
+
+        with mock.patch.object(session, "captcha_preview", return_value=""), \
+                mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "", "password": ""}):
+            success, message = session.check_login_status()
+
+        self.assertTrue(success, message)
+        self.assertFalse(session.waiting_captcha)
+        self.assertEqual(page.gotos[0][0], app_module.GYJ_PURCHASE_IN_URL)
+
+    def test_login_form_waits_for_captcha_image(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        session.page = mock.Mock()
+        username_input = mock.Mock()
+        password_input = mock.Mock()
+        session._first_visible = mock.Mock(side_effect=[
+            username_input, password_input, username_input, password_input,
+        ])
+        session._captcha_input = mock.Mock(return_value=mock.Mock())
+        session.captcha_preview = mock.Mock(side_effect=["", "data:image/png;base64,aW1hZ2U="])
+
+        found_username, found_password = session._wait_for_login_form(attempts=2)
+
+        self.assertIs(found_username, username_input)
+        self.assertIs(found_password, password_input)
+        session.page.wait_for_timeout.assert_called_once_with(250)
+
     def test_blank_protected_url_does_not_count_as_logged_in(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         page = _RestorableGYJPage(app_module.GYJ_PURCHASE_IN_URL, has_purchase_button=False)
@@ -345,6 +377,7 @@ class GYJLoginFlowTest(unittest.TestCase):
             side_effect=[None, None, username_input, password_input]
         )
         session._captcha_input = mock.Mock(side_effect=[None, captcha_input])
+        session.captcha_preview = mock.Mock(return_value="data:image/png;base64,aW1hZ2U=")
 
         success, message = session.login_step1("gyj-user", "secret")
 

@@ -4331,7 +4331,7 @@ class GYJSession:
                 "input[name='password']", "input[name='pwd']", "input[type='password']",
             ])
             captcha_input = self._captcha_input()
-            if username_input and password_input and captcha_input:
+            if username_input and password_input and captcha_input and self.captcha_preview():
                 return username_input, password_input
             self.page.wait_for_timeout(interval_ms)
         return None, None
@@ -4441,8 +4441,10 @@ class GYJSession:
     def check_login_status(self):
         with self.lock:
             if self.waiting_captcha and self.is_alive() and self._is_login_page():
-                self.logged_in = False
-                return False, "GYJ 等待验证码"
+                if self.captcha_preview():
+                    self.logged_in = False
+                    return False, "GYJ 等待验证码"
+                self.waiting_captcha = False
             if not self.is_alive():
                 try:
                     if not self._ensure_browser():
