@@ -2108,7 +2108,18 @@ class _GYJSessionPageStub:
     def url(self):
         return self._url
 
+    def goto(self, url, wait_until, timeout):
+        pass
+
+    def wait_for_timeout(self, interval):
+        pass
+
+    def wait_for_function(self, expression, timeout):
+        pass
+
     def evaluate(self, js):
+        if '.table-operator button.ant-btn-primary' in js:
+            return not self._has_user_input
         if "input[name='username']" in js or "placeholder" in js:
             return self._has_user_input
         if "验证码" in js or "captcha" in js or "inputCode" in js:
@@ -2126,7 +2137,8 @@ class GYJSessionLoginDetectionTest(unittest.TestCase):
             "https://cloud.gyjerp.com/bill/purchase_in",
             has_user_input=True, has_captcha_input=True,
         )
-        ok, message = sess.check_login_status()
+        with mock.patch.object(app, "get_remembered_gyj_credentials_secret", return_value={"username": "", "password": ""}):
+            ok, message = sess.check_login_status()
         self.assertFalse(ok)
         self.assertFalse(sess.logged_in)
         self.assertIn("登录", message)

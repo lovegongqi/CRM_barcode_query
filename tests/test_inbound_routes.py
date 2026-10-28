@@ -172,9 +172,10 @@ class _GYJLoginCaptchaPage:
 
 
 class _RestorableGYJPage:
-    def __init__(self, restored_url):
+    def __init__(self, restored_url, has_purchase_button=None):
         self.url = ""
         self.restored_url = restored_url
+        self.has_purchase_button = ("/bill/purchase_in" in restored_url) if has_purchase_button is None else has_purchase_button
         self.gotos = []
 
     def goto(self, url, wait_until, timeout):
@@ -183,6 +184,15 @@ class _RestorableGYJPage:
 
     def locator(self, selector):
         return _EmptyLocator()
+
+    def wait_for_timeout(self, interval):
+        pass
+
+    def wait_for_function(self, expression, timeout):
+        pass
+
+    def evaluate(self, expression):
+        return self.has_purchase_button if '.table-operator button.ant-btn-primary' in expression else False
 
 
 class GYJCaptchaPreviewTest(unittest.TestCase):
@@ -211,6 +221,87 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
 
 
 class GYJLoginFlowTest(unittest.TestCase):
+    def test_blank_protected_url_does_not_count_as_logged_in(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage(app_module.GYJ_PURCHASE_IN_URL, has_purchase_button=False)
+        page.url = app_module.GYJ_PURCHASE_IN_URL
+        session.page = page
+        session.logged_in = True
+
+        success, message = session.check_login_status()
+
+        self.assertFalse(success)
+        self.assertFalse(session.logged_in)
+        self.assertIn("确认", message)
+
+    def test_expired_open_page_is_verified_by_revisiting_protected_page(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage("https://cloud.gyjerp.com/user/login")
+        page.url = "https://cloud.gyjerp.com/bill/purchase_in"
+        session.page = page
+        session.logged_in = True
+
+        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "", "password": ""}):
+            success, message = session.check_login_status()
+
+        self.assertFalse(success)
+        self.assertFalse(session.logged_in)
+        self.assertEqual(page.gotos[0][0], app_module.GYJ_PURCHASE_IN_URL)
+
+    def test_expired_session_relogs_with_saved_credentials_and_recognized_captcha(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage("https://cloud.gyjerp.com/user/login")
+        page.url = "https://cloud.gyjerp.com/bill/purchase_in"
+        session.page = page
+        session.logged_in = True
+
+        def login_step1(username, password):
+            session.waiting_captcha = True
+            return True, "GYJ 等待验证码"
+
+        def login_step2(captcha):
+            session.logged_in = True
+            session.waiting_captcha = False
+            page.url = app_module.GYJ_PURCHASE_IN_URL
+            return True, "GYJ 登录成功"
+
+        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "user", "password": "saved"}), \
+                mock.patch.object(app_module, "_recognize_gyj_captcha", return_value="J8NC"), \
+                mock.patch.object(session, "login_step1", side_effect=login_step1) as step1, \
+                mock.patch.object(session, "login_step2", side_effect=login_step2) as step2, \
+                mock.patch.object(session, "captcha_preview", return_value="data:image/png;base64,aW1hZ2U="):
+            success, message = session.check_login_status()
+
+        self.assertTrue(success)
+        self.assertTrue(session.logged_in)
+        self.assertFalse(session.waiting_captcha)
+        step1.assert_called_once_with("user", "saved")
+        step2.assert_called_once_with("J8NC")
+
+    def test_failed_auto_captcha_stops_and_exposes_manual_captcha(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        page = _RestorableGYJPage("https://cloud.gyjerp.com/user/login")
+        page.url = "https://cloud.gyjerp.com/bill/purchase_in"
+        session.page = page
+        session.logged_in = True
+
+        def login_step1(username, password):
+            session.waiting_captcha = True
+            return True, "GYJ 等待验证码"
+
+        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "user", "password": "saved"}), \
+                mock.patch.object(app_module, "_recognize_gyj_captcha", return_value=""), \
+                mock.patch.object(session, "login_step1", side_effect=login_step1) as step1, \
+                mock.patch.object(session, "captcha_preview", return_value="data:image/png;base64,aW1hZ2U="):
+            success, message = session.check_login_status()
+            again, _ = session.check_login_status()
+
+        self.assertFalse(success)
+        self.assertFalse(again)
+        self.assertTrue(session.waiting_captcha)
+        self.assertIn("验证码", message)
+        step1.assert_called_once_with("user", "saved")
+
     def test_login_status_reopens_persistent_session_before_reporting_login_required(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         page = _RestorableGYJPage("https://cloud.gyjerp.com/bill/purchase_in")

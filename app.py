@@ -4206,6 +4206,17 @@ class CRMWorker:
         return result
 
 
+def _recognize_gyj_captcha(image_data):
+    """Read one visible GYJ image locally; leave uncertain codes for manual entry."""
+    try:
+        import ddddocr
+        image_bytes = base64.b64decode(str(image_data or '').partition(',')[2])
+        result = str(ddddocr.DdddOcr(show_ad=False).classification(image_bytes) or '').strip()
+        return result if re.fullmatch(r'[A-Za-z0-9]{4}', result) else ''
+    except Exception:
+        return ''
+
+
 class GYJSession:
     """独立、非持久化的 GYJ 浏览器会话；登录只通过可见页面完成。"""
     login_url = "https://cloud.gyjerp.com/user/login"
@@ -4219,6 +4230,7 @@ class GYJSession:
         self.lock = threading.RLock()
         self.logged_in = False
         self.waiting_captcha = False
+        self.auto_login_retry_after = 0
 
     def is_alive(self):
         try:
@@ -4284,6 +4296,14 @@ class GYJSession:
         except Exception:
             return False
         return bool(has_username)
+
+    def _rendered_purchase_page(self):
+        try:
+            return bool(self.page.evaluate(
+                "() => !!document.querySelector('.table-operator button.ant-btn-primary')"
+            ))
+        except Exception:
+            return False
 
     def _first_visible(self, selectors):
         for selector in selectors:
@@ -4420,29 +4440,60 @@ class GYJSession:
 
     def check_login_status(self):
         with self.lock:
+            if self.waiting_captcha and self.is_alive() and self._is_login_page():
+                self.logged_in = False
+                return False, "GYJ 等待验证码"
             if not self.is_alive():
                 try:
                     if not self._ensure_browser():
                         return False, "GYJ 浏览器未启动，请先点击登录 GYJ"
-                    self.page.goto(
-                        GYJ_PURCHASE_IN_URL,
-                        wait_until="domcontentloaded",
-                        timeout=60000,
-                    )
                 except Exception as error:
                     self._close_browser()
                     return False, f"GYJ 会话恢复失败：{error}"
             try:
+                self.page.goto(
+                    GYJ_PURCHASE_IN_URL,
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+                try:
+                    self.page.wait_for_function(
+                        "() => /user\\/login/.test(location.pathname) || "
+                        "!!document.querySelector(\"input[name='username'], input[name='userName'], input[placeholder*='账号'], input[placeholder*='用户名'], .table-operator button.ant-btn-primary\")",
+                        timeout=10000,
+                    )
+                except Exception:
+                    pass
                 url = (self.page.url or "").lower()
                 if "login" in url or self._rendered_login_page():
                     self.logged_in = False
                     self.waiting_captcha = bool(self._captcha_input())
+                    if time.monotonic() >= self.auto_login_retry_after:
+                        saved = get_remembered_gyj_credentials_secret()
+                        if saved.get('username') and saved.get('password'):
+                            ok, message = self.login_step1(saved['username'], saved['password'])
+                            if ok:
+                                for attempt in range(2):
+                                    captcha = _recognize_gyj_captcha(self.captcha_preview())
+                                    if not captcha:
+                                        break
+                                    ok, message = self.login_step2(captcha)
+                                    if ok:
+                                        self.auto_login_retry_after = 0
+                                        return True, message
+                                    if attempt == 0 and self.waiting_captcha:
+                                        self.refresh_captcha()
+                            self.auto_login_retry_after = time.monotonic() + 300
+                            if self.waiting_captcha:
+                                return False, "GYJ 自动登录未完成，请手动输入验证码"
+                            return False, message
                     return False, "GYJ 等待验证码" if self.waiting_captcha else "仍在 GYJ 登录页，未登录"
-                if "cloud.gyjerp.com" not in url:
+                if "cloud.gyjerp.com" not in url or not self._rendered_purchase_page():
                     self.logged_in = False
                     return False, "无法确认 GYJ 登录状态"
                 self.logged_in = True
                 self.waiting_captcha = False
+                self.auto_login_retry_after = 0
                 return True, "GYJ 已登录"
             except Exception as error:
                 self.logged_in = False

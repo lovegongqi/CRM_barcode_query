@@ -574,8 +574,10 @@ async function loadGyjChannels(refreshSelected = false) {
 }
 
 async function refreshSelectedGyjChannel() {
-    const params = new URLSearchParams({slot_id: selectedGyjSlotId});
+    const slotId = selectedGyjSlotId;
+    const params = new URLSearchParams({slot_id: slotId});
     const data = await fetch('/api/gyj/login-status?' + params.toString()).then(res => res.json()).catch(() => null);
+    if (slotId !== selectedGyjSlotId) return;
     if (!data || !data.success) {
         setGyjMessage((data && data.error) || 'GYJ 登录状态读取失败');
         return;
@@ -591,8 +593,7 @@ async function selectGyjChannel(slotId) {
     selectedGyjSlotId = slotId;
     renderGyjManagementState({slots: gyjChannels});
     showGyjCaptchaPlaceholder('正在读取验证码…');
-    const selected = gyjChannels.find(slot => slot.id === slotId) || {};
-    if (selected.waiting_captcha) await refreshGyjCaptcha(false, slotId);
+    await refreshSelectedGyjChannel();
 }
 
 async function loadGyjCredentials() {
@@ -683,8 +684,11 @@ async function submitGyjCaptcha() {
 
 function startGyjManagementPolling() {
     if (gyjManagementTimer) clearInterval(gyjManagementTimer);
+    let ticks = 0;
     gyjManagementTimer = setInterval(() => {
-        if (!document.hidden) loadGyjChannels();
+        if (document.hidden) return;
+        if (++ticks % 15 === 0) refreshSelectedGyjChannel();
+        else loadGyjChannels();
     }, 2000);
 }
 
@@ -792,7 +796,7 @@ async function loadAccounts() {
         loadBulkCrmSlots();
         loadSavedCrmCredentials();
         loadGyjCredentials();
-        loadGyjChannels();
+        loadGyjChannels(true);
         startGyjManagementPolling();
         if (currentBulkCrmLoginJobId) startBulkLoginPolling();
     }

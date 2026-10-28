@@ -164,17 +164,41 @@ class AccountsFrontendTest(unittest.TestCase):
                 renderGyjManagementState() { calls.push('render'); },
                 showGyjCaptchaPlaceholder(message) { calls.push(message); },
                 refreshGyjCaptcha() { calls.push('captcha'); },
-                refreshSelectedGyjChannel() { throw new Error('channel switch must not wait for a live status check'); },
+                async refreshSelectedGyjChannel() { calls.push('check'); },
             };
             vm.createContext(context);
             vm.runInContext(source, context);
             (async () => {
                 await vm.runInContext("selectGyjChannel('gyj-2')", context);
                 assert.equal(context.selectedGyjSlotId, 'gyj-2');
-                assert.deepEqual(calls, ['render', '正在读取验证码…']);
+                assert.deepEqual(calls, ['render', '正在读取验证码…', 'check']);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """,
             ["selectGyjChannel"],
+        )
+
+    def test_selected_gyj_channel_is_periodically_verified(self):
+        self.run_node(
+            r"""
+            const calls = [];
+            let tick;
+            const context = {
+                console,
+                gyjManagementTimer: null,
+                document: {hidden: false},
+                setInterval(fn, delay) { tick = fn; assert.equal(delay, 2000); return 1; },
+                clearInterval() {},
+                loadGyjChannels() { calls.push('cached'); },
+                refreshSelectedGyjChannel() { calls.push('verified'); },
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext('startGyjManagementPolling()', context);
+            for (let i = 0; i < 15; i++) tick();
+            assert.equal(calls.filter(item => item === 'verified').length, 1);
+            assert.equal(calls.filter(item => item === 'cached').length, 14);
+            """,
+            ["startGyjManagementPolling"],
         )
 
     def test_stale_gyj_captcha_response_cannot_replace_new_channel_preview(self):
