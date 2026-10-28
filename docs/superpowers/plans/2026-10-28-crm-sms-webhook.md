@@ -32,13 +32,13 @@
 - [x] Run focused tests and observe failure from the missing route.
 - [x] Implement the minimal token check, parser, active-job selection, and existing submission dispatch.
 - [x] Run focused and full test suites; inspect the diff.
-- [ ] Commit the verified change.
+- [x] Commit the verified change (`b3582f7`).
 
 ### Task 2: NAS and phone configuration
 
 **Files:** NAS persistent token file and deployment; no credential in Git.
 
-- [ ] Preserve named volumes and deploy the exact tested commit with a rollback image.
-- [ ] Verify token rejection and acceptance with synthetic SMS without triggering real login.
+- [x] Preserve named volumes and deploy the exact tested commit with a rollback image.
+- [x] Verify token rejection and acceptance with synthetic SMS without triggering real login.
 - [x] Verify a valid external HTTPS route: `https://mlmll.i234.me:5012/login` returned 200 with a valid certificate.
 - [ ] Test one real forwarded SMS with an active CRM login job.
