@@ -62,6 +62,7 @@
         .gyj-login-grid .remember-inline { display:flex; align-items:center; gap:8px; margin:0 0 8px; white-space:nowrap; color:#334155; }
         .gyj-login-grid .remember-inline input { width:auto; }
         .gyj-captcha-row { display:grid; grid-template-columns:140px minmax(140px,1fr) auto; gap:12px; align-items:end; margin-top:12px; }
+        .gyj-captcha-row[hidden] { display:none; }
         .gyj-captcha-preview { width:140px; height:48px; display:flex; align-items:center; justify-content:center; overflow:hidden; border:1px solid #cfd8e3; border-radius:6px; background:#f8fafc; color:#94a3b8; font-size:11px; text-align:center; }
         .gyj-captcha-image { width:100%; height:100%; object-fit:contain; background:#fff; }
         .gyj-message { min-height:20px; margin-top:10px; color:#667085; font-size:12px; }
@@ -260,6 +261,8 @@ const GYJ_CHANNEL_IDS = ['gyj-1', 'gyj-2', 'gyj-3', 'gyj-4', 'gyj-5'];
 let gyjChannels = [];
 let selectedGyjSlotId = 'gyj-1';
 let gyjManagementTimer = null;
+let gyjSelectionRevision = 0;
+let gyjCaptchaRequestId = 0;
 
 function applyCrmCredentialValues(remember, username='', password='', usernameId='bulkCrmUsername', passwordId='bulkCrmPassword', rememberId='bulkRememberCrmLogin') {
     const rememberEl = document.getElementById(rememberId);
@@ -575,9 +578,10 @@ async function loadGyjChannels(refreshSelected = false) {
 
 async function refreshSelectedGyjChannel() {
     const slotId = selectedGyjSlotId;
+    const selectionRevision = gyjSelectionRevision;
     const params = new URLSearchParams({slot_id: slotId});
     const data = await fetch('/api/gyj/login-status?' + params.toString()).then(res => res.json()).catch(() => null);
-    if (slotId !== selectedGyjSlotId) return;
+    if (slotId !== selectedGyjSlotId || selectionRevision !== gyjSelectionRevision) return;
     if (!data || !data.success) {
         setGyjMessage((data && data.error) || 'GYJ 登录状态读取失败');
         return;
@@ -591,8 +595,12 @@ async function refreshSelectedGyjChannel() {
 async function selectGyjChannel(slotId) {
     if (!GYJ_CHANNEL_IDS.includes(slotId)) return;
     selectedGyjSlotId = slotId;
+    gyjSelectionRevision++;
+    gyjCaptchaRequestId++;
+    document.getElementById('gyjCaptcha').value = '';
     renderGyjManagementState({slots: gyjChannels});
-    showGyjCaptchaPlaceholder('正在读取验证码…');
+    const selected = gyjChannels.find(slot => slot.id === slotId) || {};
+    showGyjCaptchaPlaceholder(selected.waiting_captcha ? '正在读取验证码…' : '当前通道暂无验证码');
     await refreshSelectedGyjChannel();
 }
 
@@ -604,19 +612,21 @@ async function loadGyjCredentials() {
 }
 
 async function startGyjChannelLogin() {
+    const slotId = selectedGyjSlotId;
+    const selectionRevision = gyjSelectionRevision;
     const username = document.getElementById('gyjUsername').value.trim();
     const password = document.getElementById('gyjPassword').value;
     const remember = document.getElementById('gyjRememberLogin').checked;
     const button = document.getElementById('gyjLoginButton');
     button.disabled = true;
     button.textContent = '登录中...';
-    setGyjMessage(`正在登录 ${selectedGyjSlotId}…`);
+    setGyjMessage(`正在登录 ${slotId}…`);
     try {
         const response = await fetch('/api/gyj/login', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
-                slot_id: selectedGyjSlotId,
+                slot_id: slotId,
                 username,
                 password,
                 remember,
@@ -624,20 +634,26 @@ async function startGyjChannelLogin() {
             }),
         });
         const data = await response.json();
-        renderGyjManagementState(data);
-        setGyjMessage(data.message || data.error || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败'));
-        if (data.waiting_captcha) await refreshGyjCaptcha(false);
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) {
+            renderGyjManagementState(data);
+            setGyjMessage(data.message || data.error || (data.success ? 'GYJ 登录成功' : 'GYJ 登录失败'));
+            if (data.waiting_captcha) await refreshGyjCaptcha(false, slotId);
+        }
         await loadGyjChannels();
     } catch (error) {
-        setGyjMessage('GYJ 登录请求失败');
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) setGyjMessage('GYJ 登录请求失败');
     } finally {
-        button.disabled = false;
-        button.textContent = '登录所选通道';
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) {
+            button.disabled = false;
+            button.textContent = '登录所选通道';
+        }
     }
 }
 
 async function refreshGyjCaptcha(regenerate = false, slotId = selectedGyjSlotId) {
     if (slotId !== selectedGyjSlotId) return;
+    const requestId = ++gyjCaptchaRequestId;
+    const selectionRevision = gyjSelectionRevision;
     showGyjCaptchaPlaceholder('正在读取验证码…');
     const params = new URLSearchParams({slot_id: slotId});
     const url = regenerate ? '/api/gyj/captcha/refresh' : '/api/gyj/captcha-preview?' + params.toString();
@@ -646,10 +662,10 @@ async function refreshGyjCaptcha(regenerate = false, slotId = selectedGyjSlotId)
         body: JSON.stringify({slot_id: slotId}),
     } : undefined;
     const data = await fetch(url, options).then(res => res.json()).catch(() => null);
-    if (slotId !== selectedGyjSlotId) return;
+    if (slotId !== selectedGyjSlotId || selectionRevision !== gyjSelectionRevision || requestId !== gyjCaptchaRequestId) return;
     const image = document.getElementById('gyjCaptchaImage');
     const placeholder = document.getElementById('gyjCaptchaPlaceholder');
-    if (data?.success && String(data.captcha_image || '').startsWith('data:image/')) {
+    if (data?.success && data.slot_id === slotId && String(data.captcha_image || '').startsWith('data:image/')) {
         image.src = data.captcha_image;
         image.hidden = false;
         placeholder.hidden = true;
@@ -660,6 +676,8 @@ async function refreshGyjCaptcha(regenerate = false, slotId = selectedGyjSlotId)
 }
 
 async function submitGyjCaptcha() {
+    const slotId = selectedGyjSlotId;
+    const selectionRevision = gyjSelectionRevision;
     const input = document.getElementById('gyjCaptcha');
     const captcha = input.value.trim();
     if (!captcha) return setGyjMessage('请输入验证码');
@@ -668,17 +686,19 @@ async function submitGyjCaptcha() {
     try {
         const response = await fetch('/api/gyj/login/captcha', {
             method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({slot_id: selectedGyjSlotId, captcha}),
+            body: JSON.stringify({slot_id: slotId, captcha}),
         });
         const data = await response.json();
-        input.value = '';
-        renderGyjManagementState(data);
-        setGyjMessage(data.message || data.error || (data.success ? 'GYJ 登录成功' : '验证码验证失败'));
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) {
+            input.value = '';
+            renderGyjManagementState(data);
+            setGyjMessage(data.message || data.error || (data.success ? 'GYJ 登录成功' : '验证码验证失败'));
+        }
         await loadGyjChannels();
     } catch (error) {
-        setGyjMessage('GYJ 验证码提交失败');
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) setGyjMessage('GYJ 验证码提交失败');
     } finally {
-        button.disabled = false;
+        if (slotId === selectedGyjSlotId && selectionRevision === gyjSelectionRevision) button.disabled = false;
     }
 }
 

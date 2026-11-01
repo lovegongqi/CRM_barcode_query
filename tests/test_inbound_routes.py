@@ -209,15 +209,24 @@ class GYJCaptchaPreviewTest(unittest.TestCase):
     def test_refresh_clicks_visible_captcha_before_returning_preview(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         image = mock.Mock()
+        image.screenshot.side_effect = [b"old", b"old", b"new"]
         session.page = mock.Mock()
         session._first_visible = mock.Mock(return_value=image)
-        session.captcha_preview = mock.Mock(return_value="data:image/png;base64,bmV3")
 
         preview = session.refresh_captcha()
 
         image.click.assert_called_once_with()
-        session.page.wait_for_timeout.assert_called_once_with(300)
+        self.assertEqual(session.page.wait_for_timeout.call_count, 2)
         self.assertEqual(preview, "data:image/png;base64,bmV3")
+
+    def test_refresh_does_not_return_old_captcha_when_image_never_changes(self):
+        session = app_module.GYJSession(TEST_DATA_DIR.name)
+        image = mock.Mock()
+        image.screenshot.return_value = b"old"
+        session.page = mock.Mock()
+        session._first_visible = mock.Mock(return_value=image)
+
+        self.assertEqual(session.refresh_captcha(), "")
 
 
 class GYJLoginFlowTest(unittest.TestCase):

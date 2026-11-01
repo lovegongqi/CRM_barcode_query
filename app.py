@@ -4360,11 +4360,16 @@ class GYJSession:
             if not image:
                 return ""
             try:
+                previous = image.screenshot(type="png")
                 image.click()
-                self.page.wait_for_timeout(300)
+                for _ in range(20):
+                    self.page.wait_for_timeout(250)
+                    current = image.screenshot(type="png")
+                    if current and current != previous:
+                        return "data:image/png;base64," + base64.b64encode(current).decode("ascii")
             except Exception:
                 return ""
-            return self.captcha_preview()
+            return ""
 
     def login_step1(self, username, password):
         if not username or not password:

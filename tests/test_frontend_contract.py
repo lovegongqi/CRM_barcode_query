@@ -1045,7 +1045,8 @@ const reopen = () => {{ stopOrderProductQueryPolling(); serviceDetailCurrentServ
             self.assertIn(f"function {function_name}", inbound)
         self.assertIn("fetch('/api/gyj/credentials'", inbound)
         self.assertIn("fetch('/api/gyj/login/captcha'", inbound)
-        self.assertIn("slot_id: selectedGyjSlotId", inbound)
+        self.assertIn("const slotId = selectedGyjSlotId", inbound)
+        self.assertIn("slot_id: slotId", inbound)
 
     def test_settings_gyj_captcha_preview_can_be_refreshed_without_storage(self):
         inbound = self.source("accounts.html")
