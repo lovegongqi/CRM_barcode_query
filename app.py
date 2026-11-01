@@ -4207,17 +4207,6 @@ class CRMWorker:
         return result
 
 
-def _recognize_gyj_captcha(image_data):
-    """Read one visible GYJ image locally; leave uncertain codes for manual entry."""
-    try:
-        import ddddocr
-        image_bytes = base64.b64decode(str(image_data or '').partition(',')[2])
-        result = str(ddddocr.DdddOcr(show_ad=False).classification(image_bytes) or '').strip()
-        return result if re.fullmatch(r'[A-Za-z0-9]{4}', result) else ''
-    except Exception:
-        return ''
-
-
 class GYJSession:
     """独立、非持久化的 GYJ 浏览器会话；登录只通过可见页面完成。"""
     login_url = "https://cloud.gyjerp.com/user/login"
@@ -4231,7 +4220,6 @@ class GYJSession:
         self.lock = threading.RLock()
         self.logged_in = False
         self.waiting_captcha = False
-        self.auto_login_retry_after = 0
 
     def is_alive(self):
         try:
@@ -4470,33 +4458,13 @@ class GYJSession:
                 url = (self.page.url or "").lower()
                 if "login" in url or self._rendered_login_page():
                     self.logged_in = False
-                    self.waiting_captcha = bool(self._captcha_input())
-                    if time.monotonic() >= self.auto_login_retry_after:
-                        saved = get_remembered_gyj_credentials_secret()
-                        if saved.get('username') and saved.get('password'):
-                            ok, message = self.login_step1(saved['username'], saved['password'])
-                            if ok:
-                                for attempt in range(2):
-                                    captcha = _recognize_gyj_captcha(self.captcha_preview())
-                                    if not captcha:
-                                        break
-                                    ok, message = self.login_step2(captcha)
-                                    if ok:
-                                        self.auto_login_retry_after = 0
-                                        return True, message
-                                    if attempt == 0 and self.waiting_captcha:
-                                        self.refresh_captcha()
-                            self.auto_login_retry_after = time.monotonic() + 300
-                            if self.waiting_captcha:
-                                return False, "GYJ 自动登录未完成，请手动输入验证码"
-                            return False, message
-                    return False, "GYJ 等待验证码" if self.waiting_captcha else "仍在 GYJ 登录页，未登录"
+                    self.waiting_captcha = False
+                    return False, "GYJ 未登录，请在账号管理页手动登录"
                 if "cloud.gyjerp.com" not in url or not self._rendered_purchase_page():
                     self.logged_in = False
                     return False, "无法确认 GYJ 登录状态"
                 self.logged_in = True
                 self.waiting_captcha = False
-                self.auto_login_retry_after = 0
                 return True, "GYJ 已登录"
             except Exception as error:
                 self.logged_in = False

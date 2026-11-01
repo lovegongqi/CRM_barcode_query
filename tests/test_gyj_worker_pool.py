@@ -76,12 +76,12 @@ class GYJWorkerPoolTest(unittest.TestCase):
 
         self.assertEqual(calls, list(app_module.GYJ_SLOT_IDS))
 
-    def test_docker_enables_gyj_startup_login_check(self):
+    def test_docker_disables_gyj_startup_login_check(self):
         compose = (app_module.RUNTIME_BASE_DIR and os.path.join(
             os.path.dirname(__file__), "..", "docker-compose.yml"
         ))
         with open(compose, encoding="utf-8") as file:
-            self.assertIn('CRM_GYJ_STARTUP_LOGIN_AUTO_CHECK: "1"', file.read())
+            self.assertIn('CRM_GYJ_STARTUP_LOGIN_AUTO_CHECK: "0"', file.read())
 
     def test_channel_one_preserves_admin_profile_and_others_are_distinct(self):
         with tempfile.TemporaryDirectory() as runtime_dir:

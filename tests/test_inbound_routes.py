@@ -280,59 +280,24 @@ class GYJLoginFlowTest(unittest.TestCase):
         self.assertFalse(session.logged_in)
         self.assertEqual(page.gotos[0][0], app_module.GYJ_PURCHASE_IN_URL)
 
-    def test_expired_session_relogs_with_saved_credentials_and_recognized_captcha(self):
+    def test_expired_session_requires_manual_login_even_with_saved_credentials(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
         page = _RestorableGYJPage("https://cloud.gyjerp.com/user/login")
         page.url = "https://cloud.gyjerp.com/bill/purchase_in"
         session.page = page
         session.logged_in = True
 
-        def login_step1(username, password):
-            session.waiting_captcha = True
-            return True, "GYJ 等待验证码"
-
-        def login_step2(captcha):
-            session.logged_in = True
-            session.waiting_captcha = False
-            page.url = app_module.GYJ_PURCHASE_IN_URL
-            return True, "GYJ 登录成功"
-
-        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "user", "password": "saved"}), \
-                mock.patch.object(app_module, "_recognize_gyj_captcha", return_value="J8NC"), \
-                mock.patch.object(session, "login_step1", side_effect=login_step1) as step1, \
-                mock.patch.object(session, "login_step2", side_effect=login_step2) as step2, \
-                mock.patch.object(session, "captcha_preview", return_value="data:image/png;base64,aW1hZ2U="):
+        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "user", "password": "saved"}) as saved, \
+                mock.patch.object(session, "login_step1") as step1, \
+                mock.patch.object(session, "login_step2") as step2:
             success, message = session.check_login_status()
-
-        self.assertTrue(success)
-        self.assertTrue(session.logged_in)
-        self.assertFalse(session.waiting_captcha)
-        step1.assert_called_once_with("user", "saved")
-        step2.assert_called_once_with("J8NC")
-
-    def test_failed_auto_captcha_stops_and_exposes_manual_captcha(self):
-        session = app_module.GYJSession(TEST_DATA_DIR.name)
-        page = _RestorableGYJPage("https://cloud.gyjerp.com/user/login")
-        page.url = "https://cloud.gyjerp.com/bill/purchase_in"
-        session.page = page
-        session.logged_in = True
-
-        def login_step1(username, password):
-            session.waiting_captcha = True
-            return True, "GYJ 等待验证码"
-
-        with mock.patch.object(app_module, "get_remembered_gyj_credentials_secret", return_value={"username": "user", "password": "saved"}), \
-                mock.patch.object(app_module, "_recognize_gyj_captcha", return_value=""), \
-                mock.patch.object(session, "login_step1", side_effect=login_step1) as step1, \
-                mock.patch.object(session, "captcha_preview", return_value="data:image/png;base64,aW1hZ2U="):
-            success, message = session.check_login_status()
-            again, _ = session.check_login_status()
 
         self.assertFalse(success)
-        self.assertFalse(again)
-        self.assertTrue(session.waiting_captcha)
-        self.assertIn("验证码", message)
-        step1.assert_called_once_with("user", "saved")
+        self.assertFalse(session.logged_in)
+        self.assertIn("未登录", message)
+        saved.assert_not_called()
+        step1.assert_not_called()
+        step2.assert_not_called()
 
     def test_login_status_reopens_persistent_session_before_reporting_login_required(self):
         session = app_module.GYJSession(TEST_DATA_DIR.name)
