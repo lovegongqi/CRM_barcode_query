@@ -168,6 +168,8 @@ class AccountsFrontendTest(unittest.TestCase):
                 gyjChannels: [{id: 'gyj-2', waiting_captcha: false}],
                 document: {getElementById() { return {value: 'OLD'}; }},
                 renderGyjManagementState() { calls.push('render'); },
+                gyjSlotStateMessage(slot) { return `通道 ${slot.id}：未启动`; },
+                setGyjMessage(message) { calls.push(message); },
                 showGyjCaptchaPlaceholder(message) { calls.push(message); },
                 refreshGyjCaptcha() { calls.push('captcha'); },
                 async refreshSelectedGyjChannel() { calls.push('check'); },
@@ -178,10 +180,65 @@ class AccountsFrontendTest(unittest.TestCase):
                 await vm.runInContext("selectGyjChannel('gyj-2')", context);
                 assert.equal(context.selectedGyjSlotId, 'gyj-2');
                 assert.equal(context.gyjSelectionRevision, 1);
-                assert.deepEqual(calls, ['render', '当前通道暂无验证码', 'check']);
+                assert.deepEqual(calls, ['render', '通道 gyj-2：未启动', '当前通道暂无验证码', 'check']);
             })().catch(error => { console.error(error); process.exitCode = 1; });
             """,
             ["selectGyjChannel"],
+        )
+
+    def test_gyj_poll_updates_message_when_selected_channel_stops(self):
+        self.run_node(
+            r"""
+            const messages = [];
+            const context = {
+                console,
+                selectedGyjSlotId: 'gyj-5',
+                gyjChannels: [{id: 'gyj-5', logged_in: true, browser_running: true}],
+                fetch: async () => ({json: async () => ({success: true, slots: [
+                    {id: 'gyj-5', logged_in: false, browser_running: false}
+                ]})}),
+                gyjSlotStateText(slot) { return slot.logged_in ? '已登录' : '未启动'; },
+                gyjSlotStateMessage(slot) { return `通道 ${slot.id}：未启动`; },
+                renderGyjManagementState(data) { context.gyjChannels = data.slots; },
+                setGyjMessage(message) { messages.push(message); },
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext('loadGyjChannels()', context);
+                assert.deepEqual(messages, ['通道 gyj-5：未启动']);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["loadGyjChannels"],
+        )
+
+    def test_gyj_verified_message_cannot_claim_logged_in_for_stopped_channel(self):
+        self.run_node(
+            r"""
+            const messages = [];
+            const context = {
+                console,
+                selectedGyjSlotId: 'gyj-5',
+                gyjSelectionRevision: 0,
+                gyjChannels: [],
+                URLSearchParams,
+                fetch: async () => ({json: async () => ({success: true,
+                    message: 'GYJ 已登录', slots: [
+                        {id: 'gyj-5', logged_in: false, browser_running: false}
+                    ]})}),
+                renderGyjManagementState(data) { context.gyjChannels = data.slots; },
+                gyjSlotStateText(slot) { return '未启动'; },
+                gyjSlotStateMessage(slot) { return `通道 ${slot.id}：未启动`; },
+                setGyjMessage(message) { messages.push(message); },
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext('refreshSelectedGyjChannel()', context);
+                assert.deepEqual(messages, ['通道 gyj-5：未启动']);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["refreshSelectedGyjChannel"],
         )
 
     def test_selected_gyj_channel_is_periodically_verified(self):

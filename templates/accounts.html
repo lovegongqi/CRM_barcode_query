@@ -550,6 +550,10 @@ function gyjSlotStateText(slot) {
     return slot.browser_running ? '未登录' : '未启动';
 }
 
+function gyjSlotStateMessage(slot) {
+    return `GYJ 通道 ${String(slot.id || selectedGyjSlotId).split('-').pop()}：${gyjSlotStateText(slot)}`;
+}
+
 function renderGyjManagementState(data) {
     if (Array.isArray(data?.slots)) gyjChannels = data.slots;
     const loggedInCount = Number(data?.logged_in_count ?? gyjChannels.filter(slot => slot.logged_in).length);
@@ -572,7 +576,13 @@ async function loadGyjChannels(refreshSelected = false) {
         setGyjMessage((data && data.error) || 'GYJ 通道状态读取失败');
         return;
     }
+    const previous = gyjChannels.find(slot => slot.id === selectedGyjSlotId);
+    const previousState = previous ? gyjSlotStateText(previous) : '';
     renderGyjManagementState(data);
+    const selected = gyjChannels.find(slot => slot.id === selectedGyjSlotId);
+    if (selected && previousState && previousState !== gyjSlotStateText(selected)) {
+        setGyjMessage(gyjSlotStateMessage(selected));
+    }
     if (refreshSelected) await refreshSelectedGyjChannel();
 }
 
@@ -587,8 +597,10 @@ async function refreshSelectedGyjChannel() {
         return;
     }
     renderGyjManagementState(data);
-    setGyjMessage(data.message || gyjSlotStateText(gyjChannels.find(slot => slot.id === selectedGyjSlotId) || {}));
     const selected = gyjChannels.find(slot => slot.id === selectedGyjSlotId) || {};
+    setGyjMessage(data.message === 'GYJ 已登录' && !selected.logged_in
+        ? gyjSlotStateMessage(selected)
+        : (data.message || gyjSlotStateMessage(selected)));
     if (selected.waiting_captcha) await refreshGyjCaptcha(false);
 }
 
@@ -600,6 +612,7 @@ async function selectGyjChannel(slotId) {
     document.getElementById('gyjCaptcha').value = '';
     renderGyjManagementState({slots: gyjChannels});
     const selected = gyjChannels.find(slot => slot.id === slotId) || {};
+    setGyjMessage(gyjSlotStateMessage({id: slotId, ...selected}));
     showGyjCaptchaPlaceholder(selected.waiting_captcha ? '正在读取验证码…' : '当前通道暂无验证码');
     await refreshSelectedGyjChannel();
 }
