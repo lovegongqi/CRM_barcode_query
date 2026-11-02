@@ -402,6 +402,42 @@ class AccountsFrontendTest(unittest.TestCase):
             ["startGyjChannelLogin"],
         )
 
+    def test_failed_gyj_captcha_submission_refreshes_the_current_image(self):
+        self.run_node(
+            r"""
+            const calls = [];
+            const elements = {
+                gyjCaptcha: {value: 'ABCD'},
+                gyjCaptchaButton: {disabled: false},
+            };
+            const context = {
+                console,
+                selectedGyjSlotId: 'gyj-5',
+                gyjSelectionRevision: 0,
+                document: {getElementById(id) { return elements[id]; }},
+                fetch: async () => ({json: async () => ({
+                    success: false,
+                    slot_id: 'gyj-5',
+                    waiting_captcha: true,
+                    message: 'GYJ 验证码无效或登录未完成',
+                })}),
+                renderGyjManagementState() {},
+                refreshGyjCaptcha: async (regenerate, slotId) => calls.push([regenerate, slotId]),
+                loadGyjChannels: async () => {},
+                setGyjMessage() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            (async () => {
+                await vm.runInContext('submitGyjCaptcha()', context);
+                assert.deepEqual(calls, [[false, 'gyj-5']]);
+                assert.equal(elements.gyjCaptcha.value, '');
+                assert.equal(elements.gyjCaptchaButton.disabled, false);
+            })().catch(error => { console.error(error); process.exitCode = 1; });
+            """,
+            ["submitGyjCaptcha"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

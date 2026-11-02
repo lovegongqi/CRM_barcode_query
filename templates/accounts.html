@@ -706,6 +706,7 @@ async function submitGyjCaptcha() {
             input.value = '';
             renderGyjManagementState(data);
             setGyjMessage(data.message || data.error || (data.success ? 'GYJ 登录成功' : '验证码验证失败'));
+            if (!data.success && data.waiting_captcha) await refreshGyjCaptcha(false, slotId);
         }
         await loadGyjChannels();
     } catch (error) {
