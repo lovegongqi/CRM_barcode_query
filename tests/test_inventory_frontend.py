@@ -331,6 +331,62 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def test_mobile_toolbar_and_collapsed_items_fit_two_rows(self):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            try:
+                page = browser.new_page(viewport={"width": 375, "height": 667})
+                item = """<article class="inventory-item">
+                    <div class="inventory-item-top">
+                      <div class="inventory-item-product">
+                        <span class="inventory-item-barcode">10000001201</span>
+                        <strong class="inventory-item-name">增压泵电源</strong>
+                      </div>
+                      <div class="inventory-item-top-actions">
+                        <span class="inventory-state-badge">待盘点</span>
+                        <button class="btn btn-secondary inventory-item-toggle">展开</button>
+                      </div>
+                    </div>
+                    <p class="inventory-item-details inventory-item-full-only">详情</p>
+                    <div class="inventory-item-metrics">
+                      <div class="inventory-metric"><span>GYJ 账面</span><strong>12</strong></div>
+                      <div class="inventory-metric"><span>实盘</span><strong>—</strong></div>
+                      <div class="inventory-metric"><span>差异</span><strong>—</strong></div>
+                    </div>
+                    <div class="inventory-item-actions">
+                      <button class="btn btn-secondary inventory-item-primary-action">盘点数量</button>
+                    </div>
+                  </article>"""
+                page.set_content(
+                    f"""
+                    <style>{APP_LAYOUT_STYLE.read_text(encoding='utf-8')}</style>
+                    <style>{AURORA_STYLE.read_text(encoding='utf-8')}</style>
+                    <style>{STYLE.read_text(encoding='utf-8')}</style>
+                    <div style="width:335px">
+                      <div class="inventory-toolbar">
+                        <label class="inventory-search-field"><span>搜索或扫描商品</span><input placeholder="输入商品条码或名称"></label>
+                        <label class="inventory-filter-field"><span>产品类别</span><select><option>全部类别</option></select></label>
+                        <label class="inventory-filter-field"><span>查看范围</span><select><option>全部商品</option></select></label>
+                      </div>
+                      <div class="inventory-items">{item}{item}</div>
+                    </div>
+                    """
+                )
+                page.evaluate("document.body.dataset.auroraPage = 'inventory'")
+                toolbar = page.locator(".inventory-toolbar").bounding_box()
+                cards = page.locator(".inventory-item")
+                first = cards.nth(0).bounding_box()
+                second = cards.nth(1).bounding_box()
+                count = cards.nth(0).locator(".inventory-item-primary-action").bounding_box()
+                toggle = cards.nth(0).locator(".inventory-item-toggle").bounding_box()
+                self.assertLessEqual(toolbar["height"], 82)
+                self.assertLessEqual(first["height"], 96)
+                self.assertLessEqual(second["y"] + second["height"] - first["y"], 202)
+                self.assertGreaterEqual(count["height"], 32)
+                self.assertGreaterEqual(toggle["height"], 28)
+            finally:
+                browser.close()
+
     def test_mobile_summary_cards_share_one_row(self):
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()

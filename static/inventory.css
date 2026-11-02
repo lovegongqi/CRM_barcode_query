@@ -1432,8 +1432,18 @@ article.inventory-item { cursor: default; }
         margin-top: 2px;
         font-size: 15px;
     }
-    .inventory-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .inventory-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin-bottom: 6px; }
     .inventory-toolbar .inventory-search-field { grid-column: 1 / -1; }
+    .inventory-toolbar .inventory-search-field span {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+    }
+    .inventory-toolbar .inventory-search-field input { min-height: 38px; height: 38px; }
     .inventory-toolbar .inventory-filter-field {
         grid-template-columns: auto minmax(0, 1fr);
         align-items: center;
@@ -1451,11 +1461,48 @@ article.inventory-item { cursor: default; }
     .inventory-category-options { width: max(100%, 190px); }
     .inventory-item { padding: 10px; }
     .inventory-item:not(.is-expanded) .inventory-item-full-only { display: none !important; }
+    .inventory-item:not(.is-expanded) {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 92px;
+        gap: 4px 6px;
+        padding: 7px 8px;
+    }
+    .inventory-item:not(.is-expanded) .inventory-item-top { grid-column: 1 / -1; }
+    .inventory-item:not(.is-expanded) .inventory-item-product { display: grid; gap: 1px; }
+    .inventory-item:not(.is-expanded) .inventory-item-name {
+        overflow: hidden;
+        font-size: 12px;
+        line-height: 1.2;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .inventory-item:not(.is-expanded) .inventory-item-barcode { line-height: 1.1; }
+    .inventory-item:not(.is-expanded) .inventory-serial-cache-badge { display: none; }
+    .inventory-item:not(.is-expanded) .inventory-item-metrics {
+        grid-column: 1;
+        gap: 2px;
+        margin: 0;
+    }
+    .inventory-item:not(.is-expanded) .inventory-metric { padding: 0; background: none; }
+    .inventory-item:not(.is-expanded) .inventory-metric span { font-size: 9px; white-space: nowrap; }
+    .inventory-item:not(.is-expanded) .inventory-metric strong { margin-top: 1px; font-size: 13px; }
+    .inventory-item:not(.is-expanded) .inventory-item-actions {
+        grid-column: 2;
+        grid-row: 2;
+        display: block;
+        margin: 0;
+    }
+    .inventory-item:not(.is-expanded) .inventory-item-actions .btn {
+        width: 100%;
+        min-height: 36px;
+        padding: 4px;
+        font-size: 10px;
+    }
     .inventory-item-toggle {
         display: inline-flex;
-        min-height: 32px;
-        padding: 5px 9px;
-        font-size: 11px;
+        min-height: 30px;
+        padding: 4px 7px;
+        font-size: 10px;
     }
     .inventory-item-top,
     .inventory-item-product,
