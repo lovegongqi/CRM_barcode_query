@@ -690,6 +690,54 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             """
         )
 
+    def test_completed_card_uses_count_time_book_for_saved_difference(self):
+        self.run_node(
+            r"""
+            function makeNode(tag = 'div') {
+                return {
+                    tag, className: '', textContent: '', value: '', disabled: false,
+                    dataset: {}, children: [], attributes: {}, listeners: {},
+                    append(...nodes) { this.children.push(...nodes); },
+                    replaceChildren(...nodes) { this.children = nodes; },
+                    setAttribute(name, value) { this.attributes[name] = String(value); },
+                    addEventListener(name, callback) { this.listeners[name] = callback; },
+                };
+            }
+            const root = makeNode('div');
+            const context = {
+                console, URLSearchParams, encodeURIComponent, BigInt, Uint8Array,
+                document: {
+                    hidden: false, addEventListener() {}, createElement: makeNode,
+                    getElementById(id) {
+                        if (id === 'inventoryItems') return root;
+                        if (id === 'inventoryFilters') return {value: ''};
+                        if (id === 'inventorySearch') return {value: ''};
+                        throw new Error('unexpected element ' + id);
+                    },
+                },
+                setTimeout, clearTimeout, setInterval() { return 1; }, clearInterval() {},
+            };
+            vm.createContext(context);
+            vm.runInContext(source, context);
+            vm.runInContext(`renderInventoryItems([
+                {barcode: '12020218', name: '25PPR热熔管', state: 'variance',
+                 completed_book_qty: '13', completed_actual_qty: '27',
+                 latest_book_qty: '8', diff_qty: '14'},
+                {barcode: '12020219', name: '32PPR热熔管', state: 'variance',
+                 completed_book_qty: '36', completed_actual_qty: '6',
+                 latest_book_qty: '23', diff_qty: '-30'}
+            ])`, context);
+            const metrics = root.children.map(row => row.children[2].children.map(metric =>
+                [metric.children[0].textContent, metric.children[1].textContent]));
+            assert.deepEqual(metrics, [
+                [['盘点时账面', '13'], ['实盘', '27'], ['差异', '14']],
+                [['盘点时账面', '36'], ['实盘', '6'], ['差异', '-30']],
+            ]);
+            assert.match(root.children[0].children[1].textContent, /最新 GYJ 账面 8/);
+            assert.match(root.children[1].children[1].textContent, /最新 GYJ 账面 23/);
+            """
+        )
+
     def test_carton_generation_preserves_suffix_width(self):
         self.run_node(
             r"""

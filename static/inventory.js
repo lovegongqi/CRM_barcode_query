@@ -321,7 +321,7 @@ function renderInventorySummary(task) {
         ['盘盈', computed.surplus, 'is-warn'],
         ['盘亏', computed.deficit, 'is-bad'],
         ['待序列号', computed.serial_pending, 'is-warn'],
-        ['账面合计', decimalSumText(visible.map(inventoryBookQuantity).filter((value) => value !== null)), ''],
+        ['当前账面', decimalSumText(visible.map(inventoryBookQuantity).filter((value) => value !== null)), ''],
     ];
     cards.forEach(([label, value, className]) => {
         const card = inventoryNode('div', `inventory-summary-card ${className}`.trim());
@@ -451,6 +451,12 @@ function renderInventoryItems(items) {
     }
     visible.forEach((item) => {
         const completed = inventoryIsCompleted(item);
+        const latestBook = inventoryBookQuantity(item);
+        const hasCountBook = item.completed_book_qty !== null && item.completed_book_qty !== undefined
+            && item.completed_book_qty !== '';
+        const countBook = hasCountBook ? String(item.completed_book_qty) : latestBook;
+        const latestBookNote = hasCountBook && latestBook !== null && latestBook !== countBook
+            ? ` · 最新 GYJ 账面 ${latestBook}` : '';
         const barcode = inventoryText(item.barcode, '');
         const expanded = inventoryExpandedBarcodes.has(barcode);
         const row = inventoryNode('article', `inventory-item${expanded ? ' is-expanded' : ''}`);
@@ -495,7 +501,7 @@ function renderInventoryItems(items) {
         const metrics = inventoryNode('div', 'inventory-item-metrics');
         const direction = decimalDirection(item.diff_qty);
         metrics.append(
-            inventoryMetric('GYJ 账面', inventoryBookQuantity(item)),
+            inventoryMetric(hasCountBook ? '盘点时账面' : 'GYJ 账面', countBook),
             inventoryMetric('实盘', inventoryActualQuantity(item)),
             inventoryMetric('差异', item.diff_qty, direction > 0 ? 'is-positive' : (direction < 0 ? 'is-negative' : '')),
         );
@@ -530,7 +536,7 @@ function renderInventoryItems(items) {
                 'p', 'inventory-item-details inventory-item-full-only',
                 item.data_error
                     ? `资料异常，不可盘：${item.data_error}`
-                    : inventoryDetailText(item),
+                    : inventoryDetailText(item) + latestBookNote,
             ),
             metrics,
             foot,
