@@ -730,11 +730,12 @@ class InventoryFrontendBehaviorTests(unittest.TestCase):
             const metrics = root.children.map(row => row.children[2].children.map(metric =>
                 [metric.children[0].textContent, metric.children[1].textContent]));
             assert.deepEqual(metrics, [
-                [['盘点时账面', '13'], ['实盘', '27'], ['差异', '14']],
-                [['盘点时账面', '36'], ['实盘', '6'], ['差异', '-30']],
+                [['差异账面', '13'], ['实盘', '27'], ['差异', '14']],
+                [['差异账面', '36'], ['实盘', '6'], ['差异', '-30']],
             ]);
             assert.match(root.children[0].children[1].textContent, /最新 GYJ 账面 8/);
             assert.match(root.children[1].children[1].textContent, /最新 GYJ 账面 23/);
+            assert(root.children[0].children.at(-1).children.some(button => button.textContent === '更新账面'));
             """
         )
 

@@ -11,6 +11,7 @@ let inventoryPollTimer = null;
 let inventorySearchTimer = null;
 let inventorySelectedCategories = new Set();
 let inventoryExpandedBarcodes = new Set();
+let inventoryBookRefreshPending = new Set();
 let currentCountItem = null;
 let countDialogEditable = false;
 let countMutationPending = false;
@@ -429,6 +430,34 @@ function replaceInventoryItem(item) {
     else inventoryTask.items.push(item);
 }
 
+async function refreshInventoryBook(barcode) {
+    if (!inventoryTask) return;
+    const taskId = inventoryTask.task_id;
+    const key = `${taskId}:${barcode}`;
+    if (inventoryBookRefreshPending.has(key)) return;
+    inventoryBookRefreshPending.add(key);
+    renderInventoryItems(inventoryTask.items || []);
+    try {
+        const data = await inventoryPost(
+            `/api/inventory/tasks/${encodeURIComponent(taskId)}/items/${encodeURIComponent(barcode)}/book/refresh`,
+            {},
+        );
+        if (inventoryTask && inventoryTask.task_id === taskId) {
+            acceptInventoryMutationVersion(data);
+            replaceInventoryItem(data.item);
+            await pollInventoryTask({force: true});
+            setInventoryNotice(`${barcode} 账面已更新，差异已重算。`, 'success');
+        }
+    } catch (error) {
+        setInventoryNotice(error.message, 'error');
+    } finally {
+        inventoryBookRefreshPending.delete(key);
+        if (inventoryTask && inventoryTask.task_id === taskId) {
+            renderInventoryItems(inventoryTask.items || []);
+        }
+    }
+}
+
 function toggleInventoryItemDetails(barcode) {
     const key = inventoryText(barcode, '');
     if (inventoryExpandedBarcodes.has(key)) inventoryExpandedBarcodes.delete(key);
@@ -501,7 +530,7 @@ function renderInventoryItems(items) {
         const metrics = inventoryNode('div', 'inventory-item-metrics');
         const direction = decimalDirection(item.diff_qty);
         metrics.append(
-            inventoryMetric(hasCountBook ? '盘点时账面' : 'GYJ 账面', countBook),
+            inventoryMetric(hasCountBook ? '差异账面' : 'GYJ 账面', countBook),
             inventoryMetric('实盘', inventoryActualQuantity(item)),
             inventoryMetric('差异', item.diff_qty, direction > 0 ? 'is-positive' : (direction < 0 ? 'is-negative' : '')),
         );
@@ -521,6 +550,17 @@ function renderInventoryItems(items) {
         count.disabled = Boolean(item.data_error);
         count.addEventListener('click', () => openCountItem(item.barcode));
         actions.append(count);
+        if (completed) {
+            const refreshing = inventoryTask && inventoryBookRefreshPending.has(`${inventoryTask.task_id}:${barcode}`);
+            const refresh = inventoryNode(
+                'button', 'btn btn-secondary inventory-item-full-only',
+                refreshing ? '更新中…' : '更新账面',
+            );
+            refresh.type = 'button';
+            refresh.disabled = Boolean(refreshing);
+            refresh.addEventListener('click', () => refreshInventoryBook(barcode));
+            actions.append(refresh);
+        }
         if (serialAction) {
             const serial = inventoryNode(
                 'button', 'btn btn-primary inventory-item-primary-action',
@@ -2338,7 +2378,7 @@ function renderInventoryAudit(events) {
         if (event.before_quantity != null || event.after_quantity != null) {
             row.append(inventoryNode(
                 'code', '',
-                `数量 ${inventoryText(event.before_quantity, '无')} → ${inventoryText(event.after_quantity, '无')}`,
+                `${event.event_type === 'count_book_refreshed' ? '账面' : '数量'} ${inventoryText(event.before_quantity, '无')} → ${inventoryText(event.after_quantity, '无')}`,
             ));
         }
         if (event.before_serial != null || event.after_serial != null) {

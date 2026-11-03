@@ -28,6 +28,7 @@ _AUDIT_EVENT_LABELS = {
     "count_entry_added": "新增分次数量",
     "count_entry_updated": "修改分次数量",
     "count_entry_deleted": "删除分次数量",
+    "count_book_refreshed": "更新账面",
     "carton_preset_changed": "修改商品箱规",
     "carton_created": "整箱录入",
     "carton_serial_added": "箱内补录",
@@ -1471,6 +1472,68 @@ class InventoryStore:
                 barcode, device_id,
                 self._count_entry_audit_details(entry_id, before, None),
                 timestamp,
+            )
+            connection.commit()
+            return self._count_mutation_result(connection, task_id, barcode)
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def rebase_count_book(self, owner, task_id, barcode, actor, book_quantity):
+        book_quantity = normalize_quantity(book_quantity)
+        connection = self.connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            task = self._task_for_owner(connection, owner, task_id)
+            if task["phase"] not in {"counting", "serial_check", "sync_error"}:
+                raise InventoryConflict("当前任务不能更新账面")
+            item = connection.execute(
+                "SELECT * FROM inventory_items WHERE task_id = ? AND barcode = ?",
+                (task_id, barcode),
+            ).fetchone()
+            if item is None:
+                raise InventoryNotFound("商品不存在")
+            if item["data_error"] or item["completed_counted_quantity"] is None:
+                raise InventoryConflict("该商品尚未完成数量盘点")
+            previous = normalize_quantity(item["completed_book_quantity"])
+            actual = normalize_quantity(item["completed_counted_quantity"])
+            difference = quantity_difference(actual, book_quantity)
+            state = (
+                "serial_complete" if item["status"] == "serial_complete"
+                else "matched" if difference == "0"
+                else "serial_pending" if item["has_serial"] else "variance"
+            )
+            timestamp = self._now_text()
+            latest_before = normalize_quantity(
+                item["latest_book_quantity"] or previous
+            )
+            if latest_before != book_quantity:
+                connection.execute(
+                    """INSERT INTO inventory_stock_movements
+                       (task_id, barcode, before_quantity, after_quantity,
+                        change_quantity, discovered_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (task_id, barcode, latest_before, book_quantity,
+                     quantity_difference(book_quantity, latest_before), timestamp),
+                )
+            connection.execute(
+                """UPDATE inventory_items
+                   SET book_quantity = ?, completed_book_quantity = ?,
+                       latest_book_quantity = ?, expected_current_quantity = ?,
+                       difference = ?, status = ?, updated_at = ?
+                   WHERE task_id = ? AND barcode = ?""",
+                (book_quantity, book_quantity, book_quantity, actual,
+                 difference, state, timestamp, task_id, barcode),
+            )
+            self._bump_version(connection, task_id)
+            self._audit(
+                connection, task_id, "count_book_refreshed", actor, barcode,
+                details=json.dumps({
+                    "before": {"quantity": previous},
+                    "after": {"quantity": book_quantity},
+                }, ensure_ascii=False), created_at=timestamp,
             )
             connection.commit()
             return self._count_mutation_result(connection, task_id, barcode)
@@ -3070,6 +3133,7 @@ class InventoryStore:
                 details = {}
             if (
                 row["event_type"].startswith("count_entry_")
+                or row["event_type"] == "count_book_refreshed"
                 or row["event_type"] == "count_adjusted_for_stock_movement"
                 or row["event_type"] in {
                     "serial_scanned", "serial_scan_reclassified",

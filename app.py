@@ -13233,6 +13233,19 @@ def api_inventory_count_item(task_id, barcode):
 
 
 @app.route(
+    "/api/inventory/tasks/<task_id>/items/<path:barcode>/book/refresh",
+    methods=["POST"],
+)
+@_inventory_api
+def api_inventory_refresh_count_book(task_id, barcode):
+    owner, actor = _inventory_identity()
+    task_id = _inventory_path_value(task_id, "任务标识")
+    barcode = _inventory_path_value(barcode, "商品条码")
+    item = inventory_service.refresh_count_book(owner, task_id, barcode, actor)
+    return _inventory_mutation_response("item", item, owner, task_id)
+
+
+@app.route(
     "/api/inventory/tasks/<task_id>/items/<path:barcode>/count-entries",
     methods=["GET", "POST"],
 )

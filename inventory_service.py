@@ -244,6 +244,19 @@ class InventoryService:
         with self._completed_sync_guard(owner, task_id):
             return self._sync_completed_items_locked(owner, task_id, force)
 
+    def refresh_count_book(self, owner, task_id, barcode, actor):
+        with self._completed_sync_guard(owner, task_id):
+            snapshot = self._snapshot(
+                owner, task_id, {"counting", "serial_check", "sync_error"}
+            )
+            item = self._item(snapshot, barcode)
+            if item.get("data_error") or item.get("completed_counted_quantity") is None:
+                raise InventoryConflict("该商品尚未完成数量盘点")
+            latest = self._live_stock(owner, barcode)
+            return self.store.rebase_count_book(
+                owner, task_id, barcode, actor, latest
+            )
+
     def _sync_completed_items_locked(self, owner, task_id, force):
         snapshot = self._snapshot(
             owner, task_id, {"counting", "serial_check", "sync_error"}

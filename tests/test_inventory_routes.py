@@ -279,6 +279,22 @@ class InventoryRouteTest(unittest.TestCase):
             [("admin", "task-1"), ("admin", "task-1")],
         )
 
+    def test_refresh_count_book_uses_selected_product_and_current_actor(self):
+        self.service.refresh_count_book.return_value = {
+            "barcode": "A/B", "completed_book_qty": "27",
+            "diff_qty": "0", "task_version": 4,
+        }
+        response = self.login_account("counter").post(
+            "/api/inventory/tasks/task-1/items/A%2FB/book/refresh"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["item"]["completed_book_qty"], "27")
+        self.assertEqual(response.get_json()["version"], 4)
+        self.service.refresh_count_book.assert_called_once_with(
+            "admin", "task-1", "A/B", "counter"
+        )
+
     def test_real_stocktake_and_history_are_shared_but_actor_is_preserved(self):
         class SharedWorker:
             def load_inventory_catalog(self):

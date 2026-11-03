@@ -1308,6 +1308,35 @@ class InventoryServiceTests(unittest.TestCase):
             ).fetchall()
         self.assertEqual(movement, [("2", "1", "-1")])
 
+    def test_refresh_count_book_reads_only_selected_product_and_rebases_difference(self):
+        task = self.create_task()
+        task_id = task["task_id"]
+        self.service.add_count_entry("admin", task_id, "A1", "device-a", "甲", "27")
+        self.worker.stock["A1"] = "27"
+
+        updated = self.service.refresh_count_book("admin", task_id, "A1", "甲")
+
+        self.assertEqual(self.worker.stock_reads, ["A1"])
+        self.assertEqual(self.worker.totals_reads, 0)
+        self.assertEqual(updated["completed_book_qty"], "27")
+        self.assertEqual(updated["completed_actual_qty"], "27")
+        self.assertEqual(updated["latest_book_qty"], "27")
+        self.assertEqual(updated["diff_qty"], "0")
+        self.assertEqual(updated["state"], "matched")
+        other = next(row for row in self.store.get_task_snapshot("admin", task_id)["items"]
+                     if row["barcode"] == "B2")
+        self.assertIsNone(other["latest_book_qty"])
+        audit = self.store.list_audit_events("admin", task_id, barcode="A1")
+        refreshed = next(event for event in audit if event["event_type"] == "count_book_refreshed")
+        self.assertEqual((refreshed["before_quantity"], refreshed["after_quantity"]), ("2", "27"))
+
+        self.worker.stock_failures["A1"] = "GYJ 暂时不可读"
+        with self.assertRaises(InventoryServiceError):
+            self.service.refresh_count_book("admin", task_id, "A1", "甲")
+        persisted = next(row for row in self.store.get_task_snapshot("admin", task_id)["items"]
+                         if row["barcode"] == "A1")
+        self.assertEqual((persisted["completed_book_qty"], persisted["diff_qty"]), ("27", "0"))
+
     def test_reader_omitted_zero_stock_row_syncs_as_exact_zero(self):
         task = self.create_task()
         self.submit(task["task_id"], "B2", "1", device_id="device-b")
